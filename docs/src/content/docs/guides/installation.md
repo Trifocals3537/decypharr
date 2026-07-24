@@ -59,11 +59,38 @@ docker run -d \
 Download the latest release from [GitHub Releases](https://github.com/sirrobot01/decypharr/releases).
 
 ```bash
-# Extract
-tar -xzf decypharr_linux_amd64.tar.gz
+# Verify the downloaded archive against SHA256SUMS, then extract it
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf decypharr_Linux_x86_64.tar.gz
 
-# Run
+# Run directly
 ./decypharr --config /path/to/
+```
+
+### Run as a user service
+
+Linux release archives include a systemd user-service template. This keeps the
+service under your account and does not require Docker or root access after the
+host's FUSE prerequisites have been installed.
+
+```bash
+mkdir -p ~/.local/bin ~/.config/decypharr ~/.config/systemd/user
+install -m 0755 decypharr ~/.local/bin/decypharr
+install -m 0644 decypharr.service ~/.config/systemd/user/decypharr.service
+
+systemctl --user daemon-reload
+systemctl --user enable --now decypharr
+systemctl --user status decypharr
+```
+
+The supplied unit starts Decypharr with
+`--config ~/.config/decypharr`. To use an existing configuration elsewhere,
+edit the installed unit's `ExecStart` path before enabling it.
+
+Logs are available without Docker:
+
+```bash
+journalctl --user -u decypharr -f
 ```
 
 ## Managed (ElfHosted)

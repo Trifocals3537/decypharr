@@ -418,7 +418,7 @@ func (c *Config) SaveAuth(auth *Auth) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.AuthFile(), data, 0644)
+	return persistAuth(c.AuthFile(), data)
 }
 
 func (c *Config) NeedsAuth() bool {
@@ -679,7 +679,7 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(c.JsonFile(), data, 0644); err != nil {
+	if err := persistConfig(c.JsonFile(), data); err != nil {
 		fmt.Printf("Failed to write config file: %v\n", err)
 		return err
 	}
@@ -783,7 +783,7 @@ func (c *Config) ApplyRuntime(n *Config) {
 
 func (c *Config) createConfig() error {
 	// Create the directory if it doesn't exist
-	if err := os.MkdirAll(GetMainPath(), 0755); err != nil {
+	if err := os.MkdirAll(GetMainPath(), 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 	c.URLBase = "/"

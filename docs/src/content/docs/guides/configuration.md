@@ -42,11 +42,23 @@ Password is bcrypt-hashed. API token is auto-generated.
 
 ```json
 {
-  "max_active_downloads": 5
+  "max_active_downloads": 5,
+  "allowed_file_types": ["mkv", "mp4"],
+  "allow_samples": false,
+  "min_file_size": "10MB",
+  "max_file_size": ""
 }
 ```
 
 `max_active_downloads` is the shared active-processing limit for torrent and NZB downloads. Additional imports remain queued until an active download completes.
+
+| Field                  | Type   | Description                                      | Default       |
+|------------------------|--------|--------------------------------------------------|---------------|
+| `max_active_downloads` | int    | Shared active-processing limit                   | `5`           |
+| `allowed_file_types`   | array  | Extensions eligible for import                   | Media formats |
+| `allow_samples`        | bool   | Include files identified as samples              | `false`       |
+| `min_file_size`        | string | Minimum eligible file size                       | `""`          |
+| `max_file_size`        | string | Maximum eligible file size; empty is unlimited   | `""`          |
 
 ## Debrid Providers
 

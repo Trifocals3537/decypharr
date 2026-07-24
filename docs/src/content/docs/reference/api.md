@@ -43,17 +43,30 @@ curl -H "Authorization: Bearer TOKEN" \
   http://localhost:8282/api/config
 ```
 
-### POST /api/config
+### PATCH /api/config
 
-Update configuration.
+Update only the supplied configuration fields. Omitted fields are preserved.
+The request uses [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396)
+semantics, so setting a field to `null` removes it.
 
 ```bash
-curl -X POST \
+curl -X PATCH \
   -H "Authorization: Bearer TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"log_level": "debug"}' \
   http://localhost:8282/api/config
 ```
+
+### PUT /api/config
+
+Replace the editable configuration with a complete document. Authentication
+credentials and authentication enablement are managed separately and are not
+overwritten by this endpoint.
+
+`POST /api/config` remains temporarily available for older clients, but it is
+deprecated and rejects requests that omit the `debrids`, `mount`, or `usenet`
+sections. In compatibility mode it preserves other omitted fields. Use `PATCH`
+for all new partial-update integrations.
 
 ### GET /api/torrents
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -58,15 +59,17 @@ type ContentResponse struct {
 }
 
 type Server struct {
-	router       *chi.Mux
-	logger       zerolog.Logger
-	manager      *manager.Manager
-	stats        *stats.Collector
-	cookie       *sessions.CookieStore
-	templates    *template.Template
-	nzbUserAgent string
-	urlBase      string
-	restartFunc  func()
+	router         *chi.Mux
+	logger         zerolog.Logger
+	manager        *manager.Manager
+	stats          *stats.Collector
+	cookie         *sessions.CookieStore
+	templates      *template.Template
+	nzbUserAgent   string
+	urlBase        string
+	restartFunc    func()
+	configMu       sync.Mutex
+	restartPending bool
 }
 
 func New(mgr *manager.Manager) *Server {

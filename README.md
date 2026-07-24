@@ -25,7 +25,19 @@ Usenet streaming.
 
 ## Quick Start
 
-### Docker (Recommended)
+### Native Linux
+
+Build and validate the current branch before starting it:
+
+```bash
+go build -trimpath -o decypharr .
+./decypharr --config ~/.decypharr --check-config
+./decypharr --config ~/.decypharr
+```
+
+### Docker
+
+Docker remains supported, but it is not required:
 
 ```yaml
 services:

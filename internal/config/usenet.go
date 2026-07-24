@@ -75,7 +75,7 @@ func (u Usenet) IsZero() bool {
 	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == ""
 }
 
-func (c *Config) updateUsenetConfig() {
+func (c *Config) updateUsenetConfig(configRoot string) {
 	// Per-stream configuration defaults
 	if c.Usenet.MaxConnections == 0 {
 		c.Usenet.MaxConnections = 15 // Default: 15 connections per file
@@ -118,7 +118,7 @@ func (c *Config) updateUsenetConfig() {
 	}
 
 	if c.Usenet.DiskBufferPath == "" {
-		c.Usenet.DiskBufferPath = filepath.Join(GetMainPath(), "usenet", "streams")
+		c.Usenet.DiskBufferPath = filepath.Join(configRoot, "usenet", "streams")
 	}
 
 	for i, provider := range c.Usenet.Providers {

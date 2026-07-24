@@ -319,6 +319,26 @@ func (c *Config) loadConfig() error {
 	return nil
 }
 
+// LoadForValidation reads and normalizes an existing configuration without
+// creating files, generating credentials, or updating the process-wide
+// configuration singleton.
+func LoadForValidation(path string) (*Config, error) {
+	configFile := filepath.Join(path, "config.json")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("read config file %s: %w", configFile, err)
+	}
+
+	cfg := &Config{}
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config file %s: %w", configFile, err)
+	}
+
+	cfg.setDefaultsForPath(path, false)
+	cfg.applyEnvOverrides()
+	return cfg, nil
+}
+
 func (c *Config) Validate() error {
 	if err := validateDebrids(c.Debrids); err != nil {
 		return err
@@ -427,7 +447,7 @@ func (c *Config) NeedsAuth() bool {
 
 // migrateQBitTorrentToManager migrates deprecated QBitTorrent config to Manager
 // This ensures backward compatibility with existing configs
-func (c *Config) migrateQBitTorrentToManager() {
+func (c *Config) migrateQBitTorrentToManager(configRoot string) {
 	// If Manager fields are not set but QBitTorrent fields are, migrate them
 	if c.DownloadFolder == "" && c.QBitTorrent.DownloadFolder != "" {
 		c.DownloadFolder = c.QBitTorrent.DownloadFolder
@@ -451,7 +471,7 @@ func (c *Config) migrateQBitTorrentToManager() {
 
 	// Set default download folder if not set
 	if c.DownloadFolder == "" {
-		c.DownloadFolder = filepath.Join(GetMainPath(), "downloads")
+		c.DownloadFolder = filepath.Join(configRoot, "downloads")
 	}
 
 	// Set default categories if not set
@@ -487,8 +507,12 @@ func (c *Config) migrateNotifications() {
 }
 
 func (c *Config) setDefaults() {
+	c.setDefaultsForPath(GetMainPath(), true)
+}
+
+func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) {
 	// Migrate deprecated fields to Manager (backward compatibility)
-	c.migrateQBitTorrentToManager()
+	c.migrateQBitTorrentToManager(configRoot)
 	c.migrateNotifications()
 
 	if c.DefaultDownloadAction == "" {
@@ -503,7 +527,7 @@ func (c *Config) setDefaults() {
 	}
 
 	// Set usenet defaults
-	c.updateUsenetConfig()
+	c.updateUsenetConfig(configRoot)
 
 	firstDebrid := Debrid{}
 	if len(c.Debrids) > 0 {
@@ -629,19 +653,21 @@ func (c *Config) setDefaults() {
 			}
 		}
 	}
-	// Load the auth file
-	c.Auth = c.GetAuth()
+	if initializeAuth {
+		// Load the auth file.
+		c.Auth = c.GetAuth()
 
-	// Generate API token if auth is enabled and no token exists
-	if c.UseAuth {
-		if c.Auth == nil {
-			c.Auth = &Auth{}
-		}
-		if c.Auth.APIToken == "" {
-			if token, err := generateAPIToken(); err == nil {
-				c.Auth.APIToken = token
-				// Save the updated auth config
-				_ = c.SaveAuth(c.Auth)
+		// Generate an API token for the live runtime if auth is enabled and no
+		// token exists. Read-only validation intentionally skips this block.
+		if c.UseAuth {
+			if c.Auth == nil {
+				c.Auth = &Auth{}
+			}
+			if c.Auth.APIToken == "" {
+				if token, err := generateAPIToken(); err == nil {
+					c.Auth.APIToken = token
+					_ = c.SaveAuth(c.Auth)
+				}
 			}
 		}
 	}

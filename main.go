@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -27,10 +28,12 @@ func main() {
 
 	var configPath string
 	var pprofAddr string
+	var checkConfig bool
 
 	// Create a default config directory if it doesn't exist
 	flag.StringVar(&configPath, "config", "", "path to the data folder")
 	flag.StringVar(&pprofAddr, "pprof", ":6060", "pprof server address (set to empty to disable)")
+	flag.BoolVar(&checkConfig, "check-config", false, "validate configuration without starting services")
 	flag.Parse()
 
 	// get enable pprof flag from environment variable if not set via flag
@@ -44,6 +47,21 @@ func main() {
 		}
 		defaultConfigDir := filepath.Join(defaultDir, ".decypharr")
 		configPath = defaultConfigDir
+	}
+
+	if checkConfig {
+		cfg, err := config.LoadForValidation(configPath)
+		if err != nil {
+			log.Fatalf("Decypharr configuration check failed: %v", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			log.Fatalf("Decypharr configuration check failed: %v", err)
+		}
+		fmt.Printf(
+			"Decypharr configuration is valid: %s\n",
+			filepath.Join(configPath, "config.json"),
+		)
+		return
 	}
 
 	config.SetConfigPath(configPath)

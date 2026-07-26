@@ -156,8 +156,9 @@ func New(mgr *manager.Manager) *Server {
 			})
 		})
 
-		//webhooks
-		r.Post("/webhooks/tautulli", s.handleTautulli)
+		// Webhooks can trigger repair work and require the same bearer token or
+		// authenticated session as the rest of the control-plane API.
+		r.With(s.authMiddleware).Post("/webhooks/tautulli", s.handleTautulli)
 	})
 	s.router = r
 	return s
@@ -196,6 +197,15 @@ func (s *Server) Start(ctx context.Context) error {
 			Bool("authentication", cfg.UseAuth).
 			Msg("Authentication is disabled on a non-loopback HTTP listener; the UI, APIs, and provider credentials may be exposed. Bind to 127.0.0.1 or enable authentication before allowing remote access")
 	}
+	if !isLoopbackBindAddress(cfg.BindAddress) &&
+		!cfg.DisableWebDav &&
+		(!cfg.UseAuth || !cfg.EnableWebdavAuth) {
+		s.logger.Warn().
+			Str("bind_address", cfg.BindAddress).
+			Bool("authentication", cfg.UseAuth).
+			Bool("webdav_authentication", cfg.EnableWebdavAuth).
+			Msg("WebDAV is exposed on a non-loopback listener without effective authentication; disable WebDAV or enable both application and WebDAV authentication")
+	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddress, cfg.Port)
 	listener, err := net.Listen("tcp", addr)
@@ -226,19 +236,7 @@ func insecureRemoteAccess(bindAddress string, useAuth bool) bool {
 }
 
 func isLoopbackBindAddress(bindAddress string) bool {
-	host := strings.TrimSpace(bindAddress)
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-
-	host = strings.TrimPrefix(host, "[")
-	host = strings.TrimSuffix(host, "]")
-	if zoneIndex := strings.LastIndexByte(host, '%'); zoneIndex >= 0 {
-		host = host[:zoneIndex]
-	}
-
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return config.IsLoopbackBindAddress(bindAddress)
 }
 
 func serveHTTP(ctx context.Context, srv *http.Server, listener net.Listener, shutdownTimeout time.Duration) error {

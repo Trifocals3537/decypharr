@@ -3,10 +3,8 @@ package server
 import (
 	"net/http"
 
-	json "github.com/bytedance/sonic"
-
 	"github.com/sirrobot01/decypharr/internal/config"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +31,16 @@ func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&credentials); err != nil {
+	if err := utils.DecodeJSONRequestBounded(
+		w,
+		r,
+		&credentials,
+		utils.MaxControlRequestBytes,
+	); err != nil {
+		if utils.IsRequestTooLarge(err) {
+			http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -66,7 +73,18 @@ func (s *Server) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
-	authCfg := cfg.GetAuth()
+	if !registrationAllowed(cfg) {
+		if cfg.NeedsAuth() && !isLoopbackBindAddress(cfg.BindAddress) {
+			http.Error(
+				w,
+				"Remote registration is disabled; run decypharr --config PATH --set-auth USERNAME from the host",
+				http.StatusForbidden,
+			)
+			return
+		}
+		http.Error(w, "Registration is not available", http.StatusForbidden)
+		return
+	}
 
 	if r.Method == "GET" {
 		data := map[string]any{
@@ -81,6 +99,19 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := utils.ParseAnyFormBounded(
+		w,
+		r,
+		utils.MaxControlRequestBytes,
+	); err != nil {
+		if utils.IsRequestTooLarge(err) {
+			http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 	confirmPassword := r.FormValue("confirmPassword")
@@ -90,19 +121,17 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		http.Error(w, "Error processing password", http.StatusInternalServerError)
+	if err := config.ValidateAuthCredentials(username, password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Set the credentials
-	authCfg.Username = username
-	authCfg.Password = string(hashedPassword)
-
-	if err := cfg.SaveAuth(authCfg); err != nil {
+	if err := cfg.SetAuthCredentials(username, password); err != nil {
+		s.logger.Error().Err(err).Msg("failed to save registration credentials")
 		http.Error(w, "Error saving credentials", http.StatusInternalServerError)
+		return
+	}
+	if err := cfg.Save(); err != nil {
+		http.Error(w, "Error saving authentication setting", http.StatusInternalServerError)
 		return
 	}
 
@@ -116,6 +145,12 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func registrationAllowed(cfg *config.Config) bool {
+	return cfg != nil &&
+		cfg.NeedsAuth() &&
+		isLoopbackBindAddress(cfg.BindAddress)
 }
 
 func (s *Server) IndexHandler(w http.ResponseWriter, r *http.Request) {

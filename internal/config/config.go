@@ -319,6 +319,9 @@ func (c *Config) loadConfig() error {
 		}
 		return fmt.Errorf("error reading config file: %w", err)
 	}
+	if err := os.Chmod(configFile, privateFileMode); err != nil {
+		return fmt.Errorf("secure config file permissions: %w", err)
+	}
 
 	// Parse JSON
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -466,6 +469,9 @@ func (c *Config) loadAuth() (*Auth, error) {
 			return c.Auth, nil
 		}
 		return nil, fmt.Errorf("read auth config %s: %w", authFile, err)
+	}
+	if err := os.Chmod(authFile, privateFileMode); err != nil {
+		return nil, fmt.Errorf("secure auth config permissions: %w", err)
 	}
 
 	trimmed := strings.TrimSpace(string(data))

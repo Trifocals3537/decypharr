@@ -20,7 +20,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"github.com/sourcegraph/conc/iter"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type mountCacheCleaner interface {
@@ -1155,25 +1154,56 @@ func (s *Server) handleRefreshAPIToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	if !cfg.UseAuth && !isLoopbackBindAddress(cfg.BindAddress) {
+		http.Error(
+			w,
+			"Authentication must be enabled from the host with --set-auth before remote access",
+			http.StatusForbidden,
+		)
+		return
+	}
+
 	var req struct {
 		Username        string `json:"username"`
 		Password        string `json:"password"`
 		ConfirmPassword string `json:"confirm_password"`
 	}
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := utils.DecodeJSONRequestBounded(
+		w,
+		r,
+		&req,
+		utils.MaxControlRequestBytes,
+	); err != nil {
+		if utils.IsRequestTooLarge(err) {
+			http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
-	}
-
-	cfg := config.Get()
-	auth := cfg.GetAuth()
-	if auth == nil {
-		auth = &config.Auth{}
 	}
 
 	// Check if trying to disable authentication (both empty)
 	if req.Username == "" && req.Password == "" {
+		if !cfg.UseAuth {
+			http.Error(w, "Authentication is already disabled", http.StatusBadRequest)
+			return
+		}
+		if !isLoopbackBindAddress(cfg.BindAddress) {
+			http.Error(
+				w,
+				"Authentication cannot be disabled on a non-loopback listener",
+				http.StatusForbidden,
+			)
+			return
+		}
+
 		// Disable authentication
+		auth := cfg.GetAuth()
+		if auth == nil {
+			http.Error(w, "Authentication is not configured", http.StatusConflict)
+			return
+		}
 		cfg.UseAuth = false
 		auth.Username = ""
 		auth.Password = ""
@@ -1194,36 +1224,17 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if req.Username == "" {
-		http.Error(w, "Username is required", http.StatusBadRequest)
-		return
-	}
-	if req.Password == "" {
-		http.Error(w, "Password is required", http.StatusBadRequest)
-		return
-	}
 	if req.Password != req.ConfirmPassword {
 		http.Error(w, "Passwords do not match", http.StatusBadRequest)
 		return
 	}
 
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to hash password")
-		http.Error(w, "Failed to process password", http.StatusInternalServerError)
+	if err := config.ValidateAuthCredentials(req.Username, req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Update auth settings
-	auth.Username = req.Username
-	auth.Password = string(hashedPassword)
-	cfg.UseAuth = true
-
-	// Save auth config
-	if err := cfg.SaveAuth(auth); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to save auth config")
+	if err := cfg.SetAuthCredentials(req.Username, req.Password); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to save authentication settings")
 		http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
 		return
 	}

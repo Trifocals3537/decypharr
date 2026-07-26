@@ -50,6 +50,10 @@ const (
 	// Provider metadata should be far smaller than this in normal operation.
 	MaxJSONResponseBytes int64 = 32 << 20
 
+	// MaxControlRequestBytes bounds small JSON/form control-plane requests such
+	// as login, registration, authentication changes, and initial setup.
+	MaxControlRequestBytes int64 = 64 << 10
+
 	metadataDownloadTimeout = 30 * time.Second
 )
 
@@ -257,6 +261,38 @@ func DecodeJSONResponseBounded(
 	}
 }
 
+// DecodeJSONRequestBounded decodes exactly one JSON value from an HTTP request
+// and enforces a hard total-body limit for both fixed-length and chunked
+// bodies.
+func DecodeJSONRequestBounded(
+	w http.ResponseWriter,
+	r *http.Request,
+	destination any,
+	maxRequestBytes int64,
+) error {
+	if r == nil || r.Body == nil {
+		return fmt.Errorf("JSON request body is required")
+	}
+	if maxRequestBytes <= 0 || maxRequestBytes > MaxJSONResponseBytes {
+		return fmt.Errorf(
+			"JSON request byte limit must be between 1 and %d",
+			MaxJSONResponseBytes,
+		)
+	}
+	if err := limitRequestBody(w, r, maxRequestBytes); err != nil {
+		return err
+	}
+
+	data, err := ReadAllLimited(r.Body, maxRequestBytes)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, destination); err != nil {
+		return fmt.Errorf("failed to decode JSON request: %w", err)
+	}
+	return nil
+}
+
 // ParseMultipartFormBounded applies a hard limit to the complete request body
 // before parsing it. ParseMultipartForm's maxMemory argument alone is not a
 // request-size limit; file parts beyond it are otherwise written to disk
@@ -311,6 +347,24 @@ func ParseFormBounded(
 		return err
 	}
 	return r.ParseForm()
+}
+
+// ParseAnyFormBounded parses either URL-encoded or multipart form data under a
+// hard total-body limit. Multipart fields remain in memory because this helper
+// is intended only for small control-plane forms.
+func ParseAnyFormBounded(
+	w http.ResponseWriter,
+	r *http.Request,
+	maxRequestBytes int64,
+) error {
+	if err := limitRequestBody(w, r, maxRequestBytes); err != nil {
+		return err
+	}
+	err := r.ParseMultipartForm(maxRequestBytes)
+	if errors.Is(err, http.ErrNotMultipart) {
+		return nil
+	}
+	return err
 }
 
 func limitRequestBody(w http.ResponseWriter, r *http.Request, maxRequestBytes int64) error {

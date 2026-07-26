@@ -117,6 +117,68 @@ func TestDecodeJSONResponseBoundedRequiresOneCompleteValue(t *testing.T) {
 	})
 }
 
+func TestDecodeJSONRequestBoundedRejectsAmbiguousAndOversizedBodies(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		body       string
+		limit      int64
+		wantStatus int
+		wantLarge  bool
+	}{
+		{
+			name:       "one value",
+			body:       `{"ok":true}`,
+			limit:      32,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "multiple values",
+			body:       `{"ok":true} {"extra":true}`,
+			limit:      64,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "oversized",
+			body:       `{"value":"123456789"}`,
+			limit:      8,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantLarge:  true,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/",
+				strings.NewReader(test.body),
+			)
+			response := httptest.NewRecorder()
+			var decoded map[string]any
+			err := DecodeJSONRequestBounded(
+				response,
+				request,
+				&decoded,
+				test.limit,
+			)
+			if test.wantStatus == http.StatusOK {
+				if err != nil {
+					t.Fatalf("valid request failed: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("invalid request succeeded")
+			}
+			if IsRequestTooLarge(err) != test.wantLarge {
+				t.Fatalf("IsRequestTooLarge(%v) = %t", err, !test.wantLarge)
+			}
+		})
+	}
+}
+
 func TestDownloadFileBoundedRejectsAdvertisedAndChunkedOversize(t *testing.T) {
 	t.Parallel()
 

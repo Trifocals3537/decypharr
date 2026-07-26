@@ -55,7 +55,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 // isAPIRequest checks if the request is for an API endpoint
 func (s *Server) isAPIRequest(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, "/api/")
+	return strings.HasPrefix(r.URL.Path, "/api/") ||
+		strings.HasPrefix(r.URL.Path, "/webhooks/")
 }
 
 // sendJSONError sends a JSON error response

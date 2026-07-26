@@ -12,30 +12,63 @@ import (
 // runInitialCalls performs any initial calls of worker functions
 // for example, call the processQueuedEntries function once
 func (m *Manager) runInitialCalls(ctx context.Context) {
-	go m.refreshDownloadLinks(ctx)
-	go m.processQueuedEntries()
-	go m.syncAccounts()
+	m.startBackground("initial download-link refresh", func() {
+		m.refreshDownloadLinks(ctx)
+	})
+	m.startBackground("initial queue processing", func() {
+		m.processQueuedEntries(ctx)
+	})
+	m.startBackground("initial account sync", func() {
+		m.syncAccounts(ctx)
+	})
 }
 
-func (m *Manager) syncAccounts() {
+// awaitProviderCall makes cancellation observable around legacy provider APIs
+// that do not accept a context. The detached goroutine deliberately captures
+// only the provider method and a buffered result channel: it cannot touch
+// manager storage or mount state after its caller has been canceled.
+func awaitProviderCall(ctx context.Context, call func() error) error {
+	result := make(chan error, 1)
+	go func() {
+		result <- call()
+	}()
+
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *Manager) syncAccounts(ctx context.Context) {
 	// Sync accounts for all debrids
 	m.clients.Range(func(debridName string, debridClient debrid.Client) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		if debridClient == nil {
 			return true
 		}
-		debridClient.SyncAccounts()
-		return true
+		_ = awaitProviderCall(ctx, func() error {
+			debridClient.SyncAccounts()
+			return nil
+		})
+		return ctx.Err() == nil
 	})
 }
 
 func (m *Manager) refreshDownloadLinks(ctx context.Context) {
 	// Refresh download links for all debrids
 	m.clients.Range(func(debridName string, debridClient debrid.Client) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		if debridClient == nil {
 			return true
 		}
 		m.refreshDebridDownloadLinks(ctx, debridName, debridClient)
-		return true
+		return ctx.Err() == nil
 	})
 }
 
@@ -47,7 +80,7 @@ func (m *Manager) addQueueProcessorJob(ctx context.Context) error {
 	} else {
 		// Schedule the job
 		if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
-			m.processQueuedEntries()
+			m.processQueuedEntries(ctx)
 		}), gocron.WithContext(ctx)); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to create slots tracking job")
 		} else {

@@ -46,7 +46,12 @@ func (m *Manager) SwitchTorrent(ctx context.Context, infohash, target string, ke
 	m.migrationJobs.Store(job.ID, job)
 
 	// Start migration in background
-	go m.executeMigration(job, entry)
+	if !m.startBackground("torrent migration", func() {
+		m.executeMigration(job, entry)
+	}) {
+		m.migrationJobs.Delete(job.ID)
+		return nil, fmt.Errorf("cannot switch torrent while manager is stopping")
+	}
 
 	return job, nil
 }

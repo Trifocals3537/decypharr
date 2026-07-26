@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -61,7 +62,10 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	background sync.WaitGroup
+	background            sync.WaitGroup
+	backgroundMu          sync.Mutex
+	backgroundStopping    bool
+	backgroundWaitTimeout time.Duration
 
 	customFolders *CustomFolders
 	mountManager  MountManager
@@ -164,10 +168,23 @@ func New() *Manager {
 
 func (m *Manager) resetLifecycle() {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.backgroundMu.Lock()
+	m.backgroundStopping = false
+	m.backgroundMu.Unlock()
 }
 
-func (m *Manager) startBackground(name string, work func()) {
+// startBackground registers manager-owned work before starting it. Stop closes
+// this registration gate before waiting, which makes Add and Wait ordering safe
+// and prevents late scheduler callbacks from escaping the shutdown barrier.
+func (m *Manager) startBackground(name string, work func()) bool {
+	m.backgroundMu.Lock()
+	if m.backgroundStopping {
+		m.backgroundMu.Unlock()
+		return false
+	}
 	m.background.Add(1)
+	m.backgroundMu.Unlock()
+
 	go func() {
 		defer m.background.Done()
 		defer func() {
@@ -181,6 +198,37 @@ func (m *Manager) startBackground(name string, work func()) {
 		}()
 		work()
 	}()
+	return true
+}
+
+func (m *Manager) stopAcceptingBackgroundWork() {
+	m.backgroundMu.Lock()
+	m.backgroundStopping = true
+	m.backgroundMu.Unlock()
+}
+
+const defaultBackgroundWaitTimeout = 30 * time.Second
+
+func (m *Manager) waitForBackground() error {
+	timeout := m.backgroundWaitTimeout
+	if timeout <= 0 {
+		timeout = defaultBackgroundWaitTimeout
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.background.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("manager background work did not stop within %s", timeout)
+	}
 }
 
 func (m *Manager) init() {
@@ -425,6 +473,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.startBackground("initial provider sync", func() {
 		m.syncTorrents(m.ctx)
+		if m.ctx.Err() != nil {
+			return
+		}
 		// Sync NZBs
 		if err := m.syncNZBs(m.ctx); err != nil && m.ctx.Err() == nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
@@ -436,7 +487,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	})
 
 	// Start workers
-	if err := m.StartWorker(ctx); err != nil {
+	if err := m.StartWorker(m.ctx); err != nil {
 		return fmt.Errorf("failed to start manager worker: %w", err)
 	}
 
@@ -461,6 +512,12 @@ func (m *Manager) Start(ctx context.Context) error {
 // Stop stops the manager and cleans up all resources
 func (m *Manager) Stop() error {
 	m.logger.Info().Msg("Stopping manager")
+	var shutdownErr error
+
+	// Close the background registration gate before cancellation. Any work
+	// accepted before this point is included in the barrier; later scheduler
+	// callbacks are rejected.
+	m.stopAcceptingBackgroundWork()
 
 	if m.cancel != nil {
 		m.cancel()
@@ -468,27 +525,25 @@ func (m *Manager) Stop() error {
 
 	if m.migrator != nil {
 		if err := m.migrator.Stop(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to stop migration")
-		}
-	}
-
-	// Stop mount manager first
-	if m.mountManager != nil {
-		m.logger.Info().Msg("Stopping mount manager")
-		if err := m.mountManager.Stop(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to stop mount manager")
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to stop migration: %w", err))
 		}
 	}
 
 	// Stop schedulers
 	if m.scheduler != nil {
 		if err := m.scheduler.Shutdown(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to shutdown scheduler")
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to shutdown scheduler: %w", err))
+		} else {
+			// Shutdown consumes the scheduler's terminal result. Clear the
+			// handle so a retry after a later drain timeout remains safe.
+			m.scheduler = nil
 		}
 	}
 	if m.cetScheduler != nil {
 		if err := m.cetScheduler.Shutdown(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to shutdown CET scheduler")
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to shutdown CET scheduler: %w", err))
+		} else {
+			m.cetScheduler = nil
 		}
 	}
 
@@ -497,26 +552,45 @@ func (m *Manager) Stop() error {
 		m.jobQueue.Close()
 	}
 
+	if m.repair != nil {
+		if err := m.repair.Stop(); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to stop repair service: %w", err))
+		}
+	}
+
+	// All manager-owned startup work must finish before mount, usenet, or
+	// storage resources are closed. A provider API may not expose a
+	// context-aware method; in that case return a bounded error and preserve
+	// those resources so the unfinished task can never run against closed
+	// state.
+	if err := m.waitForBackground(); err != nil {
+		shutdownErr = errors.Join(shutdownErr, err)
+	}
+	if shutdownErr != nil {
+		m.logger.Error().Err(shutdownErr).Msg("Manager shutdown paused with resources still open")
+		return shutdownErr
+	}
+
+	if m.mountManager != nil {
+		m.logger.Info().Msg("Stopping mount manager")
+		if err := m.mountManager.Stop(); err != nil {
+			return fmt.Errorf("failed to stop mount manager: %w", err)
+		}
+	}
+
 	// Close usenet connection manager if active
 	if m.usenet != nil {
 		m.logger.Info().Msg("Closing usenet connections")
 		if err := m.usenet.Close(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to close usenet")
+			return fmt.Errorf("failed to close usenet: %w", err)
 		}
 	}
-
-	if m.repair != nil {
-		m.repair.Stop()
-	}
-
-	// All manager-owned startup work must finish before storage is closed.
-	m.background.Wait()
 
 	// Close storage
 	if m.storage != nil {
 		m.logger.Info().Msg("Closing storage database")
 		if err := m.storage.Close(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to close storage")
+			return fmt.Errorf("failed to close storage: %w", err)
 		}
 	}
 
@@ -531,7 +605,7 @@ func (m *Manager) Reset() error {
 
 	// Stop resources before resetting
 	if err := m.Stop(); err != nil {
-		m.logger.Warn().Err(err).Msg("Failed to stop manager during reset")
+		return fmt.Errorf("failed to stop manager during reset: %w", err)
 	}
 
 	// Reopen storage database (it was closed by Stop)
@@ -619,7 +693,9 @@ func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Ent
 		return err
 	}
 	if callback != nil {
-		go callback(entry)
+		m.startBackground("entry update callback", func() {
+			callback(entry)
+		})
 	}
 	return nil
 }
@@ -657,7 +733,11 @@ func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 	}
 	// Delete active placements from debrid clients
 	if removePlacements {
-		go m.RemoveTorrentPlacements(torr)
+		if !m.startBackground("remove torrent placements", func() {
+			m.RemoveTorrentPlacements(torr)
+		}) {
+			return fmt.Errorf("cannot delete entry while manager is stopping")
+		}
 	}
 
 	if err := m.storage.Delete(infohash); err != nil {

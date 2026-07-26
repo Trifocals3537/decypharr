@@ -1143,6 +1143,10 @@ func (r *Repair) FixBroken(ctx context.Context, names []string) (*storage.Repair
 		r.mu.Unlock()
 		return nil, fmt.Errorf("repair already running (run %s)", id)
 	}
+	if err := r.reserveRun(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	source := "fix-broken:all"
 	if wantedCount > 0 {
@@ -1167,10 +1171,11 @@ func (r *Repair) FixBroken(ctx context.Context, names []string) (*storage.Repair
 		r.cancelRun = nil
 		r.mu.Unlock()
 		cancel()
+		r.releaseRun()
 		return nil, fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
-	r.runWG.Go(func() {
+	r.runReserved(func() {
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {
@@ -1214,6 +1219,10 @@ func (r *Repair) ClearBroken(ctx context.Context, names []string) (*storage.Repa
 		r.mu.Unlock()
 		return nil, fmt.Errorf("repair already running (run %s)", id)
 	}
+	if err := r.reserveRun(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	source := "clear-broken:all"
 	if wantedCount > 0 {
@@ -1238,10 +1247,11 @@ func (r *Repair) ClearBroken(ctx context.Context, names []string) (*storage.Repa
 		r.cancelRun = nil
 		r.mu.Unlock()
 		cancel()
+		r.releaseRun()
 		return nil, fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
-	r.runWG.Go(func() {
+	r.runReserved(func() {
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {
@@ -1338,7 +1348,10 @@ func (r *Repair) RecheckEntry(ctx context.Context, entryName string, fix bool) (
 	if ctx == nil {
 		ctx = r.parentCtx
 	}
-	r.runWG.Go(func() {
+	if err := r.reserveRun(); err != nil {
+		return nil, err
+	}
+	r.runReserved(func() {
 		if fix {
 			r.attachArrContext(ctx, c)
 		}
@@ -1389,6 +1402,10 @@ func (r *Repair) RecheckMedia(ctx context.Context, arrName, mediaID string, fix 
 		r.mu.Unlock()
 		return nil, fmt.Errorf("repair already running (run %s)", id)
 	}
+	if err := r.reserveRun(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	run := &storage.RepairRun{
 		ID:        uuid.NewString(),
@@ -1408,10 +1425,11 @@ func (r *Repair) RecheckMedia(ctx context.Context, arrName, mediaID string, fix 
 		r.cancelRun = nil
 		r.mu.Unlock()
 		cancel()
+		r.releaseRun()
 		return nil, fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
-	r.runWG.Go(func() {
+	r.runReserved(func() {
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {

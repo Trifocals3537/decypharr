@@ -190,6 +190,13 @@ func (s *Server) Restart() {
 func (s *Server) Start(ctx context.Context) error {
 	cfg := config.Get()
 
+	if insecureRemoteAccess(cfg.BindAddress, cfg.UseAuth) {
+		s.logger.Warn().
+			Str("bind_address", cfg.BindAddress).
+			Bool("authentication", cfg.UseAuth).
+			Msg("Authentication is disabled on a non-loopback HTTP listener; the UI, APIs, and provider credentials may be exposed. Bind to 127.0.0.1 or enable authentication before allowing remote access")
+	}
+
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddress, cfg.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -212,6 +219,26 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("HTTP server: %w", err)
 	}
 	return nil
+}
+
+func insecureRemoteAccess(bindAddress string, useAuth bool) bool {
+	return !useAuth && !isLoopbackBindAddress(bindAddress)
+}
+
+func isLoopbackBindAddress(bindAddress string) bool {
+	host := strings.TrimSpace(bindAddress)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if zoneIndex := strings.LastIndexByte(host, '%'); zoneIndex >= 0 {
+		host = host[:zoneIndex]
+	}
+
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func serveHTTP(ctx context.Context, srv *http.Server, listener net.Listener, shutdownTimeout time.Duration) error {

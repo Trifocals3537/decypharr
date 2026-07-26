@@ -33,7 +33,34 @@ ssh -L 8282:127.0.0.1:8282 user@seedbox
 
 Then visit `http://127.0.0.1:8282`. For permanent remote access, prefer a
 trusted reverse proxy. Set `bind_address` explicitly only when you intend to
-listen on another interface.
+listen on another interface. Decypharr logs a security warning when
+authentication is disabled on a non-loopback listener because the UI, APIs,
+and provider configuration can otherwise be exposed over plain HTTP.
+
+### Shared seedboxes
+
+A native shared-seedbox installation needs only one assigned inbound
+application port. The Web UI, qBittorrent-compatible API, SABnzbd-compatible
+API, and WebDAV routes share Decypharr's HTTP listener. Real-Debrid and TorBox
+use outbound HTTPS connections; Usenet providers, including an NNTP endpoint
+supplied by TorBox, use outbound NNTP or NNTPS connections. Those outbound
+connections do not require additional assigned application ports.
+
+Prefer the DFS mount backend when the host supplies `/dev/fuse` and allows
+user mounts. DFS does not start rclone's remote-control listener. Select the
+rclone backend only when rclone is installed and its extra local control
+listener is acceptable on the host.
+
+Before replacing an existing seedbox binary:
+
+1. Run `decypharr --config PATH --check-config`.
+2. Confirm `bind_address`, `port`, and `use_auth` in the effective
+   configuration.
+3. Confirm the download, mount, cache, and Usenet buffer paths are owned and
+   writable by the service account.
+4. Confirm `/dev/fuse` and `fusermount3` are available when using DFS.
+5. Stop the old process cleanly and verify its FUSE mount is gone before
+   starting the replacement.
 
 `--check-config` is for an existing configuration and never creates or changes
 files:

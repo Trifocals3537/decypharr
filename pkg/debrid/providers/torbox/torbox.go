@@ -115,6 +115,36 @@ func (tb *Torbox) Logger() zerolog.Logger {
 
 // doGet performs a GET request and unmarshals the response
 func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
+	return tb.doGetContext(context.Background(), endpoint, queryParams, result)
+}
+
+// doGetContext performs a cancellable GET request and unmarshals the response.
+func (tb *Torbox) doGetContext(
+	ctx context.Context,
+	endpoint string,
+	queryParams map[string]string,
+	result any,
+) (*http.Response, error) {
+	return tb.doGetContextBounded(
+		ctx,
+		endpoint,
+		queryParams,
+		result,
+		utils.MaxJSONResponseBytes,
+	)
+}
+
+func (tb *Torbox) doGetContextBounded(
+	ctx context.Context,
+	endpoint string,
+	queryParams map[string]string,
+	result any,
+	maxResponseBytes int64,
+) (*http.Response, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("torbox request context is required")
+	}
+
 	u, err := url.Parse(tb.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -128,7 +158,7 @@ func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result a
 		u.RawQuery = q.Encode()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +170,7 @@ func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result a
 	defer resp.Body.Close()
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := utils.DecodeJSONResponse(resp.Body, result); err != nil {
+		if err := utils.DecodeJSONResponseBounded(resp.Body, result, maxResponseBytes); err != nil {
 			return resp, err
 		}
 	}

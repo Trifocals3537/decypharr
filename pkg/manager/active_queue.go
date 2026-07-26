@@ -14,7 +14,11 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
-func (m *Manager) restoreActiveDownloadJobs() {
+func (m *Manager) restoreActiveDownloadJobs(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+
 	entries := m.queue.ListFilter("", config.ProtocolAll, storage.EntryStateDownloading, nil, "", false)
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].AddedOn.Before(entries[j].AddedOn)
@@ -22,6 +26,9 @@ func (m *Manager) restoreActiveDownloadJobs() {
 
 	// Existing active downloads reserve slots before queued imports are resumed.
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if entry.Status == debridTypes.TorrentStatusQueued || m.nzbNeedsReprocessing(entry) {
 			continue
 		}
@@ -33,11 +40,17 @@ func (m *Manager) restoreActiveDownloadJobs() {
 	}
 
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if entry.Status != debridTypes.TorrentStatusQueued && !m.nzbNeedsReprocessing(entry) {
 			continue
 		}
-		job, err := m.rebuildQueuedJob(entry)
+		job, err := m.rebuildQueuedJob(ctx, entry)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			entry.MarkAsError(err)
 			_ = m.queue.Update(entry)
 			continue
@@ -47,6 +60,9 @@ func (m *Manager) restoreActiveDownloadJobs() {
 		}
 		_ = m.queue.Update(entry)
 		if err := m.SubmitJob(job); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			entry.MarkAsError(err)
 			_ = m.queue.Update(entry)
 		}
@@ -68,9 +84,9 @@ func (m *Manager) nzbNeedsReprocessing(entry *storage.Entry) bool {
 	return err == nil && meta != nil && (meta.Status == usenet.NZBStatusParsing || meta.Status == usenet.NZBStatusDownloading)
 }
 
-func (m *Manager) rebuildQueuedJob(entry *storage.Entry) (*Job, error) {
+func (m *Manager) rebuildQueuedJob(ctx context.Context, entry *storage.Entry) (*Job, error) {
 	if entry.IsNZB() {
-		return m.rebuildQueuedNZBJob(entry)
+		return m.rebuildQueuedNZBJob(ctx, entry)
 	}
 	return m.rebuildQueuedTorrentJob(entry)
 }
@@ -109,7 +125,7 @@ func (m *Manager) rebuildQueuedTorrentJob(entry *storage.Entry) (*Job, error) {
 	return job, nil
 }
 
-func (m *Manager) rebuildQueuedNZBJob(entry *storage.Entry) (*Job, error) {
+func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry) (*Job, error) {
 	if m.usenet == nil {
 		return nil, fmt.Errorf("usenet is not configured")
 	}
@@ -126,7 +142,7 @@ func (m *Manager) rebuildQueuedNZBJob(entry *storage.Entry) (*Job, error) {
 	if name == "" {
 		name = entry.Name
 	}
-	meta, groups, err := m.usenet.ParseWithID(context.Background(), entry.InfoHash, name, content, entry.Category)
+	meta, groups, err := m.usenet.ParseWithID(ctx, entry.InfoHash, name, content, entry.Category)
 	if err != nil {
 		return nil, fmt.Errorf("usenet parse failed: %w", err)
 	}

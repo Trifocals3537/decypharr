@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -56,8 +57,11 @@ type Manager struct {
 	linkService *link.Service
 
 	// repair
-	fixer *Fixer
-	ctx   context.Context
+	fixer  *Fixer
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	background sync.WaitGroup
 
 	customFolders *CustomFolders
 	mountManager  MountManager
@@ -98,9 +102,6 @@ func New() *Manager {
 	if err != nil {
 		panic(fmt.Errorf("failed to create manager storage: %w", err))
 	}
-
-	// Initialize debrid registry
-	ctx := context.Background()
 
 	// Optimized transport for high-performance streaming with HTTP/2 multiplexing
 	// DNS resolver with caching
@@ -146,7 +147,6 @@ func New() *Manager {
 		config:                 cfg,
 		arr:                    arr.NewStorage(),
 		queue:                  newQueue(strg, cfg.RemoveStalledAfter),
-		ctx:                    ctx,
 		ready:                  make(chan struct{}),
 		streamClient:           streamClient,
 		usenetTimeout:          usenetTimeout,
@@ -155,10 +155,32 @@ func New() *Manager {
 		processingEntries:      xsync.NewMap[string, struct{}](),
 	}
 
+	instance.resetLifecycle()
 	instance.init()
 
 	// Create migrator
 	return instance
+}
+
+func (m *Manager) resetLifecycle() {
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+}
+
+func (m *Manager) startBackground(name string, work func()) {
+	m.background.Add(1)
+	go func() {
+		defer m.background.Done()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				m.logger.Error().
+					Str("task", name).
+					Interface("panic", recovered).
+					Bytes("stack", debug.Stack()).
+					Msg("Recovered from panic in background manager task")
+			}
+		}()
+		work()
+	}()
 }
 
 func (m *Manager) init() {
@@ -268,14 +290,9 @@ func (m *Manager) initJobQueue() {
 	// for 60-90 minutes on big libraries, during which every arr reported
 	// "download client unavailable". Backgrounding lets the API serve and the
 	// worker pool drain immediately while the restore catches up.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				m.logger.Error().Interface("panic", r).Msg("Recovered from panic while restoring active downloads")
-			}
-		}()
-		m.restoreActiveDownloadJobs()
-	}()
+	m.startBackground("restore active downloads", func() {
+		m.restoreActiveDownloadJobs(m.ctx)
+	})
 }
 
 func (m *Manager) processJob(ctx context.Context, job *Job) {
@@ -339,7 +356,7 @@ func (m *Manager) waitForDownloadCompletion(ctx context.Context, entry *storage.
 	}
 }
 
-func (m *Manager) migrate() {
+func (m *Manager) migrate(ctx context.Context) {
 	// Check if migration has already been done
 	status, err := m.migrator.GetStatus()
 	if err == nil && !status.Running && status.Completed > 0 {
@@ -373,7 +390,7 @@ func (m *Manager) migrate() {
 		Msg("Found cache files, starting automatic migration...")
 
 	// Start migration with backup
-	if err := m.migrator.Start(); err != nil {
+	if err := m.migrator.Start(ctx); err != nil {
 		m.logger.Error().Err(err).Msg("Failed to start automatic migration")
 		return
 	}
@@ -391,20 +408,32 @@ func (m *Manager) Start(ctx context.Context) error {
 		Str("mount_path", m.config.Mount.MountPath).
 		Msg("Starting manager")
 
-	// run the migration process
-	m.migrate()
+	// Tie manager-owned startup work to the service lifetime. Stop also cancels
+	// this context, so restarts and direct shutdowns use the same path.
+	m.startBackground("service cancellation", func() {
+		select {
+		case <-ctx.Done():
+			if m.cancel != nil {
+				m.cancel()
+			}
+		case <-m.ctx.Done():
+		}
+	})
 
-	go func() {
-		m.syncTorrents(ctx)
+	// run the migration process
+	m.migrate(m.ctx)
+
+	m.startBackground("initial provider sync", func() {
+		m.syncTorrents(m.ctx)
 		// Sync NZBs
-		if err := m.syncNZBs(ctx); err != nil {
+		if err := m.syncNZBs(m.ctx); err != nil && m.ctx.Err() == nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
 		}
 		if fixNZB := os.Getenv("DECYPHARR_FIX_NZB_SIZES"); fixNZB == "1" {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
-			m.fixNZBFileSizes(ctx)
+			m.fixNZBFileSizes(m.ctx)
 		}
-	}()
+	})
 
 	// Start workers
 	if err := m.StartWorker(ctx); err != nil {
@@ -432,6 +461,16 @@ func (m *Manager) Start(ctx context.Context) error {
 // Stop stops the manager and cleans up all resources
 func (m *Manager) Stop() error {
 	m.logger.Info().Msg("Stopping manager")
+
+	if m.cancel != nil {
+		m.cancel()
+	}
+
+	if m.migrator != nil {
+		if err := m.migrator.Stop(); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to stop migration")
+		}
+	}
 
 	// Stop mount manager first
 	if m.mountManager != nil {
@@ -470,6 +509,9 @@ func (m *Manager) Stop() error {
 		m.repair.Stop()
 	}
 
+	// All manager-owned startup work must finish before storage is closed.
+	m.background.Wait()
+
 	// Close storage
 	if m.storage != nil {
 		m.logger.Info().Msg("Closing storage database")
@@ -498,6 +540,8 @@ func (m *Manager) Reset() error {
 		return fmt.Errorf("failed to reopen storage after reset: %w", err)
 	}
 	m.storage = strg
+
+	m.resetLifecycle()
 
 	// Reload configuration
 	m.init()

@@ -137,6 +137,13 @@ jobs:
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libfuse2
               /work/decypharr --help
+              install -d -m 0700 /tmp/decypharr-config
+              printf "%s\n" \
+                "{\"debrids\":[{\"name\":\"realdebrid\",\"api_key\":\"test-key\"}],\"download_folder\":\"/tmp/download\"}" \
+                > /tmp/decypharr-config/config.json
+              chmod 0644 /tmp/decypharr-config/config.json
+              /work/decypharr --config /tmp/decypharr-config --check-config
+              test "$(stat -c %a /tmp/decypharr-config/config.json)" = 644
             '
 
       - name: Package

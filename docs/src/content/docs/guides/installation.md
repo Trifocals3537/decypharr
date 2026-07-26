@@ -39,31 +39,72 @@ and provider configuration can otherwise be exposed over plain HTTP.
 
 ### Shared seedboxes
 
-A native shared-seedbox installation needs only one assigned inbound
-application port. The Web UI, qBittorrent-compatible API, SABnzbd-compatible
-API, and WebDAV routes share Decypharr's HTTP listener. Real-Debrid and TorBox
-use outbound HTTPS connections; Usenet providers, including an NNTP endpoint
+A native shared-seedbox installation uses one HTTP listener for the Web UI,
+qBittorrent-compatible API, SABnzbd-compatible API, and WebDAV routes. When
+the Arr applications are on the same host, bind Decypharr to `127.0.0.1`,
+point those clients to `127.0.0.1`, and use an SSH tunnel for the UI; this
+requires no public assigned port. If remote clients need direct access, only
+one assigned inbound application port is required. Real-Debrid and TorBox use
+outbound HTTPS connections; Usenet providers, including an NNTP endpoint
 supplied by TorBox, use outbound NNTP or NNTPS connections. Those outbound
 connections do not require additional assigned application ports.
+
+Some shared hosts provide a private per-user subnet address for communication
+between applications. Binding to that address and pointing the Arr clients to
+it is also safe when the provider confirms the subnet is not public; reach the
+UI through the provider's VPN or an SSH tunnel to that private address.
+If the WebDAV endpoint is not needed, set `disable_webdav` to `true`. Otherwise
+enable both application authentication and `enable_webdav_auth`.
 
 Prefer the DFS mount backend when the host supplies `/dev/fuse` and allows
 user mounts. DFS does not start rclone's remote-control listener. Select the
 rclone backend only when rclone is installed and its extra local control
 listener is acceptable on the host.
 
+Do not expose a first-time registration page on a shared listener. When an
+existing configuration uses a non-loopback address, set credentials
+interactively on the host before starting the new binary:
+
+```bash
+~/.local/bin/decypharr --config ~/.decypharr --set-auth admin
+```
+
+The password is read twice without echo and is never placed in shell history
+or process arguments. Remote registration and unauthenticated remote
+credential changes are rejected. Authentication also cannot be disabled while
+the service is listening on a non-loopback address. Put the single assigned
+HTTP port behind the host's TLS reverse proxy; do not publish the same
+unencrypted port directly to the Internet.
+
 Before replacing an existing seedbox binary:
 
 1. Run `decypharr --config PATH --check-config`.
-2. Confirm `bind_address`, `port`, and `use_auth` in the effective
+2. Inspect the effective supervisor command and any overrides so you replace
+   the binary it actually executes, not merely a similarly named file.
+3. Confirm `bind_address`, `port`, and `use_auth` in the effective
    configuration.
-3. Confirm the download, mount, cache, and Usenet buffer paths are owned and
+4. Confirm the download, mount, cache, and Usenet buffer paths are owned and
    writable by the service account.
-4. Confirm `/dev/fuse` and `fusermount3` are available when using DFS.
-5. Stop the old process cleanly and verify its FUSE mount is gone before
+5. Confirm `/dev/fuse` and `fusermount3` are available when using DFS.
+6. Keep a copy of the working binary and configuration outside the install
+   path for rollback.
+7. Stop the old process cleanly and verify its FUSE mount is gone before
    starting the replacement.
+8. If the service was remotely exposed without authentication, run
+   `--set-auth` while it is stopped, before starting the replacement.
+9. Rerun `--check-config` after the final authentication, bind, and WebDAV
+   choices; deploy only when it passes.
+
+The live application tightens existing `config.json` and `auth.json`
+permissions to `0600`. Ensure both files are owned by the service account.
+Allow at least 90 seconds for a supervised shutdown so active HTTP work can
+drain and the DFS mount can be released. Managed seedboxes often carry a
+provider-specific service override; preserve its CPU/task limits and paths,
+but update its effective binary path deliberately.
 
 `--check-config` is for an existing configuration and never creates or changes
-files:
+files. It also rejects a non-loopback deployment when application
+authentication is disabled, or when WebDAV would remain unprotected:
 
 ```bash
 ~/.local/bin/decypharr --config ~/.decypharr --check-config

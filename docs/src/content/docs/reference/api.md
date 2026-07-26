@@ -207,6 +207,21 @@ curl -X POST \
   http://localhost:8282/api/repair/recheck/media
 ```
 
+### POST /webhooks/tautulli
+
+Trigger a targeted media recheck from Tautulli. When authentication is
+enabled, configure the notification agent to send Decypharr's API token in an
+`Authorization: Bearer TOKEN` header. A payload without a media identifier
+starts a full sweep.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"topic":"tautulli","arr":"Sonarr","media_id":"123","fix":false}' \
+  http://localhost:8282/webhooks/tautulli
+```
+
 ### GET /api/arrs
 
 List connected Arrs.

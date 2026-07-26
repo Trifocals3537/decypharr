@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -26,14 +27,21 @@ func newMetadataTestUsenet(t *testing.T) *Usenet {
 	if err := os.MkdirAll(metaDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return &Usenet{
+	u := &Usenet{
 		metadataDir: sourceDir,
 		nzbStorage: &NZBStorage{
 			metaDir: metaDir,
 			logger:  zerolog.Nop(),
 		},
 		logger: zerolog.Nop(),
+		fs:     xsync.NewMap[string, *fsEntry](),
 	}
+	t.Cleanup(func() {
+		if err := u.Close(); err != nil {
+			t.Errorf("close metadata test usenet: %v", err)
+		}
+	})
+	return u
 }
 
 func TestCanonicalNZBIDRejectsTraversalAndNonCanonicalForms(t *testing.T) {

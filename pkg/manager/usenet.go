@@ -125,7 +125,9 @@ func (m *Manager) processNZB(ctx context.Context, entry *storage.Entry, metadata
 		return fmt.Errorf("nzb has no files")
 	}
 
-	go m.processAction(entry)
+	m.startBackground("NZB action", func() {
+		m.processAction(entry)
+	})
 	return nil
 }
 

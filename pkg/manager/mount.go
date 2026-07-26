@@ -38,9 +38,9 @@ func (m *Manager) RefreshEntries(refreshMount bool) {
 
 	// Refresh mount if needed
 	if refreshMount {
-		go func() {
+		m.startBackground("mount refresh", func() {
 			_ = m.RefreshMount()
-		}()
+		})
 	}
 }
 

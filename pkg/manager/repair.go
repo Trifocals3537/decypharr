@@ -77,6 +77,10 @@ type Repair struct {
 	stopScheduled  bool
 	activeStopFunc func() // called by the stop job for the active run
 	runWG          sync.WaitGroup
+	runMu          sync.Mutex
+	runStopping    bool
+	stopMu         sync.Mutex
+	stopTimeout    time.Duration
 }
 
 // NewRepair builds the repair service for the given manager. Call
@@ -210,7 +214,42 @@ func (r *Repair) Start(ctx context.Context) error {
 // Stop cancels any running sweep and unregisters the scheduled job. It blocks
 // until the sweep goroutine exits (bounded by repairStopDrainTimeout) so
 // in-flight saves don't race with storage.Close.
-func (r *Repair) Stop() {
+func (r *Repair) reserveRun() error {
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+	if r.runStopping {
+		return errors.New("repair service is stopping")
+	}
+	r.runWG.Add(1)
+	return nil
+}
+
+func (r *Repair) releaseRun() {
+	r.runWG.Done()
+}
+
+func (r *Repair) runReserved(work func()) {
+	go func() {
+		defer r.releaseRun()
+		work()
+	}()
+}
+
+func (r *Repair) Stop() error {
+	return r.stop(false)
+}
+
+func (r *Repair) stop(reopen bool) error {
+	r.stopMu.Lock()
+	defer r.stopMu.Unlock()
+
+	// Close registration before waiting. Every accepted run reserves its
+	// WaitGroup slot while holding this same gate, so a late API or scheduler
+	// callback cannot race Add against Wait and escape the shutdown barrier.
+	r.runMu.Lock()
+	r.runStopping = true
+	r.runMu.Unlock()
+
 	r.mu.Lock()
 	cancel := r.cancelRun
 	r.cancelRun = nil
@@ -234,17 +273,33 @@ func (r *Repair) Stop() {
 		r.runWG.Wait()
 		close(done)
 	}()
+	timeout := r.stopTimeout
+	if timeout <= 0 {
+		timeout = repairStopDrainTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(repairStopDrainTimeout):
-		r.logger.Warn().Dur("timeout", repairStopDrainTimeout).Msg("Repair: drain timed out")
+		if reopen && (r.manager == nil || r.manager.ctx == nil || r.manager.ctx.Err() == nil) {
+			r.runMu.Lock()
+			r.runStopping = false
+			r.runMu.Unlock()
+		}
+		return nil
+	case <-timer.C:
+		err := fmt.Errorf("repair work did not stop within %s", timeout)
+		r.logger.Warn().Err(err).Msg("Repair: drain timed out")
+		return err
 	}
 }
 
 // ApplyConfig reconciles the scheduler with the latest repair config. Called
 // after /api/repair/config is updated.
 func (r *Repair) ApplyConfig() error {
-	r.Stop()
+	if err := r.stop(true); err != nil {
+		return fmt.Errorf("failed to stop existing repair work: %w", err)
+	}
 	return r.Start(r.parentCtx)
 }
 
@@ -444,6 +499,10 @@ func (r *Repair) runSweep(trigger storage.RepairRunTrigger, opts RepairRunOption
 		r.mu.Unlock()
 		return id, errors.New("repair already running")
 	}
+	if err := r.reserveRun(); err != nil {
+		r.mu.Unlock()
+		return "", err
+	}
 
 	runCtx, cancel := context.WithCancel(r.parentCtx)
 	stopState := &repairStopState{}
@@ -484,10 +543,11 @@ func (r *Repair) runSweep(trigger storage.RepairRunTrigger, opts RepairRunOption
 		r.activeStopFunc = nil
 		r.mu.Unlock()
 		cancel()
+		r.releaseRun()
 		return "", fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
-	r.runWG.Go(func() {
+	r.runReserved(func() {
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {

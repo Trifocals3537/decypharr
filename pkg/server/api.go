@@ -501,24 +501,36 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	// Decode the incoming config update
-	var newConfig config.Config
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+
+	if s.restartPending {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "A configuration restart is already in progress", http.StatusConflict)
+		return
+	}
+
+	currentConfig := config.Get()
+	newConfig, err := decodeConfigUpdate(r.Method, r.Body, currentConfig)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to decode config update request")
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if r.Method == http.MethodPost {
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Warning", `299 - "POST /api/config is deprecated; use PUT for replacement or PATCH for partial updates"`)
+	}
 
 	// Basic validation
 	if newConfig.BindAddress == "" {
-		newConfig.BindAddress = "0.0.0.0"
+		newConfig.BindAddress = config.DefaultBindAddress
 	}
 	if newConfig.Port == "" {
-		newConfig.Port = "8282"
+		newConfig.Port = config.DefaultPort
 	}
 
 	// Preserve fields that shouldn't be overwritten by frontend
-	currentConfig := config.Get()
 	newConfig.Auth = currentConfig.GetAuth()
 	// The frontend config form doesn't include use_auth or enable_webdav_auth,
 	// so they would be zero-valued (false) in the decoded payload. Preserve
@@ -535,9 +547,6 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	newConfig.Arrs = validArrs
 
-	// Sync arr storage with the new configuration
-	s.manager.Arr().SyncFromConfig(newConfig.Arrs)
-
 	// Save the updated config. This also applies defaults to newConfig, so the
 	// restart comparison below sees a fully-normalized config on both sides.
 	if err := newConfig.Save(); err != nil {
@@ -546,14 +555,21 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only mutate live Arr state after the new configuration is durable.
+	s.manager.Arr().SyncFromConfig(newConfig.Arrs)
+
 	// Only restart when a field that needs it actually changed (HTTP bind,
 	// debrid/usenet clients, or the mount). For everything else, apply the new
 	// config live so users aren't disrupted by a full restart on every save.
-	restarted := config.Get().RequiresRestart(&newConfig)
+	restarted := currentConfig.RequiresRestart(newConfig)
 	if restarted {
+		// Reject any follow-up update until the new server instance is running.
+		// Otherwise a request in the restart window could merge against the old
+		// in-memory config and accidentally overwrite the just-saved document.
+		s.restartPending = true
 		go s.Restart()
 	} else {
-		config.Get().ApplyRuntime(&newConfig)
+		currentConfig.ApplyRuntime(newConfig)
 		// Reschedule/reapply the repair sweep if its settings changed.
 		if svc := s.manager.Repair(); svc != nil {
 			if err := svc.ApplyConfig(); err != nil {

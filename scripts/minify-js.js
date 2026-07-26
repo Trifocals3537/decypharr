@@ -62,7 +62,7 @@ async function minifyFile(inputPath, outputPath) {
 
     } catch (error) {
         console.error(`   ✗ Error minifying ${inputPath}:`, error.message);
-        return null;
+        throw error;
     }
 }
 

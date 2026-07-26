@@ -66,7 +66,7 @@ func (m *Manager) processTorrentJob(ctx context.Context, job *Job) error {
 		job.Entry.IsDownloading = false
 		_ = m.queue.Update(job.Entry)
 		m.processingEntries.Store(job.Entry.InfoHash, struct{}{})
-		m.processQueuedTorrent(job.Entry)
+		m.processQueuedTorrent(ctx, job.Entry)
 		return nil
 	}
 	if job.DebridTorrent == nil {
@@ -144,12 +144,18 @@ func isTooManyActiveDownloads(err error) bool {
 	return ok && customErr.Code == "too_many_active_downloads"
 }
 
-func (m *Manager) processQueuedEntries() {
+func (m *Manager) processQueuedEntries(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	queueEntries := m.queue.ListFilter("", config.ProtocolAll, storage.EntryStateDownloading, nil, "", true)
 	if len(queueEntries) == 0 {
 		return
 	}
 	for _, entry := range queueEntries {
+		if ctx.Err() != nil {
+			return
+		}
 		// Parse only active downloading torrents
 		if entry.State != storage.EntryStateDownloading {
 			continue
@@ -167,23 +173,37 @@ func (m *Manager) processQueuedEntries() {
 		}
 		if entry.IsTorrent() {
 			if entry.ActiveProvider != "" {
-				go m.processQueuedTorrent(entry)
+				if !m.startBackground("queued torrent processing", func() {
+					m.processQueuedTorrent(ctx, entry)
+				}) {
+					m.processingEntries.Delete(entry.InfoHash)
+				}
 			} else {
 				m.processingEntries.Delete(entry.InfoHash)
 			}
 		} else if entry.IsNZB() {
-			go m.processQueuedNZB(entry)
+			if !m.startBackground("queued NZB processing", func() {
+				m.processQueuedNZB(ctx, entry)
+			}) {
+				m.processingEntries.Delete(entry.InfoHash)
+			}
 		} else {
 			m.processingEntries.Delete(entry.InfoHash)
 		}
 	}
 }
 
-func (m *Manager) processQueuedNZB(entry *storage.Entry) {
+func (m *Manager) processQueuedNZB(ctx context.Context, entry *storage.Entry) {
 	defer m.processingEntries.Delete(entry.InfoHash)
+	if ctx.Err() != nil {
+		return
+	}
 	// Check if the nzb is already processed. Only header fields (status, file
 	// list) are needed here; processNZB does not touch the segment map.
 	metadata, err := m.usenet.GetNZBHeader(entry.InfoHash)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error getting NZB metadata")
 		entry.MarkAsError(err)
@@ -206,7 +226,7 @@ func (m *Manager) processQueuedNZB(entry *storage.Entry) {
 		// Still processing, skip for now
 		return
 	case usenet.NZBStatusCompleted:
-		if err := m.processNZB(context.Background(), entry, metadata); err != nil {
+		if err := m.processNZB(ctx, entry, metadata); err != nil {
 			m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error processing queued NZB")
 			entry.MarkAsError(err)
 			_ = m.queue.Update(entry)
@@ -220,8 +240,11 @@ func (m *Manager) processQueuedNZB(entry *storage.Entry) {
 	}
 }
 
-func (m *Manager) processQueuedTorrent(entry *storage.Entry) {
+func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry) {
 	defer m.processingEntries.Delete(entry.InfoHash)
+	if ctx.Err() != nil {
+		return
+	}
 	placement := entry.GetActiveProvider()
 	if placement == nil {
 		m.logger.Error().Str("name", entry.Name).Msg("No active placement found for queued entry")
@@ -257,6 +280,9 @@ func (m *Manager) processQueuedTorrent(entry *storage.Entry) {
 	}
 
 	dbT, err := client.CheckStatus(debridTorrent)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error checking status")
 		entry.MarkAsError(err)
@@ -306,7 +332,9 @@ func (m *Manager) processQueuedTorrent(entry *storage.Entry) {
 	_ = m.queue.Update(entry)
 	// Check if done or failed
 	if debridTorrent.Status == debridTypes.TorrentStatusDownloaded {
-		go m.processAction(entry)
+		m.startBackground("queued torrent action", func() {
+			m.processAction(entry)
+		})
 	}
 }
 
@@ -363,7 +391,9 @@ func (m *Manager) processNewTorrent(torrent *storage.Entry, debridTorrent *debri
 	}
 
 	// Parse post-download action
-	go m.processAction(torrent)
+	m.startBackground("torrent action", func() {
+		m.processAction(torrent)
+	})
 }
 
 func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {

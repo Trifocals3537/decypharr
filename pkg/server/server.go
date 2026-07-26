@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -35,6 +37,12 @@ var assetsEmbed embed.FS
 //go:embed assets/images/*
 var imagesEmbed embed.FS
 
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpIdleTimeout       = 2 * time.Minute
+	httpShutdownTimeout   = 15 * time.Second
+)
+
 type AddRequest struct {
 	Url        string   `json:"url"`
 	Arr        string   `json:"arr"`
@@ -58,15 +66,17 @@ type ContentResponse struct {
 }
 
 type Server struct {
-	router       *chi.Mux
-	logger       zerolog.Logger
-	manager      *manager.Manager
-	stats        *stats.Collector
-	cookie       *sessions.CookieStore
-	templates    *template.Template
-	nzbUserAgent string
-	urlBase      string
-	restartFunc  func()
+	router         *chi.Mux
+	logger         zerolog.Logger
+	manager        *manager.Manager
+	stats          *stats.Collector
+	cookie         *sessions.CookieStore
+	templates      *template.Template
+	nzbUserAgent   string
+	urlBase        string
+	restartFunc    func()
+	configMu       sync.Mutex
+	restartPending bool
 }
 
 func New(mgr *manager.Manager) *Server {
@@ -92,12 +102,7 @@ func New(mgr *manager.Manager) *Server {
 		"templates/register.html",
 		"templates/setup.html",
 	))
-	cookieStore := sessions.NewCookieStore([]byte(cfg.SecretKey()))
-	cookieStore.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   86400 * 7,
-		HttpOnly: false,
-	}
+	cookieStore := newSessionCookieStore(cfg.SecretKey())
 
 	statsCollector := stats.New(mgr)
 
@@ -158,6 +163,17 @@ func New(mgr *manager.Manager) *Server {
 	return s
 }
 
+func newSessionCookieStore(secret string) *sessions.CookieStore {
+	store := sessions.NewCookieStore([]byte(secret))
+	store.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400 * 7,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	return store
+}
+
 func (s *Server) SetRestartFunc(restartFunc func()) {
 	s.restartFunc = restartFunc
 }
@@ -174,25 +190,67 @@ func (s *Server) Restart() {
 func (s *Server) Start(ctx context.Context) error {
 	cfg := config.Get()
 
-	// Start background stats collector
-	s.stats.Start(ctx)
-
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddress, cfg.Port)
-	s.logger.Info().Msgf("Starting server on %s%s", addr, cfg.URLBase)
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: s.router,
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 
+	// Start background stats only after the HTTP listener is established.
+	s.stats.Start(ctx)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.router,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
+
+	s.logger.Info().Msgf("Starting server on %s%s", addr, cfg.URLBase)
+	err = serveHTTP(ctx, srv, listener, httpShutdownTimeout)
+	if err != nil {
+		return fmt.Errorf("HTTP server: %w", err)
+	}
+	return nil
+}
+
+func serveHTTP(ctx context.Context, srv *http.Server, listener net.Listener, shutdownTimeout time.Duration) error {
+	serveErr := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			s.logger.Error().Err(err).Msgf("Error starting server")
-		}
+		serveErr <- srv.Serve(listener)
 	}()
 
-	<-ctx.Done()
-	s.logger.Info().Msg("Shutting down gracefully...")
-	return srv.Shutdown(context.Background())
+	select {
+	case err := <-serveErr:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	cancel()
+
+	if shutdownErr != nil {
+		closeErr := srv.Close()
+		err := <-serveErr
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		return errors.Join(
+			fmt.Errorf("graceful shutdown: %w", shutdownErr),
+			closeErr,
+			err,
+		)
+	}
+
+	err := <-serveErr
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {

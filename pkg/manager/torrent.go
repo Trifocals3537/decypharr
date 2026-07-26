@@ -21,10 +21,12 @@ func (m *Manager) syncTorrents(ctx context.Context) {
 	var wg sync.WaitGroup
 	m.clients.Range(func(name string, client debrid.Client) bool {
 		wg.Go(func() {
-			if err := m.refreshTorrents(ctx, name, client); err != nil {
+			if err := m.refreshTorrents(ctx, name, client); err != nil && ctx.Err() == nil {
 				m.logger.Error().Err(err).Str("debrid", name).Msg("Initial torrent sync failed")
 			}
-			m.RefreshEntries(false)
+			if ctx.Err() == nil {
+				m.RefreshEntries(false)
+			}
 		})
 		return true
 	})
@@ -63,13 +65,36 @@ func (m *Manager) refreshTorrents(ctx context.Context, provider string, debridCl
 }
 
 // doRefreshTorrents performs the actual refresh logic
-func (m *Manager) doRefreshTorrents(_ context.Context, provider string, debridClient debrid.Client) error {
-	remote, err := debridClient.GetTorrents()
-	if err != nil {
-		m.logger.Error().Err(err).Str("debrid", provider).Msg("Failed to get remote")
-		return err
+func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debridClient debrid.Client) error {
+	// GetTorrents predates the context-aware provider methods. Keep the
+	// manager-owned sync cancellable by isolating that legacy call in a
+	// provider-only goroutine. Once canceled, the detached call can report its
+	// result but cannot access manager storage.
+	type getTorrentsResult struct {
+		torrents []*types.Torrent
+		err      error
+	}
+	result := make(chan getTorrentsResult, 1)
+	go func() {
+		torrents, err := debridClient.GetTorrents()
+		result <- getTorrentsResult{torrents: torrents, err: err}
+	}()
+
+	var remote []*types.Torrent
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case providerResult := <-result:
+		if providerResult.err != nil {
+			m.logger.Error().Err(providerResult.err).Str("debrid", provider).Msg("Failed to get remote")
+			return providerResult.err
+		}
+		remote = providerResult.torrents
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(remote) == 0 {
 		m.logger.Debug().Str("debrid", provider).Msg("No remote found")
 		return nil
@@ -459,7 +484,7 @@ func (m *Manager) refreshDebridDownloadLinks(ctx context.Context, debridName str
 		return
 	}
 
-	if err := client.RefreshDownloadLinks(); err != nil {
+	if err := awaitProviderCall(ctx, client.RefreshDownloadLinks); err != nil && ctx.Err() == nil {
 		m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to refresh download links")
 	}
 }

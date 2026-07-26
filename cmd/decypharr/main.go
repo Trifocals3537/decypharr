@@ -2,12 +2,12 @@ package decypharr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
 	"runtime/debug"
 	"strconv"
-	"sync"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -18,7 +18,14 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/mount/rclone"
 	"github.com/sirrobot01/decypharr/pkg/server"
 	"github.com/sirrobot01/decypharr/pkg/version"
+	"golang.org/x/sync/errgroup"
 )
+
+var errServicesStopped = errors.New("services stopped unexpectedly")
+
+type serviceStarter interface {
+	Start(context.Context) error
+}
 
 func Start(ctx context.Context) error {
 	// Start the global cached time updater to reduce time.Now() syscall overhead
@@ -44,7 +51,9 @@ func Start(ctx context.Context) error {
 	mgr := manager.New()
 
 	svcCtx, cancelSvc := context.WithCancel(ctx)
-	defer cancelSvc()
+	defer func() {
+		cancelSvc()
+	}()
 
 	// Create the logger path if it doesn't exist
 	for {
@@ -71,55 +80,100 @@ func Start(ctx context.Context) error {
 
 		srv.SetRestartFunc(restartFunc)
 
-		resetFunc := func() {
-
+		resetFunc := func() error {
 			config.Reset()
 			// Stop manager to reset ready channel and cleanup resources
 			if err := mgr.Reset(); err != nil {
-				_log.Warn().Err(err).Msg("Failed to reset manager")
+				return err
 			}
 			// refresh GC
 			runtime.GC()
+			return nil
 		}
 
 		shutdownFunc := func() {
-			config.Reset()
 			// Stop manager to cleanup all resources including mounts
 			if err := mgr.Stop(); err != nil {
 				_log.Warn().Err(err).Msg("Failed to stop manager during shutdown")
 			}
+			config.Reset()
 			// refresh GC
 			runtime.GC()
 		}
 
-		done := make(chan struct{})
+		serviceDone := make(chan error, 1)
 		go func(ctx context.Context) {
-			if err := startServices(ctx, mgr, cancelSvc, srv); err != nil {
-				_log.Error().Err(err).Msg("Error starting services")
-				cancelSvc()
-			}
-			close(done)
+			serviceDone <- startServices(ctx, mgr, srv)
 		}(svcCtx)
 
 		select {
 		case <-ctx.Done():
 			// graceful shutdown
 			cancelSvc() // propagate to services
-			<-done      // wait for them to finish
-			_log.Info().Msg("Decypharr has been stopped gracefully.")
+			if err := <-serviceDone; err != nil {
+				// A forced HTTP close can return before a stuck handler exits.
+				// Do not close manager storage underneath any such handler;
+				// return an error and let the process terminate as one unit.
+				return fmt.Errorf("services did not stop cleanly: %w", err)
+			}
 			shutdownFunc() // cleanup all resources including mounts
+			_log.Info().Msg("Decypharr has been stopped gracefully.")
 			return nil
 
 		case <-restartCh:
 			cancelSvc() // tell existing services to shut down
 			_log.Info().Msg("Restarting Decypharr...")
-			<-done // wait for them to finish
+			restarted, err := finishRestart(ctx, serviceDone, resetFunc, shutdownFunc)
+			if err != nil {
+				return fmt.Errorf("restart aborted: %w", err)
+			}
+			if !restarted {
+				return nil
+			}
+
 			_log.Info().Msg("Decypharr has been restarted.")
-			resetFunc() // reset store and services for restart
 			// rebuild svcCtx off the original parent
 			svcCtx, cancelSvc = context.WithCancel(ctx)
+
+		case err := <-serviceDone:
+			cancelSvc()
+			if err != nil {
+				// An error may represent a forced HTTP close with handlers
+				// still unwinding. Let the process supervisor restart from a
+				// clean address space instead of closing shared resources
+				// underneath those handlers.
+				return err
+			}
+			shutdownFunc()
+			if ctx.Err() != nil {
+				return nil
+			}
+			return errServicesStopped
 		}
 	}
+}
+
+// finishRestart only resets shared storage after every service reports a clean
+// stop. An HTTP shutdown timeout may leave handler goroutines running even
+// after their connections are force-closed, so an error must abort the process
+// instead of reopening storage underneath those handlers.
+func finishRestart(
+	ctx context.Context,
+	serviceDone <-chan error,
+	resetFunc func() error,
+	shutdownFunc func(),
+) (bool, error) {
+	if err := <-serviceDone; err != nil {
+		return false, err
+	}
+	if ctx.Err() != nil {
+		shutdownFunc()
+		return false, nil
+	}
+	if err := resetFunc(); err != nil {
+		return false, fmt.Errorf("reset services: %w", err)
+	}
+	return true, nil
 }
 
 func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountManager {
@@ -135,62 +189,39 @@ func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountM
 	}
 }
 
-func startServices(ctx context.Context, manager *manager.Manager, cancelSvc context.CancelFunc, srv *server.Server) error {
-	var wg sync.WaitGroup
-	errChan := make(chan error)
+func startServices(ctx context.Context, managerService, httpService serviceStarter) error {
+	group, serviceCtx := errgroup.WithContext(ctx)
 
-	_log := logger.Default()
-
-	safeGo := func(f func() error) {
-		wg.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					stack := debug.Stack()
-					_log.Error().
-						Interface("panic", r).
-						Str("stack", string(stack)).
-						Msg("Recovered from panic in goroutine")
-
-					// Send error to channel so the main goroutine is aware
-					errChan <- fmt.Errorf("panic: %v", r)
-				}
-			}()
-
-			if err := f(); err != nil {
-				errChan <- err
-			}
+	start := func(name string, service serviceStarter) {
+		group.Go(func() error {
+			return startService(serviceCtx, name, service)
 		})
 	}
 
-	safeGo(func() error {
-		return srv.Start(ctx)
-	})
+	// The HTTP service remains active until cancellation. Manager.Start performs
+	// initialization and then returns while its workers continue on serviceCtx.
+	start("HTTP service", httpService)
+	start("manager", managerService)
 
-	// Start manager (which handles mounts, processing, etc.)
-	safeGo(func() error {
-		return manager.Start(ctx)
-	})
+	err := group.Wait()
+	if err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errServicesStopped
+}
 
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-
-	go func() {
-		for err := range errChan {
-			if err != nil {
-				_log.Error().Err(err).Msg("Service error detected")
-				// If the error is critical, return it to stop the main loop
-				if ctx.Err() == nil {
-					_log.Error().Msg("Stopping services due to error")
-					cancelSvc() // Cancel the service context to stop all services
-				}
-			}
+func startService(ctx context.Context, name string, service serviceStarter) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("%s panicked: %v\n%s", name, recovered, debug.Stack())
 		}
 	}()
 
-	// Wait for context cancellation
-	<-ctx.Done()
-	_log.Debug().Msg("Services context cancelled")
+	if err := service.Start(ctx); err != nil {
+		return fmt.Errorf("%s failed: %w", name, err)
+	}
 	return nil
 }

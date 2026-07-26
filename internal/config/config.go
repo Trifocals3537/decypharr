@@ -174,9 +174,10 @@ type CustomFolders struct {
 }
 
 type Auth struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	APIToken string `json:"api_token,omitempty"`
+	Username      string `json:"username,omitempty"`
+	Password      string `json:"password,omitempty"`
+	APIToken      string `json:"api_token,omitempty"`
+	SessionSecret string `json:"session_secret,omitempty"`
 }
 
 // RepairSource selects where the health checker enumerates entries from.
@@ -300,7 +301,15 @@ func (c *Config) loadConfig() error {
 			if err := c.createConfig(); err != nil {
 				return fmt.Errorf("failed to create config file: %w", err)
 			}
-			return c.Save()
+			if err := c.Save(); err != nil {
+				return err
+			}
+			// Environment overrides are runtime settings and should take effect
+			// on the first launch as well as subsequent launches. This is
+			// especially important for the container image, which deliberately
+			// opts into listening beyond the native loopback-only default.
+			c.applyEnvOverrides()
+			return nil
 		}
 		return fmt.Errorf("error reading config file: %w", err)
 	}
@@ -311,12 +320,36 @@ func (c *Config) loadConfig() error {
 	}
 
 	// Set defaults for any missing values
-	c.setDefaults()
+	if err := c.setDefaults(); err != nil {
+		return err
+	}
 
 	// Apply environment variable overrides
 	c.applyEnvOverrides()
 
 	return nil
+}
+
+// LoadForValidation reads and normalizes an existing configuration without
+// creating files, generating credentials, or updating the process-wide
+// configuration singleton.
+func LoadForValidation(path string) (*Config, error) {
+	configFile := filepath.Join(path, "config.json")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("read config file %s: %w", configFile, err)
+	}
+
+	cfg := &Config{}
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config file %s: %w", configFile, err)
+	}
+
+	if err := cfg.setDefaultsForPath(path, false); err != nil {
+		return nil, err
+	}
+	cfg.applyEnvOverrides()
+	return cfg, nil
 }
 
 func (c *Config) Validate() error {
@@ -393,23 +426,64 @@ func (c *Config) GetMaxFileSize() int64 {
 }
 
 func (c *Config) SecretKey() string {
-	return cmp.Or(getEnv("SECRET_KEY"), "\"wqj(v%lj*!-+kf@4&i95rhh_!5_px5qnuwqbr%cjrvrozz_r*(\"")
+	if secret := getEnv("SECRET_KEY"); secret != "" {
+		return secret
+	}
+
+	auth, err := c.loadAuth()
+	if err != nil {
+		panic(err)
+	}
+	if auth.SessionSecret == "" {
+		secret, err := generateAPIToken()
+		if err != nil {
+			panic(fmt.Errorf("generate session secret: %w", err))
+		}
+		auth.SessionSecret = secret
+		if err := c.SaveAuth(auth); err != nil {
+			panic(fmt.Errorf("persist session secret: %w", err))
+		}
+	}
+	return auth.SessionSecret
+}
+
+func (c *Config) loadAuth() (*Auth, error) {
+	if c.Auth != nil {
+		return c.Auth, nil
+	}
+
+	authFile := c.AuthFile()
+	data, err := os.ReadFile(authFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.Auth = &Auth{}
+			return c.Auth, nil
+		}
+		return nil, fmt.Errorf("read auth config %s: %w", authFile, err)
+	}
+
+	trimmed := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil, fmt.Errorf("parse auth config %s: expected a JSON object", authFile)
+	}
+
+	auth := &Auth{}
+	if err := json.Unmarshal(data, auth); err != nil {
+		return nil, fmt.Errorf("parse auth config %s: %w", authFile, err)
+	}
+	c.Auth = auth
+	return c.Auth, nil
 }
 
 func (c *Config) GetAuth() *Auth {
 	if !c.UseAuth {
 		return nil
 	}
-	if c.Auth == nil {
-		c.Auth = &Auth{}
-		if _, err := os.Stat(c.AuthFile()); err == nil {
-			file, err := os.ReadFile(c.AuthFile())
-			if err == nil {
-				_ = json.Unmarshal(file, c.Auth)
-			}
-		}
+	auth, err := c.loadAuth()
+	if err != nil {
+		panic(err)
 	}
-	return c.Auth
+	return auth
 }
 
 func (c *Config) SaveAuth(auth *Auth) error {
@@ -418,7 +492,7 @@ func (c *Config) SaveAuth(auth *Auth) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.AuthFile(), data, 0644)
+	return persistAuth(c.AuthFile(), data)
 }
 
 func (c *Config) NeedsAuth() bool {
@@ -427,7 +501,7 @@ func (c *Config) NeedsAuth() bool {
 
 // migrateQBitTorrentToManager migrates deprecated QBitTorrent config to Manager
 // This ensures backward compatibility with existing configs
-func (c *Config) migrateQBitTorrentToManager() {
+func (c *Config) migrateQBitTorrentToManager(configRoot string) {
 	// If Manager fields are not set but QBitTorrent fields are, migrate them
 	if c.DownloadFolder == "" && c.QBitTorrent.DownloadFolder != "" {
 		c.DownloadFolder = c.QBitTorrent.DownloadFolder
@@ -451,7 +525,7 @@ func (c *Config) migrateQBitTorrentToManager() {
 
 	// Set default download folder if not set
 	if c.DownloadFolder == "" {
-		c.DownloadFolder = filepath.Join(GetMainPath(), "downloads")
+		c.DownloadFolder = filepath.Join(configRoot, "downloads")
 	}
 
 	// Set default categories if not set
@@ -486,10 +560,24 @@ func (c *Config) migrateNotifications() {
 	}
 }
 
-func (c *Config) setDefaults() {
+func (c *Config) setDefaults() error {
+	return c.setDefaultsForPath(GetMainPath(), true)
+}
+
+func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) error {
 	// Migrate deprecated fields to Manager (backward compatibility)
-	c.migrateQBitTorrentToManager()
+	c.migrateQBitTorrentToManager(configRoot)
 	c.migrateNotifications()
+
+	if c.BindAddress == "" {
+		c.BindAddress = DefaultBindAddress
+	}
+	if c.Port == "" {
+		c.Port = DefaultPort
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = DefaultLogLevel
+	}
 
 	if c.DefaultDownloadAction == "" {
 		c.DefaultDownloadAction = DownloadActionSymlink
@@ -503,7 +591,7 @@ func (c *Config) setDefaults() {
 	}
 
 	// Set usenet defaults
-	c.updateUsenetConfig()
+	c.updateUsenetConfig(configRoot)
 
 	firstDebrid := Debrid{}
 	if len(c.Debrids) > 0 {
@@ -629,19 +717,40 @@ func (c *Config) setDefaults() {
 			}
 		}
 	}
-	// Load the auth file
-	c.Auth = c.GetAuth()
-
-	// Generate API token if auth is enabled and no token exists
-	if c.UseAuth {
-		if c.Auth == nil {
-			c.Auth = &Auth{}
+	if initializeAuth {
+		// Always initialize a private session-signing key, even when auth is
+		// currently disabled. Authentication can be enabled at runtime without
+		// restarting the HTTP server and must never fall back to a shared key.
+		auth, err := c.loadAuth()
+		if err != nil {
+			return err
 		}
-		if c.Auth.APIToken == "" {
-			if token, err := generateAPIToken(); err == nil {
+		c.Auth = auth
+		authChanged := false
+		if c.Auth.SessionSecret == "" {
+			secret, err := generateAPIToken()
+			if err != nil {
+				return fmt.Errorf("generate session secret: %w", err)
+			}
+			c.Auth.SessionSecret = secret
+			authChanged = true
+		}
+
+		// Generate an API token for the live runtime if auth is enabled and no
+		// token exists. Read-only validation intentionally skips this block.
+		if c.UseAuth {
+			if c.Auth.APIToken == "" {
+				token, err := generateAPIToken()
+				if err != nil {
+					return fmt.Errorf("generate API token: %w", err)
+				}
 				c.Auth.APIToken = token
-				// Save the updated auth config
-				_ = c.SaveAuth(c.Auth)
+				authChanged = true
+			}
+		}
+		if authChanged {
+			if err := c.SaveAuth(c.Auth); err != nil {
+				return fmt.Errorf("persist auth defaults: %w", err)
 			}
 		}
 	}
@@ -652,6 +761,7 @@ func (c *Config) setDefaults() {
 	}
 
 	c.applyRepairDefaults()
+	return nil
 }
 
 func (c *Config) applyRepairDefaults() {
@@ -674,12 +784,14 @@ func (c *Config) applyRepairDefaults() {
 }
 
 func (c *Config) Save() error {
-	c.setDefaults()
+	if err := c.setDefaults(); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(c.JsonFile(), data, 0644); err != nil {
+	if err := persistConfig(c.JsonFile(), data); err != nil {
 		fmt.Printf("Failed to write config file: %v\n", err)
 		return err
 	}
@@ -783,10 +895,11 @@ func (c *Config) ApplyRuntime(n *Config) {
 
 func (c *Config) createConfig() error {
 	// Create the directory if it doesn't exist
-	if err := os.MkdirAll(GetMainPath(), 0755); err != nil {
+	if err := os.MkdirAll(GetMainPath(), 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 	c.URLBase = "/"
+	c.BindAddress = DefaultBindAddress
 	c.Port = DefaultPort
 	c.LogLevel = DefaultLogLevel
 	c.UseAuth = true

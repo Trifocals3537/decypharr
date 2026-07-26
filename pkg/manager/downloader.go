@@ -150,7 +150,7 @@ func (d *Downloader) notifyCompleted(entry *storage.Entry) {
 }
 
 func (d *Downloader) triggerArrRefresh(entry *storage.Entry) {
-	go func() {
+	d.manager.startBackground("Arr refresh", func() {
 		a := d.manager.arr.GetOrCreate(entry.Category)
 		if a == nil || a.Host == "" || a.Token == "" {
 			return
@@ -162,7 +162,7 @@ func (d *Downloader) triggerArrRefresh(entry *storage.Entry) {
 				Str("entry", entry.Name).
 				Msg("Failed to trigger Arr refresh")
 		}
-	}()
+	})
 }
 
 func (d *Downloader) markAsError(entry *storage.Entry, err error) {

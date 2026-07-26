@@ -9,7 +9,7 @@ Configuration is stored in `config.json`. Most settings can be managed via the W
 
 ```json
 {
-  "bind_address": "0.0.0.0",
+  "bind_address": "127.0.0.1",
   "port": "8282",
   "url_base": "",
   "app_url": "http://localhost:8282",
@@ -19,7 +19,7 @@ Configuration is stored in `config.json`. Most settings can be managed via the W
 
 | Field          | Type   | Description                                      | Default       |
 |----------------|--------|--------------------------------------------------|---------------|
-| `bind_address` | string | IP to bind to                                    | `0.0.0.0`     |
+| `bind_address` | string | IP to bind to                                    | `127.0.0.1`   |
 | `port`         | string | Port to listen on                                | `8282`        |
 | `url_base`     | string | Base path for reverse proxy                      | `""`          |
 | `app_url`      | string | External URL for callbacks                       | Auto-detected |
@@ -38,15 +38,37 @@ Configuration is stored in `config.json`. Most settings can be managed via the W
 
 Password is bcrypt-hashed. API token is auto-generated.
 
+Native installations use the loopback-only bind default so the first-run setup
+wizard is not exposed to the network. The official container image explicitly
+overrides this to `0.0.0.0`; control container access with published ports,
+firewall rules, and a reverse proxy.
+
+After upgrading, an older native configuration that omitted `bind_address`
+also uses `127.0.0.1`. If the service intentionally needs to accept remote
+connections, set a specific trusted interface address (or `0.0.0.0`) in
+`config.json` or with `DECYPHARR_BIND_ADDRESS`.
+
 ## Downloads
 
 ```json
 {
-  "max_active_downloads": 5
+  "max_active_downloads": 5,
+  "allowed_file_types": ["mkv", "mp4"],
+  "allow_samples": false,
+  "min_file_size": "10MB",
+  "max_file_size": ""
 }
 ```
 
 `max_active_downloads` is the shared active-processing limit for torrent and NZB downloads. Additional imports remain queued until an active download completes.
+
+| Field                  | Type   | Description                                      | Default       |
+|------------------------|--------|--------------------------------------------------|---------------|
+| `max_active_downloads` | int    | Shared active-processing limit                   | `5`           |
+| `allowed_file_types`   | array  | Extensions eligible for import                   | Media formats |
+| `allow_samples`        | bool   | Include files identified as samples              | `false`       |
+| `min_file_size`        | string | Minimum eligible file size                       | `""`          |
+| `max_file_size`        | string | Maximum eligible file size; empty is unlimited   | `""`          |
 
 ## Debrid Providers
 
@@ -399,4 +421,4 @@ REPAIR__ENABLED=true
 REPAIR__INTERVAL=30m
 ```
 
-See [defaults.go](https://github.com/sirrobot01/decypharr/blob/main/internal/config/defaults.go) for all defaults.
+See [defaults.go](https://github.com/Trifocals3537/decypharr/blob/beta/internal/config/defaults.go) for all defaults.

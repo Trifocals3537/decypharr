@@ -25,12 +25,48 @@ Usenet streaming.
 
 ## Quick Start
 
-### Docker (Recommended)
+### Native Linux
+
+Native binaries are the primary deployment path for seedboxes and other
+user-managed Linux hosts. Download the archive for your architecture from this
+fork's [GitHub Releases](https://github.com/Trifocals3537/decypharr/releases),
+verify it with the published `SHA256SUMS`, and install it:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf decypharr_Linux_x86_64.tar.gz
+install -Dm755 decypharr ~/.local/bin/decypharr
+mkdir -p ~/.decypharr
+~/.local/bin/decypharr --config ~/.decypharr
+```
+
+The first launch creates the configuration and listens on
+`127.0.0.1:8282`. From another computer, use an SSH tunnel such as
+`ssh -L 8282:127.0.0.1:8282 user@seedbox`, then open
+`http://127.0.0.1:8282`. Put a trusted reverse proxy in front of Decypharr or
+explicitly change `bind_address` only when remote access is intended.
+
+On Ubuntu or Debian, the host needs FUSE support and the compatible FUSE
+runtime (commonly `libfuse2`). Rclone is needed only when using the rclone
+mount backend. Existing installations can validate their configuration without
+starting services:
+
+```bash
+~/.local/bin/decypharr --config ~/.decypharr --check-config
+```
+
+The release archive includes a user-level systemd unit. See the
+[native installation guide](docs/src/content/docs/guides/installation.md) for
+service and non-systemd options.
+
+### Docker
+
+Docker remains supported, but it is not required:
 
 ```yaml
 services:
   decypharr:
-    image: cy01/blackhole:latest
+    image: ghcr.io/trifocals3537/decypharr:beta
     container_name: decypharr
     ports:
       - "8282:8282"
@@ -52,7 +88,8 @@ services:
 
 ## Documentation
 
-For complete documentation, please visit our [Documentation](https://docs.decypharr.com).
+See the [documentation source](docs/src/content/docs/) while the fork's
+standalone documentation site is being prepared.
 
 ## Contributing
 

@@ -21,6 +21,8 @@ type JobType string
 const (
 	JobTypeTorrent JobType = "torrent"
 	JobTypeNZB     JobType = "nzb"
+
+	jobQueueCompactThreshold = 1024
 )
 
 // Job represents a unified processing job for both torrents and NZBs
@@ -57,6 +59,7 @@ type JobQueue struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
 	jobs   []*Job
+	head   int
 	closed bool
 
 	maxWorkers int
@@ -111,7 +114,7 @@ func (q *JobQueue) Submit(job *Job) error {
 	q.logger.Debug().
 		Str("id", job.ID).
 		Str("type", string(job.Type)).
-		Int("queued", len(q.jobs)).
+		Int("queued", q.pendingLocked()).
 		Msg("Job submitted")
 	return nil
 }
@@ -120,7 +123,7 @@ func (q *JobQueue) Submit(job *Job) error {
 func (q *JobQueue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.jobs)
+	return q.pendingLocked()
 }
 
 // ActiveCount returns the number of jobs currently holding an active-download slot.
@@ -148,6 +151,9 @@ func (q *JobQueue) Retry(job *Job, delay time.Duration) {
 func (q *JobQueue) Close() {
 	q.mu.Lock()
 	q.closed = true
+	clear(q.jobs)
+	q.jobs = q.jobs[:0]
+	q.head = 0
 	q.mu.Unlock()
 	q.cancel()
 	q.cond.Broadcast() // Wake all waiting workers
@@ -203,7 +209,7 @@ func (q *JobQueue) pop() *Job {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	for len(q.jobs) == 0 && !q.closed {
+	for q.pendingLocked() == 0 && !q.closed {
 		q.cond.Wait()
 	}
 
@@ -211,8 +217,10 @@ func (q *JobQueue) pop() *Job {
 		return nil
 	}
 
-	job := q.jobs[0]
-	q.jobs = q.jobs[1:]
+	job := q.jobs[q.head]
+	q.jobs[q.head] = nil
+	q.head++
+	q.compactLocked()
 	return job
 }
 
@@ -222,9 +230,13 @@ func (q *JobQueue) DeleteJob(jobID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	for i, job := range q.jobs {
+	for i := q.head; i < len(q.jobs); i++ {
+		job := q.jobs[i]
 		if job.ID == jobID {
-			q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+			copy(q.jobs[i:], q.jobs[i+1:])
+			q.jobs[len(q.jobs)-1] = nil
+			q.jobs = q.jobs[:len(q.jobs)-1]
+			q.compactLocked()
 			return true
 		}
 	}
@@ -236,7 +248,7 @@ func (q *JobQueue) FindJob(jobID string) *Job {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	for _, job := range q.jobs {
+	for _, job := range q.jobs[q.head:] {
 		if job.ID == jobID {
 			return job
 		}
@@ -250,14 +262,38 @@ func (q *JobQueue) PendingCount(jobType JobType) int {
 	defer q.mu.Unlock()
 
 	if jobType == "" {
-		return len(q.jobs)
+		return q.pendingLocked()
 	}
 
 	count := 0
-	for _, job := range q.jobs {
+	for _, job := range q.jobs[q.head:] {
 		if job.Type == jobType {
 			count++
 		}
 	}
 	return count
+}
+
+func (q *JobQueue) pendingLocked() int {
+	return len(q.jobs) - q.head
+}
+
+// compactLocked clears consumed references immediately and periodically moves
+// pending jobs back to the start of the reusable slice. This prevents a
+// long-running queue from retaining completed jobs or allocating a new backing
+// array for every enqueue/drain burst.
+func (q *JobQueue) compactLocked() {
+	if q.head == len(q.jobs) {
+		q.jobs = q.jobs[:0]
+		q.head = 0
+		return
+	}
+	if q.head < jobQueueCompactThreshold || q.head*2 < len(q.jobs) {
+		return
+	}
+
+	pending := copy(q.jobs, q.jobs[q.head:])
+	clear(q.jobs[pending:])
+	q.jobs = q.jobs[:pending]
+	q.head = 0
 }

@@ -535,25 +535,28 @@ curl -H "Authorization: Bearer TOKEN" \
 
 ### Reset to defaults
 
-**Backup current config:**
+Stop Decypharr first, then move the configuration aside so it can be restored
+if needed. For a native install:
 
 ```bash
-cp /config/config.json /config/config.json.backup
+mv ~/.decypharr/config.json \
+  ~/.decypharr/config.json.backup-$(date +%Y%m%d-%H%M%S)
 ```
 
-**Delete config:**
+For the documented container image, use the mounted `/app` directory instead:
 
 ```bash
-rm /config/config.json
+mv /app/config.json /app/config.json.backup-$(date +%Y%m%d-%H%M%S)
 ```
 
-**Restart - setup wizard will run**
+Restart Decypharr and the setup wizard will run. Keep the backup until the new
+configuration is verified.
 
 ## Getting Help
 
 If you can't resolve the issue:
 
-1. **Check GitHub Issues:** https://github.com/sirrobot01/decypharr/issues
+1. **Check upstream GitHub Issues for inherited problems:** https://github.com/sirrobot01/decypharr/issues
 2. **Provide:**
     - Decypharr version (`/version`)
     - Relevant logs (with `log_level: debug`)

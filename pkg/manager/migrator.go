@@ -27,6 +27,7 @@ type Migrator struct {
 	mu         sync.RWMutex
 	cancelFunc context.CancelFunc
 	ctx        context.Context
+	done       chan struct{}
 }
 
 // NewMigrator creates a new migrator
@@ -43,9 +44,31 @@ func NewMigrator(storage *storage.Storage) *Migrator {
 }
 
 // Start starts the migration process from cache files
-func (m *Migrator) Start() error {
+func (m *Migrator) Start(parent context.Context) error {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.cancelFunc != nil {
+		m.mu.Unlock()
+		cancel()
+		return fmt.Errorf("migration is already running")
+	}
+	m.ctx = ctx
+	m.cancelFunc = cancel
+	m.done = done
+	m.mu.Unlock()
+
+	defer func() {
+		cancel()
+		close(done)
+
+		m.mu.Lock()
+		m.ctx = nil
+		m.cancelFunc = nil
+		m.done = nil
+		m.mu.Unlock()
+	}()
 
 	// Load cache torrents
 	cachedTorrents, err := m.loadCacheTorrents()
@@ -68,11 +91,6 @@ func (m *Migrator) Start() error {
 		return fmt.Errorf("failed to save migration status: %w", err)
 	}
 
-	// Start migration in background
-	ctx, cancel := context.WithCancel(context.Background())
-	m.ctx = ctx
-	m.cancelFunc = cancel
-
 	m.runMigration(ctx, cachedTorrents)
 
 	return nil
@@ -81,23 +99,19 @@ func (m *Migrator) Start() error {
 // Stop stops the migration process
 func (m *Migrator) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	cancel := m.cancelFunc
+	done := m.done
+	m.mu.Unlock()
 
-	if m.cancelFunc != nil {
-		m.cancelFunc()
-		m.cancelFunc = nil
+	if cancel == nil {
+		return nil
 	}
 
-	// Update status
-	status, err := m.storage.GetMigrationStatus()
-	if err != nil {
-		return err
+	cancel()
+	if done != nil {
+		<-done
 	}
-
-	status.Running = false
-	status.UpdatedAt = time.Now()
-
-	return m.storage.SaveMigrationStatus(status)
+	return nil
 }
 
 // GetStatus returns the current migration status
@@ -146,12 +160,21 @@ func (m *Migrator) countMultiDebrid(torrents map[string][]*storage.CachedTorrent
 func (m *Migrator) runMigration(ctx context.Context, cachedTorrents map[string][]*storage.CachedTorrent) {
 	m.logger.Info().Msg("Starting migration from cache files")
 
-	status, _ := m.storage.GetMigrationStatus()
+	status, err := m.storage.GetMigrationStatus()
+	if err != nil || status == nil {
+		m.logger.Error().Err(err).Msg("Failed to load migration status")
+		return
+	}
 
 	for infohash, cachedList := range cachedTorrents {
 		select {
 		case <-ctx.Done():
 			m.logger.Info().Msg("Migration stopped by user")
+			status.Running = false
+			status.UpdatedAt = time.Now()
+			if err := m.storage.SaveMigrationStatus(status); err != nil {
+				m.logger.Error().Err(err).Msg("Failed to save stopped migration status")
+			}
 			return
 		default:
 		}

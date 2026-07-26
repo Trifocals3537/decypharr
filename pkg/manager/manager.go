@@ -3,11 +3,13 @@ package manager
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -56,8 +58,14 @@ type Manager struct {
 	linkService *link.Service
 
 	// repair
-	fixer *Fixer
-	ctx   context.Context
+	fixer  *Fixer
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	background            sync.WaitGroup
+	backgroundMu          sync.Mutex
+	backgroundStopping    bool
+	backgroundWaitTimeout time.Duration
 
 	customFolders *CustomFolders
 	mountManager  MountManager
@@ -98,9 +106,6 @@ func New() *Manager {
 	if err != nil {
 		panic(fmt.Errorf("failed to create manager storage: %w", err))
 	}
-
-	// Initialize debrid registry
-	ctx := context.Background()
 
 	// Optimized transport for high-performance streaming with HTTP/2 multiplexing
 	// DNS resolver with caching
@@ -146,7 +151,6 @@ func New() *Manager {
 		config:                 cfg,
 		arr:                    arr.NewStorage(),
 		queue:                  newQueue(strg, cfg.RemoveStalledAfter),
-		ctx:                    ctx,
 		ready:                  make(chan struct{}),
 		streamClient:           streamClient,
 		usenetTimeout:          usenetTimeout,
@@ -155,10 +159,76 @@ func New() *Manager {
 		processingEntries:      xsync.NewMap[string, struct{}](),
 	}
 
+	instance.resetLifecycle()
 	instance.init()
 
 	// Create migrator
 	return instance
+}
+
+func (m *Manager) resetLifecycle() {
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.backgroundMu.Lock()
+	m.backgroundStopping = false
+	m.backgroundMu.Unlock()
+}
+
+// startBackground registers manager-owned work before starting it. Stop closes
+// this registration gate before waiting, which makes Add and Wait ordering safe
+// and prevents late scheduler callbacks from escaping the shutdown barrier.
+func (m *Manager) startBackground(name string, work func()) bool {
+	m.backgroundMu.Lock()
+	if m.backgroundStopping {
+		m.backgroundMu.Unlock()
+		return false
+	}
+	m.background.Add(1)
+	m.backgroundMu.Unlock()
+
+	go func() {
+		defer m.background.Done()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				m.logger.Error().
+					Str("task", name).
+					Interface("panic", recovered).
+					Bytes("stack", debug.Stack()).
+					Msg("Recovered from panic in background manager task")
+			}
+		}()
+		work()
+	}()
+	return true
+}
+
+func (m *Manager) stopAcceptingBackgroundWork() {
+	m.backgroundMu.Lock()
+	m.backgroundStopping = true
+	m.backgroundMu.Unlock()
+}
+
+const defaultBackgroundWaitTimeout = 30 * time.Second
+
+func (m *Manager) waitForBackground() error {
+	timeout := m.backgroundWaitTimeout
+	if timeout <= 0 {
+		timeout = defaultBackgroundWaitTimeout
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.background.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("manager background work did not stop within %s", timeout)
+	}
 }
 
 func (m *Manager) init() {
@@ -268,14 +338,9 @@ func (m *Manager) initJobQueue() {
 	// for 60-90 minutes on big libraries, during which every arr reported
 	// "download client unavailable". Backgrounding lets the API serve and the
 	// worker pool drain immediately while the restore catches up.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				m.logger.Error().Interface("panic", r).Msg("Recovered from panic while restoring active downloads")
-			}
-		}()
-		m.restoreActiveDownloadJobs()
-	}()
+	m.startBackground("restore active downloads", func() {
+		m.restoreActiveDownloadJobs(m.ctx)
+	})
 }
 
 func (m *Manager) processJob(ctx context.Context, job *Job) {
@@ -339,7 +404,7 @@ func (m *Manager) waitForDownloadCompletion(ctx context.Context, entry *storage.
 	}
 }
 
-func (m *Manager) migrate() {
+func (m *Manager) migrate(ctx context.Context) {
 	// Check if migration has already been done
 	status, err := m.migrator.GetStatus()
 	if err == nil && !status.Running && status.Completed > 0 {
@@ -373,7 +438,7 @@ func (m *Manager) migrate() {
 		Msg("Found cache files, starting automatic migration...")
 
 	// Start migration with backup
-	if err := m.migrator.Start(); err != nil {
+	if err := m.migrator.Start(ctx); err != nil {
 		m.logger.Error().Err(err).Msg("Failed to start automatic migration")
 		return
 	}
@@ -391,23 +456,38 @@ func (m *Manager) Start(ctx context.Context) error {
 		Str("mount_path", m.config.Mount.MountPath).
 		Msg("Starting manager")
 
-	// run the migration process
-	m.migrate()
+	// Tie manager-owned startup work to the service lifetime. Stop also cancels
+	// this context, so restarts and direct shutdowns use the same path.
+	m.startBackground("service cancellation", func() {
+		select {
+		case <-ctx.Done():
+			if m.cancel != nil {
+				m.cancel()
+			}
+		case <-m.ctx.Done():
+		}
+	})
 
-	go func() {
-		m.syncTorrents(ctx)
+	// run the migration process
+	m.migrate(m.ctx)
+
+	m.startBackground("initial provider sync", func() {
+		m.syncTorrents(m.ctx)
+		if m.ctx.Err() != nil {
+			return
+		}
 		// Sync NZBs
-		if err := m.syncNZBs(ctx); err != nil {
+		if err := m.syncNZBs(m.ctx); err != nil && m.ctx.Err() == nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
 		}
 		if fixNZB := os.Getenv("DECYPHARR_FIX_NZB_SIZES"); fixNZB == "1" {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
-			m.fixNZBFileSizes(ctx)
+			m.fixNZBFileSizes(m.ctx)
 		}
-	}()
+	})
 
 	// Start workers
-	if err := m.StartWorker(ctx); err != nil {
+	if err := m.StartWorker(m.ctx); err != nil {
 		return fmt.Errorf("failed to start manager worker: %w", err)
 	}
 
@@ -432,24 +512,38 @@ func (m *Manager) Start(ctx context.Context) error {
 // Stop stops the manager and cleans up all resources
 func (m *Manager) Stop() error {
 	m.logger.Info().Msg("Stopping manager")
+	var shutdownErr error
 
-	// Stop mount manager first
-	if m.mountManager != nil {
-		m.logger.Info().Msg("Stopping mount manager")
-		if err := m.mountManager.Stop(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to stop mount manager")
+	// Close the background registration gate before cancellation. Any work
+	// accepted before this point is included in the barrier; later scheduler
+	// callbacks are rejected.
+	m.stopAcceptingBackgroundWork()
+
+	if m.cancel != nil {
+		m.cancel()
+	}
+
+	if m.migrator != nil {
+		if err := m.migrator.Stop(); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to stop migration: %w", err))
 		}
 	}
 
 	// Stop schedulers
 	if m.scheduler != nil {
 		if err := m.scheduler.Shutdown(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to shutdown scheduler")
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to shutdown scheduler: %w", err))
+		} else {
+			// Shutdown consumes the scheduler's terminal result. Clear the
+			// handle so a retry after a later drain timeout remains safe.
+			m.scheduler = nil
 		}
 	}
 	if m.cetScheduler != nil {
 		if err := m.cetScheduler.Shutdown(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to shutdown CET scheduler")
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to shutdown CET scheduler: %w", err))
+		} else {
+			m.cetScheduler = nil
 		}
 	}
 
@@ -458,23 +552,45 @@ func (m *Manager) Stop() error {
 		m.jobQueue.Close()
 	}
 
+	if m.repair != nil {
+		if err := m.repair.Stop(); err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to stop repair service: %w", err))
+		}
+	}
+
+	// All manager-owned startup work must finish before mount, usenet, or
+	// storage resources are closed. A provider API may not expose a
+	// context-aware method; in that case return a bounded error and preserve
+	// those resources so the unfinished task can never run against closed
+	// state.
+	if err := m.waitForBackground(); err != nil {
+		shutdownErr = errors.Join(shutdownErr, err)
+	}
+	if shutdownErr != nil {
+		m.logger.Error().Err(shutdownErr).Msg("Manager shutdown paused with resources still open")
+		return shutdownErr
+	}
+
+	if m.mountManager != nil {
+		m.logger.Info().Msg("Stopping mount manager")
+		if err := m.mountManager.Stop(); err != nil {
+			return fmt.Errorf("failed to stop mount manager: %w", err)
+		}
+	}
+
 	// Close usenet connection manager if active
 	if m.usenet != nil {
 		m.logger.Info().Msg("Closing usenet connections")
 		if err := m.usenet.Close(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to close usenet")
+			return fmt.Errorf("failed to close usenet: %w", err)
 		}
-	}
-
-	if m.repair != nil {
-		m.repair.Stop()
 	}
 
 	// Close storage
 	if m.storage != nil {
 		m.logger.Info().Msg("Closing storage database")
 		if err := m.storage.Close(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to close storage")
+			return fmt.Errorf("failed to close storage: %w", err)
 		}
 	}
 
@@ -489,7 +605,7 @@ func (m *Manager) Reset() error {
 
 	// Stop resources before resetting
 	if err := m.Stop(); err != nil {
-		m.logger.Warn().Err(err).Msg("Failed to stop manager during reset")
+		return fmt.Errorf("failed to stop manager during reset: %w", err)
 	}
 
 	// Reopen storage database (it was closed by Stop)
@@ -498,6 +614,8 @@ func (m *Manager) Reset() error {
 		return fmt.Errorf("failed to reopen storage after reset: %w", err)
 	}
 	m.storage = strg
+
+	m.resetLifecycle()
 
 	// Reload configuration
 	m.init()
@@ -575,7 +693,9 @@ func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Ent
 		return err
 	}
 	if callback != nil {
-		go callback(entry)
+		m.startBackground("entry update callback", func() {
+			callback(entry)
+		})
 	}
 	return nil
 }
@@ -613,7 +733,11 @@ func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 	}
 	// Delete active placements from debrid clients
 	if removePlacements {
-		go m.RemoveTorrentPlacements(torr)
+		if !m.startBackground("remove torrent placements", func() {
+			m.RemoveTorrentPlacements(torr)
+		}) {
+			return fmt.Errorf("cannot delete entry while manager is stopping")
+		}
 	}
 
 	if err := m.storage.Delete(infohash); err != nil {

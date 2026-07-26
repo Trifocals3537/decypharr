@@ -74,3 +74,49 @@ func TestLoadForValidationRequiresExistingConfig(t *testing.T) {
 		t.Fatalf("LoadForValidation() error = %v, want os.ErrNotExist", err)
 	}
 }
+
+func TestSetDefaultsUsesLoopbackBindAddress(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.setDefaultsForPath(t.TempDir(), false); err != nil {
+		t.Fatalf("setDefaultsForPath() error = %v", err)
+	}
+	if cfg.BindAddress != DefaultBindAddress {
+		t.Fatalf("BindAddress = %q, want %q", cfg.BindAddress, DefaultBindAddress)
+	}
+}
+
+func TestSetDefaultsPreservesExplicitBindAddress(t *testing.T) {
+	cfg := &Config{BindAddress: "0.0.0.0"}
+	if err := cfg.setDefaultsForPath(t.TempDir(), false); err != nil {
+		t.Fatalf("setDefaultsForPath() error = %v", err)
+	}
+	if cfg.BindAddress != "0.0.0.0" {
+		t.Fatalf("BindAddress = %q, want explicit override", cfg.BindAddress)
+	}
+}
+
+func TestFirstLoadAppliesBindAddressEnvironmentOverride(t *testing.T) {
+	previousPath := GetMainPath()
+	configDir := t.TempDir()
+	SetConfigPath(configDir)
+	t.Cleanup(func() {
+		SetConfigPath(previousPath)
+	})
+	t.Setenv("DECYPHARR_BIND_ADDRESS", "0.0.0.0")
+
+	cfg := &Config{}
+	if err := cfg.loadConfig(); err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.BindAddress != "0.0.0.0" {
+		t.Fatalf("runtime BindAddress = %q, want environment override", cfg.BindAddress)
+	}
+
+	data, err := os.ReadFile(filepath.Join(configDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"bind_address": "127.0.0.1"`)) {
+		t.Fatalf("generated config did not retain the safe native bind default: %s", data)
+	}
+}

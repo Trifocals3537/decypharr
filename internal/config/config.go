@@ -301,7 +301,15 @@ func (c *Config) loadConfig() error {
 			if err := c.createConfig(); err != nil {
 				return fmt.Errorf("failed to create config file: %w", err)
 			}
-			return c.Save()
+			if err := c.Save(); err != nil {
+				return err
+			}
+			// Environment overrides are runtime settings and should take effect
+			// on the first launch as well as subsequent launches. This is
+			// especially important for the container image, which deliberately
+			// opts into listening beyond the native loopback-only default.
+			c.applyEnvOverrides()
+			return nil
 		}
 		return fmt.Errorf("error reading config file: %w", err)
 	}
@@ -560,6 +568,16 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 	// Migrate deprecated fields to Manager (backward compatibility)
 	c.migrateQBitTorrentToManager(configRoot)
 	c.migrateNotifications()
+
+	if c.BindAddress == "" {
+		c.BindAddress = DefaultBindAddress
+	}
+	if c.Port == "" {
+		c.Port = DefaultPort
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = DefaultLogLevel
+	}
 
 	if c.DefaultDownloadAction == "" {
 		c.DefaultDownloadAction = DownloadActionSymlink
@@ -881,6 +899,7 @@ func (c *Config) createConfig() error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 	c.URLBase = "/"
+	c.BindAddress = DefaultBindAddress
 	c.Port = DefaultPort
 	c.LogLevel = DefaultLogLevel
 	c.UseAuth = true

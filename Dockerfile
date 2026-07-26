@@ -48,10 +48,10 @@ ARG VERSION=0.0.0
 ARG CHANNEL=dev
 
 LABEL version="${VERSION}-${CHANNEL}"
-LABEL org.opencontainers.image.source="https://github.com/sirrobot01/decypharr"
+LABEL org.opencontainers.image.source="https://github.com/Trifocals3537/decypharr"
 LABEL org.opencontainers.image.title="decypharr"
-LABEL org.opencontainers.image.authors="sirrobot01"
-LABEL org.opencontainers.image.documentation="https://github.com/sirrobot01/decypharr/blob/main/README.md"
+LABEL org.opencontainers.image.authors="Decypharr contributors"
+LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/decypharr/blob/beta/README.md"
 
 # Install dependencies including rclone (from binary)
 RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata && \
@@ -79,6 +79,7 @@ RUN chmod +x /entrypoint.sh
 ENV PUID=1000
 ENV PGID=1000
 ENV LOG_PATH=/app/logs
+ENV DECYPHARR_BIND_ADDRESS=0.0.0.0
 
 EXPOSE 8282
 VOLUME ["/app"]

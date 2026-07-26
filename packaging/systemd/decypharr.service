@@ -1,17 +1,15 @@
 [Unit]
 Description=Decypharr media gateway
-Documentation=https://docs.decypharr.com/
-Wants=network-online.target
-After=network-online.target
+Documentation=https://github.com/Trifocals3537/decypharr
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/decypharr --config %h/.config/decypharr
-EnvironmentFile=-%h/.config/decypharr/environment
+ExecStart=%h/.local/bin/decypharr --config %h/.decypharr
+EnvironmentFile=-%h/.decypharr/environment
 UMask=0077
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=45s
+TimeoutStopSec=90s
 LimitNOFILE=65536
 
 [Install]

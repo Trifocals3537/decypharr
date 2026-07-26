@@ -524,10 +524,10 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Basic validation
 	if newConfig.BindAddress == "" {
-		newConfig.BindAddress = "0.0.0.0"
+		newConfig.BindAddress = config.DefaultBindAddress
 	}
 	if newConfig.Port == "" {
-		newConfig.Port = "8282"
+		newConfig.Port = config.DefaultPort
 	}
 
 	// Preserve fields that shouldn't be overwritten by frontend

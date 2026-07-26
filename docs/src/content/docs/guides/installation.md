@@ -1,9 +1,88 @@
 ---
 title: Installation
-description: Install Decypharr via Docker or binary.
+description: Install Decypharr as a native Linux service or with Docker.
 ---
 
-## Docker (Recommended)
+## Native Linux (Recommended)
+
+Download the archive for your architecture from this fork's
+[GitHub Releases](https://github.com/Trifocals3537/decypharr/releases).
+Linux hosts need FUSE support and a compatible FUSE runtime (commonly
+`libfuse2` on Ubuntu and Debian). Install rclone only if you plan to use the
+rclone mount backend.
+
+```bash
+# Verify the downloaded archive against SHA256SUMS, then extract it.
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf decypharr_Linux_x86_64.tar.gz
+
+install -Dm755 decypharr ~/.local/bin/decypharr
+mkdir -p ~/.decypharr
+
+# First launch: creates config.json and starts the setup wizard.
+~/.local/bin/decypharr --config ~/.decypharr
+```
+
+Native installs listen on `127.0.0.1:8282` by default so the unauthenticated
+first-run setup wizard is not exposed to the network. To configure a remote
+seedbox, open a tunnel:
+
+```bash
+ssh -L 8282:127.0.0.1:8282 user@seedbox
+```
+
+Then visit `http://127.0.0.1:8282`. For permanent remote access, prefer a
+trusted reverse proxy. Set `bind_address` explicitly only when you intend to
+listen on another interface.
+
+`--check-config` is for an existing configuration and never creates or changes
+files:
+
+```bash
+~/.local/bin/decypharr --config ~/.decypharr --check-config
+```
+
+### Run as a user service
+
+Linux release archives include a systemd user-service template. This keeps the
+service under your account and does not require Docker or root access after the
+host's FUSE prerequisites have been installed.
+
+```bash
+mkdir -p ~/.config/systemd/user
+install -m 0644 decypharr.service ~/.config/systemd/user/decypharr.service
+
+systemctl --user daemon-reload
+systemctl --user enable --now decypharr
+systemctl --user status decypharr
+```
+
+The supplied unit uses `~/.decypharr`, matching the application's native
+default. Before relying on a user service after logout, check whether lingering
+is enabled:
+
+```bash
+loginctl show-user "$USER" -p Linger
+```
+
+If it reports `Linger=no`, ask the host administrator or seedbox provider to
+enable lingering for your account. Some managed seedboxes do not expose a user
+systemd manager at all; in that case, use the provider's service manager,
+supervisord, s6, or another process supervisor. As a basic non-restarting
+fallback:
+
+```bash
+nohup ~/.local/bin/decypharr --config ~/.decypharr \
+  >> ~/.decypharr/decypharr.log 2>&1 &
+```
+
+Logs for the systemd service are available with:
+
+```bash
+journalctl --user -u decypharr -f
+```
+
+## Docker (Alternative)
 
 ### Docker Compose
 
@@ -12,7 +91,7 @@ Create a `docker-compose.yml`:
 ```yaml
 services:
   decypharr:
-    image: cy01/blackhole:latest
+    image: ghcr.io/trifocals3537/decypharr:beta
     container_name: decypharr
     ports:
       - "8282:8282"
@@ -51,47 +130,11 @@ docker run -d \
     --device /dev/fuse:/dev/fuse:rwm \
     --cap-add SYS_ADMIN \
     --security-opt apparmor:unconfined \
-  sirrobot01/decypharr:latest
+  ghcr.io/trifocals3537/decypharr:beta
 ```
 
-## Binary
-
-Download the latest release from [GitHub Releases](https://github.com/sirrobot01/decypharr/releases).
-
-```bash
-# Verify the downloaded archive against SHA256SUMS, then extract it
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf decypharr_Linux_x86_64.tar.gz
-
-# Run directly
-./decypharr --config /path/to/
-```
-
-### Run as a user service
-
-Linux release archives include a systemd user-service template. This keeps the
-service under your account and does not require Docker or root access after the
-host's FUSE prerequisites have been installed.
-
-```bash
-mkdir -p ~/.local/bin ~/.config/decypharr ~/.config/systemd/user
-install -m 0755 decypharr ~/.local/bin/decypharr
-install -m 0644 decypharr.service ~/.config/systemd/user/decypharr.service
-
-systemctl --user daemon-reload
-systemctl --user enable --now decypharr
-systemctl --user status decypharr
-```
-
-The supplied unit starts Decypharr with
-`--config ~/.config/decypharr`. To use an existing configuration elsewhere,
-edit the installed unit's `ExecStart` path before enabling it.
-
-Logs are available without Docker:
-
-```bash
-journalctl --user -u decypharr -f
-```
+The container image explicitly listens on `0.0.0.0`; publish only the ports you
+intend to expose.
 
 ## Managed (ElfHosted)
 

@@ -53,6 +53,7 @@ connections, set a specific trusted interface address (or `0.0.0.0`) in
 ```json
 {
   "max_active_downloads": 5,
+  "job_queue_capacity": 256,
   "allowed_file_types": ["mkv", "mp4"],
   "allow_samples": false,
   "min_file_size": "10MB",
@@ -62,9 +63,14 @@ connections, set a specific trusted interface address (or `0.0.0.0`) in
 
 `max_active_downloads` is the shared active-processing limit for torrent and NZB downloads. Additional imports remain queued until an active download completes.
 
+`job_queue_capacity` bounds all reserved, waiting, active, and delayed-retry
+imports. New qBittorrent and SABnzbd requests receive a retryable overload
+response when the bound is reached. Values above `4096` are clamped.
+
 | Field                  | Type   | Description                                      | Default       |
 |------------------------|--------|--------------------------------------------------|---------------|
 | `max_active_downloads` | int    | Shared active-processing limit                   | `5`           |
+| `job_queue_capacity`   | int    | Total admitted import limit (maximum `4096`)     | `256`         |
 | `allowed_file_types`   | array  | Extensions eligible for import                   | Media formats |
 | `allow_samples`        | bool   | Include files identified as samples              | `false`       |
 | `min_file_size`        | string | Minimum eligible file size                       | `""`          |
@@ -401,6 +407,7 @@ All config options support environment variable overrides using double underscor
 # Server
 PORT=8282
 LOG_LEVEL=debug
+DECYPHARR_JOB_QUEUE_CAPACITY=256
 
 # Debrid
 DEBRIDS__0__PROVIDER=realdebrid

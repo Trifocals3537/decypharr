@@ -2,7 +2,6 @@ package request
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +15,8 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/tlsconfig"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"go.uber.org/ratelimit"
 	"golang.org/x/net/proxy"
 )
@@ -36,7 +37,6 @@ type Client struct {
 	headersMu       sync.RWMutex
 	maxRetries      int
 	timeout         time.Duration
-	skipTLSVerify   bool
 	retryableStatus map[int]struct{}
 	logger          zerolog.Logger
 	proxy           string
@@ -86,7 +86,18 @@ func WithLogger(logger zerolog.Logger) ClientOption {
 
 func WithTransport(transport *http.Transport) ClientOption {
 	return func(c *Client) {
-		c.httpClient.Transport = transport
+		if transport == nil {
+			c.httpClient.Transport = nil
+			return
+		}
+
+		secured := transport.Clone()
+		secured.TLSClientConfig = tlsconfig.Harden(secured.TLSClientConfig)
+		// Custom TLS dial hooks bypass TLSClientConfig entirely. Clear them so
+		// WithTransport cannot silently opt out of certificate verification.
+		secured.DialTLS = nil
+		secured.DialTLSContext = nil
+		c.httpClient.Transport = secured
 	}
 }
 
@@ -149,13 +160,17 @@ func (c *Client) MakeRequest(req *http.Request) ([]byte, error) {
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// Response bodies can contain provider diagnostics, signed URLs, or
+		// credentials. Drain only a small bounded prefix for connection reuse
+		// and report the status without reflecting the body.
+		_, _ = io.CopyN(io.Discard, res.Body, 64<<10)
+		return nil, fmt.Errorf("HTTP error %d", res.StatusCode)
 	}
 
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP error %d: %s", res.StatusCode, string(bodyBytes))
+	bodyBytes, err := utils.ReadAllLimited(res.Body, utils.MaxJSONResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("reading bounded response body: %w", err)
 	}
 
 	return bodyBytes, nil
@@ -207,8 +222,7 @@ func retryAfterBackoff(min, max time.Duration, attemptNum int, resp *http.Respon
 // New creates a new HTTP client with the specified options
 func New(options ...ClientOption) *Client {
 	client := &Client{
-		maxRetries:    5,
-		skipTLSVerify: true,
+		maxRetries: 5,
 		retryableStatus: map[int]struct{}{
 			http.StatusTooManyRequests:     {},
 			http.StatusInternalServerError: {},
@@ -237,9 +251,7 @@ func New(options ...ClientOption) *Client {
 	// Check if transport was set by WithTransport option
 	if client.httpClient.Transport == nil {
 		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: client.skipTLSVerify,
-			},
+			TLSClientConfig: tlsconfig.Verified(""),
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 15 * time.Second,

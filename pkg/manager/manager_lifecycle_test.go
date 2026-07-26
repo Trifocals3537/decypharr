@@ -333,7 +333,7 @@ func TestManagerStopSchedulerTimeoutPreservesStorageAndMount(t *testing.T) {
 	waitForSignal(t, done, "scheduler job release")
 }
 
-func TestDeleteEntryRejectsPlacementCleanupAfterShutdownStarts(t *testing.T) {
+func TestDeleteEntryUsesSynchronousCleanupAfterBackgroundShutdownStarts(t *testing.T) {
 	testRoot := t.TempDir()
 	config.SetConfigPath(testRoot)
 	strg, err := storage.NewStorage(filepath.Join(testRoot, "db"))
@@ -361,15 +361,15 @@ func TestDeleteEntryRejectsPlacementCleanupAfterShutdownStarts(t *testing.T) {
 	m.stopAcceptingBackgroundWork()
 
 	err = m.DeleteEntry(entry.InfoHash, true)
-	if err == nil || !strings.Contains(err.Error(), "manager is stopping") {
-		t.Fatalf("DeleteEntry() error = %v, want manager-stopping error", err)
+	if err != nil {
+		t.Fatalf("DeleteEntry() error = %v", err)
 	}
 	exists, err := strg.Exists(entry.InfoHash)
 	if err != nil {
 		t.Fatalf("Exists() error = %v", err)
 	}
-	if !exists {
-		t.Fatal("DeleteEntry() removed storage entry without accepting placement cleanup")
+	if exists {
+		t.Fatal("DeleteEntry() retained storage entry after synchronous cleanup")
 	}
 }
 

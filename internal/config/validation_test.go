@@ -95,6 +95,38 @@ func TestSetDefaultsPreservesExplicitBindAddress(t *testing.T) {
 	}
 }
 
+func TestSetDefaultsBoundsJobQueueCapacity(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{name: "missing uses backward compatible default", want: DefaultJobQueueCapacity},
+		{name: "explicit value", in: 64, want: 64},
+		{name: "upper bound", in: MaxJobQueueCapacity + 1, want: MaxJobQueueCapacity},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{JobQueueCapacity: test.in}
+			if err := cfg.setDefaultsForPath(t.TempDir(), false); err != nil {
+				t.Fatalf("setDefaultsForPath() error = %v", err)
+			}
+			if cfg.JobQueueCapacity != test.want {
+				t.Fatalf("JobQueueCapacity = %d, want %d", cfg.JobQueueCapacity, test.want)
+			}
+		})
+	}
+}
+
+func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
+	t.Setenv("DECYPHARR_JOB_QUEUE_CAPACITY", "73")
+	cfg := &Config{}
+	cfg.applyEnvOverrides()
+	if cfg.JobQueueCapacity != 73 {
+		t.Fatalf("JobQueueCapacity = %d, want 73", cfg.JobQueueCapacity)
+	}
+}
+
 func TestFirstLoadAppliesBindAddressEnvironmentOverride(t *testing.T) {
 	previousPath := GetMainPath()
 	configDir := t.TempDir()

@@ -2,9 +2,12 @@ package usenet
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -18,9 +21,11 @@ import (
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
+	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
@@ -220,6 +225,10 @@ type Usenet struct {
 	failedFiles              *xsync.Map[string, error]
 
 	fs *xsync.Map[string, *fsEntry]
+
+	watcherMu       sync.Mutex
+	claimScanner    *NZBClaimScanner
+	acceptedCleaner *AcceptedNZBCleaner
 }
 
 // fsKey builds a cache key for fs map entries efficiently.
@@ -240,6 +249,9 @@ func New() (*Usenet, error) {
 	usenetConfig := cfg.Usenet
 	if len(usenetConfig.Providers) == 0 {
 		return nil, fmt.Errorf("no usenet providers configured")
+	}
+	if err := initStreamsDir(usenetConfig.DiskBufferPath); err != nil {
+		return nil, fmt.Errorf("initialize usenet stream cache: %w", err)
 	}
 	_logger := logger.New("usenet")
 
@@ -295,22 +307,15 @@ func New() (*Usenet, error) {
 		failedFiles:              xsync.NewMap[string, error](),
 	}
 
-	// clean streams dir
-	u.initStreamsDir(cfg.Usenet.DiskBufferPath)
-
 	// Start background cleanup for idle sessions
 	go u.cleanupIdleFS()
 
 	return u, nil
 }
 
-func (u *Usenet) initStreamsDir(streamsDir string) {
-	if err := os.RemoveAll(streamsDir); err != nil && !os.IsNotExist(err) {
-		return
-	}
-	if err := os.MkdirAll(streamsDir, 0755); err != nil {
-		return
-	}
+func initStreamsDir(streamsDir string) error {
+	_, err := reader.PrepareDiskCacheRoot(streamsDir)
+	return err
 }
 
 func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
@@ -440,6 +445,14 @@ func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byt
 	if len(content) == 0 {
 		return nil, nil, fmt.Errorf("NZB content is empty")
 	}
+	var canonicalID string
+	if id != "" {
+		var err error
+		canonicalID, err = canonicalNZBID(id)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
 	// Validate NZB content
 	if err := validateNZB(content); err != nil {
@@ -454,8 +467,19 @@ func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byt
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := safepath.ValidateIdentifier(nzb.Name); err != nil {
+		return nil, nil, fmt.Errorf("unsafe NZB name: %w", err)
+	}
+	if category != "" {
+		if err := safepath.ValidateIdentifier(category); err != nil {
+			return nil, nil, fmt.Errorf("unsafe NZB category: %w", err)
+		}
+	}
 	if id != "" {
-		nzb.ID = id
+		nzb.ID = canonicalID
+	}
+	if _, err := canonicalNZBID(nzb.ID); err != nil {
+		return nil, nil, err
 	}
 
 	nzb.Category = category
@@ -471,13 +495,14 @@ func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byt
 	if err := u.markAsProcessing(nzb); err != nil {
 		// Don't leave the source file orphaned; an un-marked .nzb would be
 		// re-claimed by the refresh watcher on every scan.
-		_ = os.Remove(nzbPath)
+		_ = removeMetadataFileIfExists(u.metadataDir, nzbPath)
 		return nil, nil, fmt.Errorf("failed to mark NZB as processing: %w", err)
 	}
 
 	if err := u.nzbStorage.AddNZB(nzb); err != nil {
-		_ = os.Remove(nzbPath + ".processing")
-		_ = os.Remove(nzbPath)
+		processingPath, _ := metadataFilePath(u.metadataDir, nzb.ID, nzbProcessingSuffix)
+		_ = removeMetadataFileIfExists(u.metadataDir, processingPath)
+		_ = removeMetadataFileIfExists(u.metadataDir, nzbPath)
 		return nil, nil, fmt.Errorf("failed to save NZB to storage: %w", err)
 	}
 
@@ -505,6 +530,10 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 		_ = u.markAsFailed(nzb, err)
 		return nzb, fmt.Errorf("failed to process NZB archives: %w", err)
 	}
+	if err := normalizeLogicalNZBFileNames(updatedNZB.Files); err != nil {
+		_ = u.markAsFailed(updatedNZB, err)
+		return updatedNZB, err
+	}
 
 	// Post-parse availability gate: probe a sample of each content file's
 	// segments before declaring the NZB complete. Segments can go missing
@@ -529,6 +558,39 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 		Int("files", len(updatedNZB.Files)).
 		Msg("Successfully processed NZB archives (full parse)")
 	return updatedNZB, nil
+}
+
+// flattenLogicalNZBFileName intentionally discards archive/yEnc directory
+// components. Decypharr exposes every logical media file directly inside one
+// release directory, so nested source paths are not part of the storage model.
+func flattenLogicalNZBFileName(name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	flattened := path.Base(normalized)
+	if err := safepath.ValidateIdentifier(flattened); err != nil {
+		return "", err
+	}
+	return flattened, nil
+}
+
+func normalizeLogicalNZBFileNames(files []storage.NZBFile) error {
+	seenNames := make(map[string]struct{}, len(files))
+	for i := range files {
+		originalName := files[i].Name
+		flattenedName, err := flattenLogicalNZBFileName(originalName)
+		if err != nil {
+			return fmt.Errorf("unsafe NZB file name %q: %w", originalName, err)
+		}
+		collisionKey, err := safepath.PortableNameKey(flattenedName)
+		if err != nil {
+			return fmt.Errorf("unsafe NZB file name %q: %w", originalName, err)
+		}
+		if _, exists := seenNames[collisionKey]; exists {
+			return fmt.Errorf("duplicate NZB file name after flattening: %q", flattenedName)
+		}
+		seenNames[collisionKey] = struct{}{}
+		files[i].Name = flattenedName
+	}
+	return nil
 }
 
 // checkAvailability samples each content file's segments (via the same
@@ -654,6 +716,23 @@ func (u *Usenet) Stop() {
 // Close closes all usenet resources including NNTP connections
 func (u *Usenet) Close() error {
 	u.logger.Info().Msg("Closing Usenet NNTP client")
+
+	u.watcherMu.Lock()
+	claimScanner := u.claimScanner
+	acceptedCleaner := u.acceptedCleaner
+	u.claimScanner = nil
+	u.acceptedCleaner = nil
+	u.watcherMu.Unlock()
+	if claimScanner != nil {
+		if err := claimScanner.Close(); err != nil {
+			u.logger.Warn().Err(err).Msg("Failed to close watched NZB scanner")
+		}
+	}
+	if acceptedCleaner != nil {
+		if err := acceptedCleaner.Close(); err != nil {
+			u.logger.Warn().Err(err).Msg("Failed to close accepted NZB cleaner")
+		}
+	}
 
 	// Close NNTP client FIRST to force-close all active connections.
 	// This unblocks any in-flight StreamBody/TCP reads in prefetch workers,
@@ -1011,8 +1090,11 @@ func (u *Usenet) saveNZBFile(id string, content []byte) (string, error) {
 	// marker suffix blew past that limit, which failed the rename, wedged the
 	// refresh watcher, and left truncated fragment files behind. The UUID keeps
 	// every derived name comfortably under the cap.
-	path := filepath.Join(u.metadataDir, id+".nzb")
-	if err := os.WriteFile(path, content, 0644); err != nil {
+	path, err := metadataFilePath(u.metadataDir, id, nzbSourceSuffix)
+	if err != nil {
+		return "", err
+	}
+	if err := writeMetadataFile(u.metadataDir, path, content, 0644); err != nil {
 		return "", fmt.Errorf("failed to save NZB file to disk: %w", err)
 	}
 	return path, nil
@@ -1020,95 +1102,171 @@ func (u *Usenet) saveNZBFile(id string, content []byte) (string, error) {
 
 // StageNZB persists a queued NZB before an active-download worker starts.
 func (u *Usenet) StageNZB(id string, content []byte) (string, error) {
-	if id == "" {
-		return "", fmt.Errorf("NZB ID is required")
-	}
-	// Keep the staged file off the .nzb extension so the metadata-directory
-	// watcher does not treat a pending active-download job as an unmanaged import.
-	path := filepath.Join(u.metadataDir, id+".queued")
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		return "", fmt.Errorf("failed to stage NZB file: %w", err)
-	}
-	return path, nil
+	return stageNZBAt(u.metadataDir, id, content)
 }
 
-// RemoveStagedNZB removes a queued source file after it has been parsed.
-func (u *Usenet) RemoveStagedNZB(path string) {
-	if path != "" {
-		_ = os.Remove(path)
+// ReadNZBSource reads the exact ID-bound .nzb source recorded in metadata.
+func (u *Usenet) ReadNZBSource(id, persistedPath string) ([]byte, error) {
+	path, err := validatePersistedMetadataPath(u.metadataDir, id, persistedPath, nzbSourceSuffix)
+	if err != nil {
+		return nil, err
 	}
+	if path == "" {
+		return nil, fmt.Errorf("NZB source path is empty")
+	}
+	return readMetadataFile(u.metadataDir, path)
+}
+
+// ReadStagedNZB reads the exact ID-bound .queued source held by the active queue.
+func (u *Usenet) ReadStagedNZB(id, persistedPath string) ([]byte, error) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	return ReadStagedNZBAt(u.metadataDir, id, persistedPath, maxInt64-1)
+}
+
+// RemoveStagedNZB removes an exact ID-bound queued source after parsing.
+func (u *Usenet) RemoveStagedNZB(id, persistedPath string) error {
+	return RemoveStagedNZBAt(u.metadataDir, id, persistedPath)
+}
+
+// ValidateStagedNZBAt verifies that persistedPath is either empty or the exact
+// canonical <id>.queued source directly beneath metadataRoot.
+func ValidateStagedNZBAt(metadataRoot, id, persistedPath string) error {
+	_, err := validatePersistedMetadataPath(metadataRoot, id, persistedPath, nzbStagedSuffix)
+	return err
+}
+
+// RemoveStagedNZBAt removes only the canonical <id>.queued source directly
+// beneath metadataRoot. It is exported for queue cleanup paths that do not own
+// a Usenet instance but must enforce the same ID binding.
+func RemoveStagedNZBAt(metadataRoot, id, persistedPath string) error {
+	path, err := validatePersistedMetadataPath(metadataRoot, id, persistedPath, nzbStagedSuffix)
+	if err != nil {
+		return err
+	}
+	return removeMetadataFileIfExists(metadataRoot, path)
 }
 
 func (u *Usenet) markAsProcessing(nzb *storage.NZB) error {
-	// Mark as processing by creating a marker file with the NZB ID
-	markerPath := nzb.Path + ".processing"
-	if err := os.WriteFile(markerPath, []byte(nzb.ID), 0644); err != nil {
+	if nzb == nil {
+		return fmt.Errorf("NZB is nil")
+	}
+	if _, err := validatePersistedMetadataPath(u.metadataDir, nzb.ID, nzb.Path, nzbSourceSuffix); err != nil {
+		return err
+	}
+	markerPath, err := metadataFilePath(u.metadataDir, nzb.ID, nzbProcessingSuffix)
+	if err != nil {
+		return err
+	}
+	if err := writeMetadataFile(u.metadataDir, markerPath, []byte(nzb.ID), 0644); err != nil {
 		return fmt.Errorf("failed to create processing marker: %w", err)
 	}
 	return nil
 }
 
 func (u *Usenet) markAsCompleted(nzb *storage.NZB) error {
+	if nzb == nil {
+		return fmt.Errorf("NZB is nil")
+	}
+	sourcePath, err := validatePersistedMetadataPath(u.metadataDir, nzb.ID, nzb.Path, nzbSourceSuffix)
+	if err != nil {
+		return err
+	}
 	nzb.Status = NZBStatusCompleted
 
-	// The parsed segment map (.meta) is the only artifact needed for streaming
-	// and repair, so the raw .nzb source file is dead weight once the NZB
-	// completes — delete it (and its processing marker) immediately. Path is
-	// cleared so a later Delete()/watch scan ignores the now-absent file; with
-	// the source gone there is nothing for ClaimNewNZBs to re-import, so no
-	// .processed marker is needed.
-	if nzb.Path != "" {
-		if err := os.Remove(nzb.Path); err != nil && !os.IsNotExist(err) {
-			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to delete NZB source file after completion")
-		}
-		_ = os.Remove(nzb.Path + ".processing")
-		nzb.Path = ""
-	}
-
+	// Persist completion before deleting its source. If cleanup fails or the
+	// process crashes, restart logic sees a completed record with an exact path
+	// that Delete can safely retry instead of a parsing record with no source.
 	if err := u.nzbStorage.AddNZB(nzb); err != nil {
-		return fmt.Errorf("failed to save NZB to storage: %w", err)
+		return fmt.Errorf("failed to save completed NZB to storage: %w", err)
+	}
+	if sourcePath == "" {
+		return nil
+	}
+	processingPath, err := metadataFilePath(u.metadataDir, nzb.ID, nzbProcessingSuffix)
+	if err != nil {
+		return err
+	}
+	var cleanupErr error
+	if err := removeMetadataFileIfExists(u.metadataDir, sourcePath); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove completed NZB source: %w", err))
+	}
+	if err := removeMetadataFileIfExists(u.metadataDir, processingPath); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove completed NZB processing marker: %w", err))
+	}
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	nzb.Path = ""
+	if err := u.nzbStorage.AddNZB(nzb); err != nil {
+		return fmt.Errorf("clear completed NZB source path: %w", err)
 	}
 	return nil
 }
 
-func (u *Usenet) markAsFailed(nzb *storage.NZB, err error) error {
+func (u *Usenet) markAsFailed(nzb *storage.NZB, cause error) error {
+	if nzb == nil {
+		return fmt.Errorf("NZB is nil")
+	}
+	if cause == nil {
+		return fmt.Errorf("NZB failure cause is nil")
+	}
+	sourcePath, err := validatePersistedMetadataPath(u.metadataDir, nzb.ID, nzb.Path, nzbSourceSuffix)
+	if err != nil {
+		return err
+	}
 	// Mark as failed in storage
 	nzb.Status = NZBStatusFailed
-	nzb.FailMessage = err.Error()
+	nzb.FailMessage = cause.Error()
 	if err := u.nzbStorage.AddNZB(nzb); err != nil {
 		return fmt.Errorf("failed to mark NZB as failed in storage: %w", err)
 	}
-
-	// Remove processing marker if exists
-	processingMarker := nzb.Path + ".processing"
-	_ = os.Remove(processingMarker)
-
-	// Remove the nzb file itself, as it's considered failed
-	if nzb.Path != "" {
-		if err := os.Remove(nzb.Path); err != nil && !os.IsNotExist(err) {
-			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to delete NZB file from disk after failure")
-		}
+	if sourcePath == "" {
+		return nil
 	}
-	return nil
+	processingPath, err := metadataFilePath(u.metadataDir, nzb.ID, nzbProcessingSuffix)
+	if err != nil {
+		return err
+	}
+	return errors.Join(
+		removeMetadataFileIfExists(u.metadataDir, processingPath),
+		removeMetadataFileIfExists(u.metadataDir, sourcePath),
+	)
 }
 
 func (u *Usenet) Delete(nzoID string) error {
 	nzb, err := u.nzbStorage.GetNZBHeader(nzoID)
 	if err != nil {
+		if IsNZBNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to get NZB: %w", err)
 	}
 
-	// Delete NZB XML file from disk
-	if nzb.Path != "" {
-		if err := os.Remove(nzb.Path); err != nil && !os.IsNotExist(err) {
-			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to delete NZB file from disk")
+	sourcePath, err := validatePersistedMetadataPath(u.metadataDir, nzoID, nzb.Path, nzbSourceSuffix)
+	if err != nil {
+		return fmt.Errorf("refusing unsafe persisted NZB path: %w", err)
+	}
+	if sourcePath != "" {
+		processingPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessingSuffix)
+		if pathErr != nil {
+			return pathErr
 		}
-
-		// Delete marker files
-		processedMarker := nzb.Path + ".processed"
-		_ = os.Remove(processedMarker)
-		failedMarker := nzb.Path + ".failed"
-		_ = os.Remove(failedMarker)
+		processedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbProcessedSuffix)
+		if pathErr != nil {
+			return pathErr
+		}
+		failedPath, pathErr := metadataFilePath(u.metadataDir, nzoID, nzbFailedSuffix)
+		if pathErr != nil {
+			return pathErr
+		}
+		if err := errors.Join(
+			removeMetadataFileIfExists(u.metadataDir, sourcePath),
+			removeMetadataFileIfExists(u.metadataDir, processingPath),
+			removeMetadataFileIfExists(u.metadataDir, processedPath),
+			removeMetadataFileIfExists(u.metadataDir, failedPath),
+		); err != nil {
+			return fmt.Errorf("remove NZB source artifacts: %w", err)
+		}
 	}
 
 	// Delete from file-based storage
@@ -1120,73 +1278,44 @@ func (u *Usenet) Delete(nzoID string) error {
 
 // PendingNZB is an unmanaged NZB file claimed by the metadata-directory watcher.
 type PendingNZB struct {
-	Name    string
-	Path    string
-	Content []byte
+	Name          string
+	Path          string
+	Content       []byte
+	ContentDigest [sha256.Size]byte
+	Size          int64
+	ModTime       time.Time
 }
 
 // ClaimNewNZBs moves unmanaged NZB files out of the watched extension and
 // returns them for submission to the shared active-download queue.
 func (u *Usenet) ClaimNewNZBs() ([]PendingNZB, error) {
-	entries, err := os.ReadDir(u.metadataDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata dir: %w", err)
-	}
+	result, err := u.ClaimNewNZBsBounded(DefaultClaimNewNZBLimits())
+	return result.Pending, err
+}
 
-	var pending []PendingNZB
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		claimedPath := filepath.Join(u.metadataDir, name)
-		if strings.HasSuffix(name, ".nzb.importing") {
-			name = strings.TrimSuffix(name, ".importing")
-		} else {
-			if filepath.Ext(name) != ".nzb" {
-				continue
-			}
-			path := filepath.Join(u.metadataDir, name)
-			if fileExists(path+".processed") || fileExists(path+".processing") || fileExists(path+".failed") {
-				continue
-			}
-			claimedPath = path + ".importing"
-			if err := os.Rename(path, claimedPath); err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				// Skip this entry instead of aborting the whole scan. A single
-				// poison file (e.g. a name so long that appending ".importing"
-				// exceeds the filesystem limit) previously failed every refresh
-				// and permanently blocked all other pending NZBs.
-				u.logger.Error().Err(err).Str("name", name).Msg("Failed to claim NZB; skipping")
-				continue
-			}
-		}
-
-		content, err := os.ReadFile(claimedPath)
+func (u *Usenet) ClaimNewNZBsBounded(
+	limits ClaimNewNZBLimits,
+) (ClaimNewNZBResult, error) {
+	var result ClaimNewNZBResult
+	u.watcherMu.Lock()
+	if u.claimScanner == nil {
+		scanner, err := NewNZBClaimScanner(u.metadataDir)
 		if err != nil {
-			u.logger.Error().Err(err).Str("path", claimedPath).Msg("Failed to read claimed NZB")
-			continue
+			u.watcherMu.Unlock()
+			return result, err
 		}
-		pending = append(pending, PendingNZB{Name: name, Path: claimedPath, Content: content})
+		u.claimScanner = scanner
 	}
+	scanner := u.claimScanner
+	u.watcherMu.Unlock()
 
-	if len(pending) > 0 {
-		u.logger.Info().Int("count", len(pending)).Msg("Found new NZB files to queue")
+	result, err := scanner.Scan(limits)
+	if len(result.Pending) > 0 {
+		u.logger.Info().
+			Int("count", len(result.Pending)).
+			Int("scanned", result.Scanned).
+			Int64("bytes", result.BytesRead).
+			Msg("Found new NZB files to queue")
 	}
-	return pending, nil
-}
-
-// RemoveClaimedNZB removes a watched source after it has been staged by the queue.
-func (u *Usenet) RemoveClaimedNZB(path string) {
-	if path != "" {
-		_ = os.Remove(path)
-	}
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	return result, err
 }

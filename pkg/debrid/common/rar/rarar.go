@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // Constants from the Python code
@@ -113,12 +115,20 @@ func (f *HttpFile) getFileSize() (int64, error) {
 	result, err := f.doWithRetry(func() (any, error) {
 		req, err := http.NewRequest(http.MethodHead, f.URL, nil)
 		if err != nil {
-			return int64(0), fmt.Errorf("%w: %v", ErrNetworkError, err)
+			return int64(0), fmt.Errorf(
+				"%w: create request for %s",
+				ErrNetworkError,
+				utils.RedactedURL(f.URL),
+			)
 		}
 
 		resp, err := f.client.Do(req)
 		if err != nil {
-			return int64(0), fmt.Errorf("%w: %v", ErrNetworkError, err)
+			return int64(0), fmt.Errorf(
+				"%w: request to %s failed",
+				ErrNetworkError,
+				utils.RedactedURL(f.URL),
+			)
 		}
 		defer resp.Body.Close()
 
@@ -131,10 +141,12 @@ func (f *HttpFile) getFileSize() (int64, error) {
 			return int64(0), fmt.Errorf("%w: content length not provided", ErrNetworkError)
 		}
 
-		var size int64
-		_, err = fmt.Sscanf(contentLength, "%d", &size)
+		size, err := strconv.ParseInt(contentLength, 10, 64)
 		if err != nil {
 			return int64(0), fmt.Errorf("%w: %v", ErrNetworkError, err)
+		}
+		if size <= 0 {
+			return int64(0), fmt.Errorf("%w: invalid content length", ErrNetworkError)
 		}
 
 		return size, nil
@@ -152,18 +164,22 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if off < 0 {
+		return 0, fmt.Errorf("%w: negative read offset", ErrNetworkError)
+	}
+	if f.FileSize <= 0 {
+		return 0, fmt.Errorf("%w: invalid file size", ErrNetworkError)
+	}
 
 	// Ensure we don't read past the end of the file
 	size := int64(len(p))
-	if f.FileSize > 0 {
-		remaining := f.FileSize - off
-		if remaining <= 0 {
-			return 0, io.EOF
-		}
-		if size > remaining {
-			size = remaining
-			p = p[:size]
-		}
+	remaining := f.FileSize - off
+	if remaining <= 0 {
+		return 0, io.EOF
+	}
+	if size > remaining {
+		size = remaining
+		p = p[:size]
 	}
 
 	result, err := f.doWithRetry(func() (any, error) {
@@ -172,42 +188,63 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 
 		req, err := http.NewRequest(http.MethodGet, f.URL, nil)
 		if err != nil {
-			return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
+			return 0, fmt.Errorf(
+				"%w: create request for %s",
+				ErrNetworkError,
+				utils.RedactedURL(f.URL),
+			)
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, end))
 
 		// Make the request
 		resp, err := f.client.Do(req)
 		if err != nil {
-			return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
+			return 0, fmt.Errorf(
+				"%w: request to %s failed",
+				ErrNetworkError,
+				utils.RedactedURL(f.URL),
+			)
 		}
-		defer func(Body io.ReadCloser) {
-			err := Body.Close()
-			if err != nil {
-				fmt.Printf("warning: failed to close response body: %v\n", err)
-			}
-		}(resp.Body)
+		defer resp.Body.Close()
 
 		// Handle response
 		switch resp.StatusCode {
 		case http.StatusPartialContent:
-			// Read the content
+			if err := validateContentRange(
+				resp.Header.Get("Content-Range"),
+				off,
+				end,
+				f.FileSize,
+			); err != nil {
+				return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
+			}
+			if resp.ContentLength >= 0 && resp.ContentLength != size {
+				return 0, fmt.Errorf(
+					"%w: partial response length %d does not match requested length %d",
+					ErrNetworkError,
+					resp.ContentLength,
+					size,
+				)
+			}
 			bytesRead, err := io.ReadFull(resp.Body, p)
 			return bytesRead, err
 		case http.StatusOK:
-			fullData, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
+			// A 200 response normally means the origin ignored Range. Reading
+			// the whole object here can allocate the complete media file and
+			// repeated ReaderAt calls would download it over and over. Accept
+			// 200 only when this request already covers the exact whole file.
+			if off != 0 || size != f.FileSize {
+				return 0, ErrRangeRequestsNotSupported
 			}
-
-			if int64(len(fullData)) <= off {
-				return 0, io.EOF
+			if resp.ContentLength >= 0 && resp.ContentLength != f.FileSize {
+				return 0, fmt.Errorf(
+					"%w: full response length %d does not match file size %d",
+					ErrNetworkError,
+					resp.ContentLength,
+					f.FileSize,
+				)
 			}
-
-			end = min(int64(len(fullData)), off+size)
-
-			copy(p, fullData[off:end])
-			return int(end - off), nil
+			return io.ReadFull(resp.Body, p)
 		case http.StatusRequestedRangeNotSatisfiable:
 			// We're at EOF
 			return 0, io.EOF
@@ -221,6 +258,46 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	return result.(int), nil
+}
+
+func validateContentRange(header string, wantStart, wantEnd, wantTotal int64) error {
+	const prefix = "bytes "
+	if !strings.HasPrefix(header, prefix) {
+		return fmt.Errorf("missing or invalid Content-Range")
+	}
+	value := strings.TrimPrefix(header, prefix)
+	if strings.Count(value, "/") != 1 {
+		return fmt.Errorf("invalid Content-Range")
+	}
+	rangePart, totalPart, _ := strings.Cut(value, "/")
+	if strings.Count(rangePart, "-") != 1 || totalPart == "*" {
+		return fmt.Errorf("invalid Content-Range")
+	}
+	startPart, endPart, _ := strings.Cut(rangePart, "-")
+	start, err := strconv.ParseInt(startPart, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid Content-Range start")
+	}
+	end, err := strconv.ParseInt(endPart, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid Content-Range end")
+	}
+	total, err := strconv.ParseInt(totalPart, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid Content-Range total")
+	}
+	if start != wantStart || end != wantEnd || total != wantTotal {
+		return fmt.Errorf(
+			"Content-Range %d-%d/%d does not match requested %d-%d/%d",
+			start,
+			end,
+			total,
+			wantStart,
+			wantEnd,
+			wantTotal,
+		)
+	}
+	return nil
 }
 
 // NewReader creates a new RAR3 reader

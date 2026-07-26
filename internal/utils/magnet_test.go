@@ -1,12 +1,15 @@
 package utils
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/testutil"
 )
@@ -194,4 +197,78 @@ func TestGetMagnetFromUrl_TorrentLink_StripFalse(t *testing.T) {
 	expectedTrackerCount := 2
 
 	testMagnetFromHttpTorrent(t, "ubuntu-25.04-desktop-amd64.iso.torrent", false, expectedInfoHash, expectedName, expectedLink, expectedTrackerCount)
+}
+
+func TestGetMagnetFromFileBoundedRejectsOversizedTorrent(t *testing.T) {
+	t.Parallel()
+
+	file, err := os.Open(testutil.GetTestTorrentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	_, err = GetMagnetFromFileBounded(file, "sample.torrent", false, 8)
+	if !errors.Is(err, ErrContentTooLarge) {
+		t.Fatalf("expected ErrContentTooLarge, got %v", err)
+	}
+}
+
+func TestGetMagnetFromURLContextRejectsStatusChunkedOversizeAndTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("status is redacted", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "no", http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		_, err := GetMagnetFromURLContext(
+			context.Background(),
+			server.URL+"/private/passkey?token=secret-value",
+			false,
+			32,
+		)
+		if err == nil || !strings.Contains(err.Error(), "status code 403") {
+			t.Fatalf("expected status error, got %v", err)
+		}
+		for _, secret := range []string{"passkey", "secret-value"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("magnet error exposed %q: %v", secret, err)
+			}
+		}
+	})
+
+	t.Run("chunked oversize", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			_, _ = w.Write([]byte("123456789"))
+		}))
+		defer server.Close()
+
+		_, err := GetMagnetFromURLContext(context.Background(), server.URL, false, 8)
+		if !errors.Is(err, ErrContentTooLarge) {
+			t.Fatalf("expected ErrContentTooLarge, got %v", err)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(
+			_ http.ResponseWriter,
+			r *http.Request,
+		) {
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancel()
+		_, err := GetMagnetFromURLContext(ctx, server.URL, false, 32)
+		if err == nil || !strings.Contains(err.Error(), "request timed out") {
+			t.Fatalf("expected timeout error, got %v", err)
+		}
+	})
 }

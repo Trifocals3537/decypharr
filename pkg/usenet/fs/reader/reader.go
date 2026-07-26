@@ -2,6 +2,7 @@ package reader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -62,10 +63,11 @@ type StreamingReader struct {
 	readOffset atomic.Int64
 
 	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	closed atomic.Bool
-	logger zerolog.Logger
+	ctx     context.Context
+	cancel  context.CancelFunc
+	closed  atomic.Bool
+	closeMu sync.Mutex
+	logger  zerolog.Logger
 
 	// Stats
 	stats *ReaderStats
@@ -469,19 +471,28 @@ func (sr *StreamingReader) Stats() map[string]int64 {
 	return sr.stats.Snapshot()
 }
 
-// Close releases all resources.
+// Close releases all resources. Reader cancellation and worker shutdown happen
+// once, while transient disk cleanup failures receive a small bounded retry.
+// Production owners call Close once and then release the reader, so the retry
+// must live here rather than depending on a later Close call.
 func (sr *StreamingReader) Close() error {
-	if sr.closed.Swap(true) {
-		return nil
+	sr.closeMu.Lock()
+	defer sr.closeMu.Unlock()
+
+	if !sr.closed.Swap(true) {
+		sr.cancel()
+
+		// Close fetcher first (stops downloads)
+		sr.fetcher.Close()
 	}
 
-	sr.cancel()
-
-	// Close fetcher first (stops downloads)
-	sr.fetcher.Close()
-
-	// Then close cache (cleans up files)
-	return sr.cache.Close()
+	var shutdownErr error
+	cleanupErr := retryCacheCleanup(func() error {
+		attemptShutdownErr, attemptCleanupErr := sr.cache.closeAttempt()
+		shutdownErr = errors.Join(shutdownErr, attemptShutdownErr)
+		return attemptCleanupErr
+	})
+	return errors.Join(shutdownErr, cleanupErr)
 }
 
 // Pool manages a pool of readers for efficient resource sharing.

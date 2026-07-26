@@ -2,8 +2,9 @@ package sabnzbd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -288,32 +289,75 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 
 	urls := r.URL.Query().Get("name")
 
+	if urls == "" {
+		s.writeError(w, "URL is required", http.StatusBadRequest)
+		return
+	}
+
+	urlCount := 0
+	for rawURL := range strings.SplitSeq(urls, "\n") {
+		if strings.TrimSpace(rawURL) != "" {
+			urlCount++
+		}
+	}
+	if urlCount > utils.MaxImportItems {
+		s.writeError(
+			w,
+			fmt.Sprintf("Request exceeds the %d-URL limit", utils.MaxImportItems),
+			http.StatusRequestEntityTooLarge,
+		)
+		return
+	}
+
 	cfg := config.Get()
 	action := cfg.DefaultDownloadAction
 	if r.URL.Query().Get("action") != "" {
 		action = config.DownloadAction(r.URL.Query().Get("action"))
 	}
 
-	if urls == "" {
-		s.writeError(w, "URL is required", http.StatusBadRequest)
-		return
-	}
+	nzoIDs := make([]string, 0, urlCount)
+	importErrors := make([]string, 0)
+	var downloadedBytes int64
+	resourceLimitFailure := false
+	admissionFailureStatus := 0
 
-	// Split URLs by newline to support multiple URLs
-	urlList := strings.Split(urls, "\n")
-	var nzoIDs []string
-	var errors []string
-
-	for _, url := range urlList {
-		url = strings.TrimSpace(url)
-		if url == "" {
+	for rawURL := range strings.SplitSeq(urls, "\n") {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
 			continue
 		}
 
-		nzoID, err := s.addNZBURL(ctx, url, _arr, action)
+		maxBytes := min(
+			utils.MaxMetadataFileBytes,
+			utils.MaxImportRequestBytes-downloadedBytes,
+		)
+		if maxBytes <= 0 {
+			resourceLimitFailure = true
+			importErrors = append(importErrors, "NZB URLs exceed the aggregate byte limit")
+			continue
+		}
+
+		nzoID, contentBytes, err := s.addNZBURL(ctx, rawURL, _arr, action, maxBytes)
+		if contentBytes == 0 && errors.Is(err, utils.ErrContentTooLarge) {
+			contentBytes = maxBytes
+		}
+		downloadedBytes += contentBytes
 		if err != nil {
-			s.logger.Error().Err(err).Str("url", url).Msg("Failed to add NZB from URL")
-			errors = append(errors, fmt.Sprintf("Failed to add %s: %v", url, err))
+			safeURL := utils.RedactedURL(rawURL)
+			if errors.Is(err, utils.ErrContentTooLarge) {
+				resourceLimitFailure = true
+			}
+			if status := sabAdmissionErrorStatus(err); status != 0 {
+				admissionFailureStatus = status
+			}
+			s.logger.Error().
+				Err(err).
+				Str("url", safeURL).
+				Msg("Failed to add NZB from URL")
+			importErrors = append(
+				importErrors,
+				fmt.Sprintf("Failed to add %s: %v", safeURL, err),
+			)
 			continue
 		}
 		if nzoID != "" {
@@ -323,10 +367,17 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 
 	if len(nzoIDs) == 0 {
 		errMsg := "Failed to add any NZBs"
-		if len(errors) > 0 {
-			errMsg = strings.Join(errors, "; ")
+		if len(importErrors) > 0 {
+			errMsg = strings.Join(importErrors, "; ")
 		}
-		s.writeError(w, errMsg, http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if resourceLimitFailure {
+			status = http.StatusRequestEntityTooLarge
+		} else if admissionFailureStatus != 0 {
+			status = admissionFailureStatus
+			setSABRetryAfter(w, status)
+		}
+		s.writeError(w, errMsg, status)
 		return
 	}
 
@@ -336,8 +387,8 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Include partial errors if some URLs failed
-	if len(errors) > 0 {
-		response.Error = fmt.Sprintf("Partial success: %s", strings.Join(errors, "; "))
+	if len(importErrors) > 0 {
+		response.Error = fmt.Sprintf("Partial success: %s", strings.Join(importErrors, "; "))
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
@@ -359,10 +410,29 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse multipart form with larger limit for multiple files
-	err := r.ParseMultipartForm(100 << 20) // 100 MB limit for multiple files
+	err := utils.ParseMultipartFormBounded(
+		w,
+		r,
+		utils.MaxImportRequestBytes,
+		utils.MaxMultipartMemoryBytes,
+	)
 	if err != nil {
+		if utils.IsRequestTooLarge(err) {
+			s.writeError(w, "Multipart upload is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.writeError(w, "Failed to parse multipart form", http.StatusBadRequest)
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	if utils.MultipartFormPartCount(r.MultipartForm) > utils.MaxMultipartFormParts {
+		s.writeError(
+			w,
+			fmt.Sprintf("Request exceeds the %d-part limit", utils.MaxMultipartFormParts),
+			http.StatusRequestEntityTooLarge,
+		)
 		return
 	}
 
@@ -373,7 +443,10 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var nzoIDs []string
-	var errors []string
+	var importErrors []string
+	var uploadedBytes int64
+	resourceLimitFailure := false
+	admissionFailureStatus := 0
 
 	// Try to get multiple files from "name" field
 	if r.MultipartForm != nil && r.MultipartForm.File != nil {
@@ -383,27 +456,50 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, "No files uploaded", http.StatusBadRequest)
 			return
 		}
+		if len(files) > utils.MaxImportItems {
+			s.writeError(
+				w,
+				fmt.Sprintf("Request exceeds the %d-file limit", utils.MaxImportItems),
+				http.StatusRequestEntityTooLarge,
+			)
+			return
+		}
 
 		for _, fileHeader := range files {
-			file, err := fileHeader.Open()
-			if err != nil {
-				errors = append(errors, fmt.Sprintf("Failed to open %s: %v", fileHeader.Filename, err))
+			maxBytes := min(
+				utils.MaxMetadataFileBytes,
+				utils.MaxImportRequestBytes-uploadedBytes,
+			)
+			if maxBytes <= 0 || fileHeader.Size > maxBytes {
+				resourceLimitFailure = true
+				importErrors = append(
+					importErrors,
+					fmt.Sprintf("File %s exceeds the upload byte limit", fileHeader.Filename),
+				)
 				continue
 			}
 
-			// Read file content
-			content, err := io.ReadAll(file)
-			file.Close()
+			content, err := readNZBUpload(fileHeader, maxBytes)
 			if err != nil {
-				errors = append(errors, fmt.Sprintf("Failed to read %s: %v", fileHeader.Filename, err))
+				if errors.Is(err, utils.ErrContentTooLarge) {
+					resourceLimitFailure = true
+				}
+				importErrors = append(
+					importErrors,
+					fmt.Sprintf("Failed to read %s: %v", fileHeader.Filename, err),
+				)
 				continue
 			}
+			uploadedBytes += int64(len(content))
 
 			// Parse NZB file
 			nzbID, err := s.addNZBFile(ctx, content, fileHeader.Filename, _arr, action)
 			if err != nil {
+				if status := sabAdmissionErrorStatus(err); status != 0 {
+					admissionFailureStatus = status
+				}
 				s.logger.Error().Err(err).Str("filename", fileHeader.Filename).Msg("Failed to add NZB file")
-				errors = append(errors, fmt.Sprintf("Failed to add %s: %v", fileHeader.Filename, err))
+				importErrors = append(importErrors, fmt.Sprintf("Failed to add %s: %v", fileHeader.Filename, err))
 				continue
 			}
 			if nzbID != "" {
@@ -417,19 +513,27 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, "No file uploaded", http.StatusBadRequest)
 			return
 		}
-		defer file.Close()
+		_ = file.Close()
 
-		// Read file content
-		content, err := io.ReadAll(file)
+		content, err := readNZBUpload(header, utils.MaxMetadataFileBytes)
 		if err != nil {
-			s.writeError(w, "Failed to read file", http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if errors.Is(err, utils.ErrContentTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			s.writeError(w, "Failed to read file", status)
 			return
 		}
 
 		// Parse NZB file
 		nzbID, err := s.addNZBFile(ctx, content, header.Filename, _arr, action)
 		if err != nil {
-			s.writeError(w, fmt.Sprintf("Failed to add NZB file: %s", err.Error()), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if admissionStatus := sabAdmissionErrorStatus(err); admissionStatus != 0 {
+				status = admissionStatus
+				setSABRetryAfter(w, status)
+			}
+			s.writeError(w, fmt.Sprintf("Failed to add NZB file: %s", err.Error()), status)
 			return
 		}
 		if nzbID != "" {
@@ -439,10 +543,17 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 
 	if len(nzoIDs) == 0 {
 		errMsg := "Failed to add any NZB files"
-		if len(errors) > 0 {
-			errMsg = strings.Join(errors, "; ")
+		if len(importErrors) > 0 {
+			errMsg = strings.Join(importErrors, "; ")
 		}
-		s.writeError(w, errMsg, http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if resourceLimitFailure {
+			status = http.StatusRequestEntityTooLarge
+		} else if admissionFailureStatus != 0 {
+			status = admissionFailureStatus
+			setSABRetryAfter(w, status)
+		}
+		s.writeError(w, errMsg, status)
 		return
 	}
 
@@ -452,8 +563,8 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Include partial errors if some files failed
-	if len(errors) > 0 {
-		response.Error = fmt.Sprintf("Partial success: %s", strings.Join(errors, "; "))
+	if len(importErrors) > 0 {
+		response.Error = fmt.Sprintf("Partial success: %s", strings.Join(importErrors, "; "))
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
@@ -566,22 +677,65 @@ func (s *SABnzbd) writeError(w http.ResponseWriter, message string, status int) 
 	utils.JSONResponse(w, response, status)
 }
 
-func (s *SABnzbd) addNZBURL(ctx context.Context, url string, arr *arr.Arr, action config.DownloadAction) (string, error) {
-	if url == "" {
-		return "", fmt.Errorf("URL is required")
+func sabAdmissionErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, manager.ErrJobQueueFull):
+		return http.StatusTooManyRequests
+	case errors.Is(err, manager.ErrJobQueueClosed):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, manager.ErrJobQueueDuplicate),
+		errors.Is(err, manager.ErrQueueEntryDeleting),
+		errors.Is(err, storage.ErrQueuedEntryDeleting):
+		return http.StatusConflict
+	default:
+		return 0
+	}
+}
+
+func setSABRetryAfter(w http.ResponseWriter, status int) {
+	if status == http.StatusTooManyRequests ||
+		status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "5")
+	}
+}
+
+func (s *SABnzbd) addNZBURL(
+	ctx context.Context,
+	rawURL string,
+	arr *arr.Arr,
+	action config.DownloadAction,
+	maxBytes int64,
+) (string, int64, error) {
+	if rawURL == "" {
+		return "", 0, fmt.Errorf("URL is required")
 	}
 	// Download NZB content
-	filename, content, err := utils.DownloadFile(url)
+	filename, content, err := utils.DownloadFileBounded(ctx, rawURL, maxBytes)
 	if err != nil {
-		s.logger.Error().Err(err).Str("url", url).Msg("Failed to download NZB from URL")
-		return "", fmt.Errorf("failed to download NZB from URL: %w", err)
+		s.logger.Error().
+			Err(err).
+			Str("url", utils.RedactedURL(rawURL)).
+			Msg("Failed to download NZB from URL")
+		return "", int64(len(content)), fmt.Errorf("failed to download NZB from URL: %w", err)
 	}
 
 	if len(content) == 0 {
-		s.logger.Warn().Str("url", url).Msg("Downloaded content is empty")
-		return "", fmt.Errorf("downloaded content is empty")
+		s.logger.Warn().
+			Str("url", utils.RedactedURL(rawURL)).
+			Msg("Downloaded content is empty")
+		return "", 0, fmt.Errorf("downloaded content is empty")
 	}
-	return s.addNZBFile(ctx, content, filename, arr, action)
+	id, err := s.addNZBFile(ctx, content, filename, arr, action)
+	return id, int64(len(content)), err
+}
+
+func readNZBUpload(fileHeader *multipart.FileHeader, maxBytes int64) ([]byte, error) {
+	file, err := fileHeader.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return utils.ReadAllLimited(file, maxBytes)
 }
 
 func (s *SABnzbd) addNZBFile(ctx context.Context, content []byte, filename string, arr *arr.Arr, action config.DownloadAction) (string, error) {

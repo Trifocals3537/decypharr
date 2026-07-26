@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -35,6 +34,14 @@ var planSlots = map[string]int{
 	"standard":  5,
 	"pro":       10,
 }
+
+const (
+	// A TorBox list is an authoritative provider snapshot. These ceilings keep
+	// an ignored offset or a hostile response from turning refresh into an
+	// unbounded loop/allocation while remaining generous for real accounts.
+	torboxTorrentListMaxPages = 1_000
+	torboxTorrentListMaxItems = 100_000
+)
 
 type Torbox struct {
 	Host                  string `json:"host"`
@@ -133,7 +140,7 @@ func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result a
 	defer resp.Body.Close()
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := utils.DecodeJSONResponse(resp.Body, result); err != nil {
 			return resp, err
 		}
 	}
@@ -161,7 +168,7 @@ func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result
 	defer resp.Body.Close()
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := utils.DecodeJSONResponse(resp.Body, result); err != nil {
 			return resp, err
 		}
 	}
@@ -169,8 +176,8 @@ func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result
 	return resp, nil
 }
 
-// doDelete performs a DELETE request
-func (tb *Torbox) doDelete(endpoint string, payload any) (*http.Response, error) {
+// doPostJSON performs a POST request with a JSON body.
+func (tb *Torbox) doPostJSON(endpoint string, payload any) (*http.Response, error) {
 	var body io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -180,7 +187,7 @@ func (tb *Torbox) doDelete(endpoint string, payload any) (*http.Response, error)
 		body = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, tb.Host+endpoint, body)
+	req, err := http.NewRequest(http.MethodPost, tb.Host+endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +197,10 @@ func (tb *Torbox) doDelete(endpoint string, payload any) (*http.Response, error)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, (64<<10)+1))
+		_ = resp.Body.Close()
+	}()
 
 	return resp, nil
 }
@@ -301,7 +311,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		return nil, fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
 	data := res.Data
-	if data == nil {
+	if !res.Success || data == nil {
 		return nil, fmt.Errorf("error getting torrent")
 	}
 	t := &types.Torrent{
@@ -319,9 +329,9 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Added:            data.CreatedAt,
 	}
 	cfg := config.Get()
+	files := make([]types.File, 0, len(data.Files))
 
 	for _, f := range data.Files {
-		fileName := filepath.Base(f.Name)
 		if err := cfg.IsFileAllowed(f.AbsolutePath, f.Size); err != nil {
 			continue
 		}
@@ -329,7 +339,6 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		file := types.File{
 			TorrentId: t.Id,
 			Id:        strconv.Itoa(f.Id),
-			Name:      fileName,
 			Size:      f.Size,
 			Path:      f.Name,
 		}
@@ -338,7 +347,11 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 			file.Link = fmt.Sprintf("torbox://%s/%d", t.Id, f.Id)
 		}
 
-		t.Files[fileName] = file
+		files = append(files, file)
+	}
+	t.Files, err = torboxFilesByLogicalName(files)
+	if err != nil {
+		return nil, fmt.Errorf("normalize TorBox torrent files: %w", err)
 	}
 	var cleanPath string
 	if len(t.Files) > 0 {
@@ -354,28 +367,74 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 }
 
 func (tb *Torbox) loadDownloadPresent() error {
+	return tb.loadDownloadPresentBounded(
+		torboxTorrentListMaxPages,
+		torboxTorrentListMaxItems,
+	)
+}
+
+func (tb *Torbox) loadDownloadPresentBounded(maxPages, maxItems int) error {
+	if maxPages <= 0 || maxItems <= 0 {
+		return fmt.Errorf("torbox download-present list bounds must be positive")
+	}
+
 	offset := 0
-	total := 0
-	for {
+	present := make(map[string]bool)
+	for page := 0; page < maxPages; page++ {
 		var res TorrentsListResponse
 		resp, err := tb.doGet("/api/torrents/mylist", map[string]string{"offset": fmt.Sprintf("%d", offset)}, &res)
 		if err != nil {
-			return err
+			return fmt.Errorf(
+				"torbox download-present page %d at offset %d: %w",
+				page+1,
+				offset,
+				err,
+			)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 		}
-		if res.Data == nil || len(*res.Data) == 0 {
-			break
+		if !res.Success || res.Data == nil {
+			return fmt.Errorf("torbox API returned an unsuccessful download-present list response")
 		}
-		for _, t := range *res.Data {
-			tb.downloadPresentCache.Store(strconv.Itoa(t.Id), t.DownloadPresent)
+		if len(*res.Data) == 0 {
+			tb.downloadPresentCache = sync.Map{}
+			for id, isPresent := range present {
+				tb.downloadPresentCache.Store(id, isPresent)
+			}
+			tb.logger.Info().Int("count", len(present)).Msg("loaded download_present cache for repair")
+			return nil
 		}
-		total += len(*res.Data)
-		offset += len(*res.Data)
+		if len(*res.Data) > maxItems-len(present) {
+			return fmt.Errorf(
+				"torbox download-present list exceeds %d items",
+				maxItems,
+			)
+		}
+		for _, torrent := range *res.Data {
+			id := strconv.Itoa(torrent.Id)
+			if _, exists := present[id]; exists {
+				return fmt.Errorf(
+					"torbox download-present list repeated torrent ID %q at offset %d",
+					id,
+					offset,
+				)
+			}
+			present[id] = torrent.DownloadPresent
+		}
+		nextOffset := offset + len(*res.Data)
+		if nextOffset <= offset {
+			return fmt.Errorf(
+				"torbox download-present list made no offset progress from %d",
+				offset,
+			)
+		}
+		offset = nextOffset
 	}
-	tb.logger.Info().Int("count", total).Msg("loaded download_present cache for repair")
-	return nil
+	return fmt.Errorf(
+		"torbox download-present list exceeds %d non-empty pages",
+		maxPages,
+	)
 }
 
 func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
@@ -390,6 +449,9 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 		return fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
 	data := res.Data
+	if !res.Success || data == nil {
+		return fmt.Errorf("error updating torrent")
+	}
 	name := data.Name
 
 	t.Name = name
@@ -405,13 +467,10 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	}
 	t.Debrid = tb.config.Name
 
-	t.Files = make(map[string]types.File)
-
 	cfg := config.Get()
+	files := make([]types.File, 0, len(data.Files))
 
 	for _, f := range data.Files {
-		fileName := filepath.Base(f.Name)
-
 		if err := cfg.IsFileAllowed(f.AbsolutePath, f.Size); err != nil {
 			continue
 		}
@@ -419,16 +478,19 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 		file := types.File{
 			TorrentId: t.Id,
 			Id:        strconv.Itoa(f.Id),
-			Name:      fileName,
 			Size:      f.Size,
-			Path:      fileName,
+			Path:      f.Name,
 		}
 
 		if data.DownloadFinished {
 			file.Link = fmt.Sprintf("torbox://%s/%s", t.Id, strconv.Itoa(f.Id))
 		}
 
-		t.Files[fileName] = file
+		files = append(files, file)
+	}
+	t.Files, err = torboxFilesByLogicalName(files)
+	if err != nil {
+		return fmt.Errorf("normalize TorBox torrent files: %w", err)
 	}
 
 	var cleanPath string
@@ -467,13 +529,20 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 }
 
 func (tb *Torbox) DeleteTorrent(torrentId string) error {
-	payload := map[string]string{"torrent_id": torrentId, "action": "Delete"}
+	numericID, err := strconv.Atoi(torrentId)
+	if err != nil {
+		return fmt.Errorf("invalid TorBox torrent ID %q: %w", torrentId, err)
+	}
+	payload := map[string]any{"torrent_id": numericID, "operation": "delete"}
 
-	resp, err := tb.doDelete(fmt.Sprintf("/api/torrents/controltorrent/%s", torrentId), payload)
+	resp, err := tb.doPostJSON("/api/torrents/controltorrent", payload)
 	if err != nil {
 		return err
 	}
 
+	if resp.StatusCode == http.StatusNotFound {
+		return customerror.TorrentNotFoundError
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
@@ -513,21 +582,69 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 }
 
 func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
+	return tb.getTorrentsBounded(
+		torboxTorrentListMaxPages,
+		torboxTorrentListMaxItems,
+	)
+}
+
+func (tb *Torbox) getTorrentsBounded(maxPages, maxItems int) ([]*types.Torrent, error) {
+	if maxPages <= 0 || maxItems <= 0 {
+		return nil, fmt.Errorf("torbox torrent list bounds must be positive")
+	}
+
 	offset := 0
 	allTorrents := make([]*types.Torrent, 0)
+	seenIDs := make(map[string]int)
 
-	for {
+	for page := 0; page < maxPages; page++ {
 		torrents, err := tb.getTorrents(offset)
 		if err != nil {
-			break
+			// Never expose a partial list: manager reconciliation treats this
+			// return value as the provider's complete authoritative snapshot.
+			return nil, fmt.Errorf("torbox torrent list page %d at offset %d: %w", page+1, offset, err)
 		}
 		if len(torrents) == 0 {
-			break
+			return allTorrents, nil
+		}
+		if len(torrents) > maxItems-len(allTorrents) {
+			return nil, fmt.Errorf(
+				"torbox torrent list exceeds %d items",
+				maxItems,
+			)
+		}
+		for _, torrent := range torrents {
+			if torrent == nil || torrent.Id == "" {
+				return nil, fmt.Errorf(
+					"torbox torrent list page %d at offset %d contains an invalid item",
+					page+1,
+					offset,
+				)
+			}
+			if previousOffset, exists := seenIDs[torrent.Id]; exists {
+				return nil, fmt.Errorf(
+					"torbox torrent list repeated torrent ID %q at offsets %d and %d",
+					torrent.Id,
+					previousOffset,
+					offset,
+				)
+			}
+			seenIDs[torrent.Id] = offset
 		}
 		allTorrents = append(allTorrents, torrents...)
-		offset += len(torrents)
+		nextOffset := offset + len(torrents)
+		if nextOffset <= offset {
+			return nil, fmt.Errorf(
+				"torbox torrent list made no offset progress from %d",
+				offset,
+			)
+		}
+		offset = nextOffset
 	}
-	return allTorrents, nil
+	return nil, fmt.Errorf(
+		"torbox torrent list exceeds %d non-empty pages",
+		maxPages,
+	)
 }
 
 func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
@@ -543,7 +660,9 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 	}
 
 	if !res.Success || res.Data == nil {
-		return nil, fmt.Errorf("torbox API error: %v", res.Error)
+		// Error/detail values can echo submitted URLs. The status and operation
+		// identify this failure without exposing provider response contents.
+		return nil, fmt.Errorf("torbox API returned an unsuccessful torrent list response")
 	}
 
 	torrents := make([]*types.Torrent, 0, len(*res.Data))
@@ -565,16 +684,15 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 			Added:            data.CreatedAt,
 			InfoHash:         data.Hash,
 		}
+		files := make([]types.File, 0, len(data.Files))
 
 		for _, f := range data.Files {
-			fileName := filepath.Base(f.Name)
 			if err := cfg.IsFileAllowed(f.AbsolutePath, f.Size); err != nil {
 				continue
 			}
 			file := types.File{
 				TorrentId: t.Id,
 				Id:        strconv.Itoa(f.Id),
-				Name:      fileName,
 				Size:      f.Size,
 				Path:      f.Name,
 			}
@@ -583,7 +701,11 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 				file.Link = fmt.Sprintf("torbox://%s/%d", t.Id, f.Id)
 			}
 
-			t.Files[fileName] = file
+			files = append(files, file)
+		}
+		t.Files, err = torboxFilesByLogicalName(files)
+		if err != nil {
+			return nil, fmt.Errorf("normalize TorBox torrent %s files: %w", t.Id, err)
 		}
 
 		var cleanPath string
@@ -598,6 +720,14 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 	}
 
 	return torrents, nil
+}
+
+// torboxFilesByLogicalName keeps the basename key used by existing databases
+// when it is unambiguous. When nested files share a basename, every member of
+// that group is keyed and named by its provider path so no file is overwritten
+// before manager-level portable-path validation can run.
+func torboxFilesByLogicalName(files []types.File) (map[string]types.File, error) {
+	return types.FilesByLogicalName(files)
 }
 
 func (tb *Torbox) fetchDownloadLinks(account *account.Account) ([]types.DownloadLink, error) {
@@ -665,7 +795,7 @@ func (tb *Torbox) GetProfile() (*types.Profile, error) {
 	}
 
 	userData := data.Data
-	if userData == nil {
+	if !data.Success || userData == nil {
 		return nil, fmt.Errorf("error getting user profile")
 	}
 
@@ -766,14 +896,14 @@ func (tb *Torbox) SpeedTest(ctx context.Context) types.SpeedTestResult {
 	}
 	defer dlResp.Body.Close()
 
-	data, err := io.ReadAll(dlResp.Body)
+	bytesRead, err := io.Copy(io.Discard, io.LimitReader(dlResp.Body, downloadSize))
 	downloadDuration := time.Since(downloadStart)
 
-	if err != nil || len(data) == 0 {
+	if err != nil || bytesRead == 0 {
 		return result
 	}
 
-	result.BytesRead = int64(len(data))
+	result.BytesRead = bytesRead
 	if downloadDuration.Seconds() > 0 {
 		result.SpeedMBps = float64(result.BytesRead) / downloadDuration.Seconds() / (1024 * 1024)
 	}

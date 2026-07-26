@@ -115,11 +115,13 @@ Prefetch buffer for smoother playback. Higher = smoother but more memory.
 ```json
 {
   "max_active_downloads": 5,
+  "job_queue_capacity": 256,
   "usenet": {"processing_timeout": "10m"}
 }
 ```
 
 - `max_active_downloads`: Shared active-download limit for torrents and NZBs
+- `job_queue_capacity`: Total bound for reserved, waiting, active, and retrying imports
 - `processing_timeout`: Mark as bad if processing exceeds this
 
 ### Availability Checking

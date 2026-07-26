@@ -13,7 +13,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var storeNames = []string{"entries", "queue", "items", "repair_state", "repair_runs"}
+var storeNames = []string{
+	"entries",
+	"queue",
+	"items",
+	"storage_state",
+	"repair_state",
+	"repair_runs",
+	"entry_tombstones",
+	"queue_tombstones",
+}
 
 // legacyStoreNames are buckets from the v1 repair system. They are removed
 // on startup so they don't accumulate dead data.
@@ -21,21 +30,25 @@ var legacyStoreNames = []string{"repair_jobs", "repair_keys"}
 
 // Storage handles persistence using HybridStore
 type Storage struct {
-	entries     *hybrid.Store
-	queue       *hybrid.Store
-	entryItems  *hybrid.Store
-	repairState *hybrid.Store
-	repairRuns  *hybrid.Store
-	dir         string
-	logger      zerolog.Logger
+	entries         *hybrid.Store
+	queue           *hybrid.Store
+	entryItems      *hybrid.Store
+	storageState    *hybrid.Store
+	repairState     *hybrid.Store
+	repairRuns      *hybrid.Store
+	entryTombstones *hybrid.Store
+	queueTombstones *hybrid.Store
+	mainEntries     *mainEntryLifecycle
+	dir             string
+	logger          zerolog.Logger
 
+	entryItemsMu        sync.Mutex
+	entryItemsDirty     bool
+	startupComplete     bool
 	healthCountsMu      sync.Mutex
 	healthCounts        map[HealthStatus]int
 	healthCountsBuiltAt time.Time
 }
-
-
-
 
 func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hybrid.Store, error) {
 	items := make(map[string]*hybrid.Store)
@@ -90,13 +103,34 @@ func NewStorage(dbPath string) (*Storage, error) {
 	}
 
 	s := &Storage{
-		entries:     itemStores["entries"],
-		queue:       itemStores["queue"],
-		entryItems:  itemStores["items"],
-		repairState: itemStores["repair_state"],
-		repairRuns:  itemStores["repair_runs"],
-		dir:         dbPath,
-		logger:      log,
+		entries:         itemStores["entries"],
+		queue:           itemStores["queue"],
+		entryItems:      itemStores["items"],
+		storageState:    itemStores["storage_state"],
+		repairState:     itemStores["repair_state"],
+		repairRuns:      itemStores["repair_runs"],
+		entryTombstones: itemStores["entry_tombstones"],
+		queueTombstones: itemStores["queue_tombstones"],
+		mainEntries:     newMainEntryLifecycle(),
+		dir:             dbPath,
+		logger:          log,
+	}
+
+	needsEntryItemRecovery, err := s.beginEntryItemSession()
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("start entry-item recovery session: %w", err)
+	}
+	if needsEntryItemRecovery {
+		if _, err := s.reconcileEntryItems(); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("recover entry-item index: %w", err)
+		}
+	}
+
+	if err := s.recoverMainEntryTombstones(); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("recover main entry deletions: %w", err)
 	}
 
 	if count, err := s.MigrateMetadata(); err != nil {
@@ -105,12 +139,27 @@ func NewStorage(dbPath string) (*Storage, error) {
 		log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
 	}
 
+	s.startupComplete = true
 	return s, nil
 }
 
 func (s *Storage) Close() error {
 	var errs []error
-	stores := []*hybrid.Store{s.entries, s.queue, s.entryItems, s.repairState, s.repairRuns}
+	if s.startupComplete {
+		if err := s.markEntryItemsClean(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	stores := []*hybrid.Store{
+		s.entries,
+		s.queue,
+		s.entryItems,
+		s.storageState,
+		s.repairState,
+		s.repairRuns,
+		s.entryTombstones,
+		s.queueTombstones,
+	}
 	for _, store := range stores {
 		if store == nil {
 			continue
@@ -128,7 +177,16 @@ func (s *Storage) Close() error {
 // DiskSize returns the total on-disk size of all stores (O(1), no filesystem walk).
 func (s *Storage) DiskSize() int64 {
 	var size int64
-	for _, store := range []*hybrid.Store{s.entries, s.queue, s.entryItems, s.repairState, s.repairRuns} {
+	for _, store := range []*hybrid.Store{
+		s.entries,
+		s.queue,
+		s.entryItems,
+		s.storageState,
+		s.repairState,
+		s.repairRuns,
+		s.entryTombstones,
+		s.queueTombstones,
+	} {
 		if store != nil {
 			size += store.DiskSize()
 		}
@@ -170,6 +228,8 @@ func (s *Storage) copyFrom(other *Storage) error {
 		{"items", other.entryItems, s.entryItems},
 		{"repair_state", other.repairState, s.repairState},
 		{"repair_runs", other.repairRuns, s.repairRuns},
+		{"entry_tombstones", other.entryTombstones, s.entryTombstones},
+		{"queue_tombstones", other.queueTombstones, s.queueTombstones},
 	}
 
 	for _, p := range pairs {

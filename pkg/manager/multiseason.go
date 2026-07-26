@@ -73,6 +73,7 @@ func convertToMultiSeason(torrent *storage.Entry, seasons []SeasonInfo) []*stora
 		for _, file := range seasonInfo.Files {
 			seasonFiles[file.Name] = &storage.File{
 				Name:      file.Name,
+				Path:      file.Path,
 				Size:      file.Size,
 				ByteRange: file.ByteRange,
 				Deleted:   file.Deleted,

@@ -51,6 +51,11 @@ const (
 	WebdavUseHash              WebDavFolderNaming = "infohash"
 )
 
+const (
+	DefaultJobQueueCapacity = 256
+	MaxJobQueueCapacity     = 4096
+)
+
 var (
 	instance   *Config
 	once       sync.Once
@@ -259,6 +264,7 @@ type Config struct {
 	DownloadFolder        string                   `json:"download_folder,omitempty"`
 	RefreshInterval       string                   `json:"refresh_interval,omitempty"`
 	MaxActiveDownloads    int                      `json:"max_active_downloads,omitempty"`
+	JobQueueCapacity      int                      `json:"job_queue_capacity,omitempty"`
 	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
 	SkipMultiSeason       bool                     `json:"skip_multi_season,omitempty"`
 	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
@@ -585,6 +591,12 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 	if c.MaxActiveDownloads <= 0 {
 		c.MaxActiveDownloads = 5
 	}
+	switch {
+	case c.JobQueueCapacity <= 0:
+		c.JobQueueCapacity = DefaultJobQueueCapacity
+	case c.JobQueueCapacity > MaxJobQueueCapacity:
+		c.JobQueueCapacity = MaxJobQueueCapacity
+	}
 
 	for i, debrid := range c.Debrids {
 		c.Debrids[i] = c.updateDebrid(debrid)
@@ -838,6 +850,7 @@ func clearHotFields(c *Config) {
 	c.DownloadFolder = ""
 	c.RefreshInterval = ""
 	c.MaxActiveDownloads = 0
+	c.JobQueueCapacity = 0
 	c.SkipPreCache = false
 	c.SkipMultiSeason = false
 	c.AlwaysRmTrackerUrls = false

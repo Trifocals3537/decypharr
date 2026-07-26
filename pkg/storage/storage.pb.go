@@ -346,8 +346,11 @@ type EntryProto struct {
 	ErrorCount        int32                          `protobuf:"varint,37,opt,name=error_count,json=errorCount,proto3" json:"error_count,omitempty"`
 	LastErrorTimeUnix int64                          `protobuf:"varint,38,opt,name=last_error_time_unix,json=lastErrorTimeUnix,proto3" json:"last_error_time_unix,omitempty"`
 	HasLastErrorTime  bool                           `protobuf:"varint,39,opt,name=has_last_error_time,json=hasLastErrorTime,proto3" json:"has_last_error_time,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Opaque durable identity for one queue-row incarnation. Main-entry
+	// lifecycle authorization remains transient and is never serialized.
+	QueueIncarnation string `protobuf:"bytes,40,opt,name=queue_incarnation,json=queueIncarnation,proto3" json:"queue_incarnation,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EntryProto) Reset() {
@@ -651,6 +654,13 @@ func (x *EntryProto) GetHasLastErrorTime() bool {
 		return x.HasLastErrorTime
 	}
 	return false
+}
+
+func (x *EntryProto) GetQueueIncarnation() string {
+	if x != nil {
+		return x.QueueIncarnation
+	}
+	return ""
 }
 
 type EntryItemProto struct {
@@ -1263,7 +1273,7 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x120\n" +
-	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\xee\v\n" +
+	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\x9b\f\n" +
 	"\n" +
 	"EntryProto\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12\x1b\n" +
@@ -1309,7 +1319,8 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\verror_count\x18% \x01(\x05R\n" +
 	"errorCount\x12/\n" +
 	"\x14last_error_time_unix\x18& \x01(\x03R\x11lastErrorTimeUnix\x12-\n" +
-	"\x13has_last_error_time\x18' \x01(\bR\x10hasLastErrorTime\x1aY\n" +
+	"\x13has_last_error_time\x18' \x01(\bR\x10hasLastErrorTime\x12+\n" +
+	"\x11queue_incarnation\x18( \x01(\tR\x10queueIncarnation\x1aY\n" +
 	"\x0eProvidersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x121\n" +
 	"\x05value\x18\x02 \x01(\v2\x1b.storage.ProviderEntryProtoR\x05value:\x028\x01\x1aL\n" +

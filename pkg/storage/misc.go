@@ -8,6 +8,9 @@ import "github.com/sirrobot01/decypharr/internal/config"
 // shares the same infohash. This preserves placements, files, and tags from
 // the existing entry that the incoming entry may not know about.
 func HandleExistingEntryMerge(existing, incoming *Entry) *Entry {
+	if existing != nil && incoming != nil && incoming.MainGeneration == 0 {
+		incoming.MainGeneration = existing.MainGeneration
+	}
 	// If NZB entry, ignore merging - just return incoming
 	if incoming.Protocol == config.ProtocolNZB {
 		return incoming
@@ -66,10 +69,19 @@ func mergeFiles(existing, incoming map[string]*File) map[string]*File {
 	// Merge incoming files
 	for k, v := range incoming {
 		if existingFile, exists := merged[k]; exists {
-			// Prefer file with newer AddedOn timestamp
-			if v.AddedOn.After(existingFile.AddedOn) {
-				merged[k] = v
+			preferred, fallback := existingFile, v
+			// Prefer file with newer AddedOn timestamp. On a tie, prefer the
+			// record that carries provider path provenance.
+			if v.AddedOn.After(existingFile.AddedOn) ||
+				(v.AddedOn.Equal(existingFile.AddedOn) && existingFile.Path == "" && v.Path != "") {
+				preferred, fallback = v, existingFile
 			}
+			if preferred.Path == "" && fallback.Path != "" {
+				enriched := *preferred
+				enriched.Path = fallback.Path
+				preferred = &enriched
+			}
+			merged[k] = preferred
 		} else {
 			merged[k] = v
 		}

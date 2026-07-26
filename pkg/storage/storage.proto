@@ -91,6 +91,10 @@ message EntryProto {
   int32 error_count = 37;
   int64 last_error_time_unix = 38;
   bool has_last_error_time = 39;
+
+  // Opaque durable identity for one queue-row incarnation. Main-entry
+  // lifecycle authorization remains transient and is never serialized.
+  string queue_incarnation = 40;
 }
 
 // ============================================================================

@@ -3,6 +3,7 @@ package nntp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -218,6 +219,7 @@ type Connection struct {
 	writer                      *bufio.Writer
 	logger                      zerolog.Logger
 	closed                      atomic.Bool
+	tlsConfig                   *tls.Config
 
 	// Body-copy idle tracking. Written by copyBodyWithIdleDeadline on
 	// copyBodyWithIdleDeadline periodically while reads make progress;
@@ -271,8 +273,8 @@ func (c *Connection) authenticate() error {
 	return nil
 }
 
-// startTLS initiates TLS encryption with proper error handling
-func (c *Connection) startTLS() error {
+// startTLS initiates verified TLS encryption with proper error handling.
+func (c *Connection) startTLS(ctx context.Context) error {
 	if err := c.sendCommand("STARTTLS"); err != nil {
 		return NewConnectionError(fmt.Errorf("failed to send STARTTLS: %w", err))
 	}
@@ -286,12 +288,14 @@ func (c *Connection) startTLS() error {
 		return classifyNNTPError(resp.Code, fmt.Sprintf("STARTTLS not supported: %s", resp.Message))
 	}
 
-	// Upgrade connection to TLS
-	tlsConn := tls.Client(c.conn, &tls.Config{
-		ServerName:         c.address,
-		InsecureSkipVerify: true, // Match createConnection behavior
-		MinVersion:         tls.VersionTLS12,
-	})
+	// Upgrade and complete the handshake before the connection can carry
+	// credentials. Handshake verifies the certificate against the platform
+	// trust store and the configured NNTP host.
+	tlsConn := tls.Client(c.conn, hardenedNNTPConfig(c.tlsConfig, c.address))
+	if err := completeTLSHandshake(ctx, tlsConn); err != nil {
+		_ = tlsConn.Close()
+		return NewConnectionError(fmt.Errorf("STARTTLS handshake failed: %w", err))
+	}
 
 	c.conn = tlsConn
 	c.reader = bufio.NewReaderSize(tlsConn, 256*1024)

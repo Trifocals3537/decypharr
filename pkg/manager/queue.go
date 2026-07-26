@@ -2,7 +2,10 @@ package manager
 
 import (
 	"cmp"
-	"os"
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
 type ImportType string
@@ -85,12 +89,26 @@ type Queue struct {
 	storage            *storage.Storage
 	logger             zerolog.Logger
 	removeStalledAfter time.Duration
+	lifecycle          *entryLifecycle
+	removePendingJobs  func(string) int
+	deleteDrainTimeout time.Duration
 }
 
-func newQueue(storage *storage.Storage, removeStalledAfterStr string) *Queue {
+const defaultEntryDeleteDrainTimeout = 30 * time.Second
+
+func newQueue(storage *storage.Storage, removeStalledAfterStr string, lifecycles ...*entryLifecycle) *Queue {
+	var lifecycle *entryLifecycle
+	if len(lifecycles) > 0 {
+		lifecycle = lifecycles[0]
+	}
+	if lifecycle == nil {
+		lifecycle = newEntryLifecycle()
+	}
 	q := &Queue{
-		storage: storage,
-		logger:  logger.New("queue"),
+		storage:            storage,
+		logger:             logger.New("queue"),
+		lifecycle:          lifecycle,
+		deleteDrainTimeout: defaultEntryDeleteDrainTimeout,
 	}
 
 	if removeStalledAfterStr != "" {
@@ -104,47 +122,167 @@ func newQueue(storage *storage.Storage, removeStalledAfterStr string) *Queue {
 }
 
 func (q *Queue) Add(torrent *storage.Entry) error {
-	return q.storage.AddQueue(torrent)
+	return q.lifecycle.withAdd(torrent, func() error {
+		return q.storage.AddQueue(torrent)
+	})
 }
 
 func (q *Queue) GetTorrent(infohash string) (*storage.Entry, error) {
-	return q.storage.GetQueued(infohash)
+	return q.lifecycle.withRead(infohash, func() (*storage.Entry, error) {
+		return q.storage.GetQueued(infohash)
+	})
 }
 
-func (q *Queue) deleteEntryFiles(entry *storage.Entry) {
-	if entry.IsNZB() && entry.Magnet != "" {
-		_ = os.Remove(entry.Magnet)
+func (q *Queue) deleteEntryFiles(entry *storage.Entry) error {
+	if entry.IsNZB() {
+		downloadRoot := config.Get().DownloadFolder
+		metadataRoot := filepath.Join(config.GetMainPath(), "usenet", "nzbs")
+		return q.deleteNZBEntryFiles(downloadRoot, metadataRoot, entry)
 	}
+
 	downloadedPath := entry.DownloadPath()
 	if downloadedPath == "" {
-		return
-	}
-	if err := os.RemoveAll(downloadedPath); err != nil {
-		q.logger.Error().Err(err).Str("path", downloadedPath).Msg("Failed to delete downloaded file")
-	}
-}
-
-func (q *Queue) wrapCleanupWithFileDelete(cleanup func(t *storage.Entry) error) func(*storage.Entry) error {
-	return func(entry *storage.Entry) error {
-		q.deleteEntryFiles(entry)
-		if cleanup != nil {
-			return cleanup(entry)
-		}
 		return nil
 	}
+	downloadRoot := config.Get().DownloadFolder
+	if err := removeOwnedTorrentEntryDirectory(downloadRoot, entry); err != nil {
+		return fmt.Errorf("delete torrent download path %q: %w", downloadedPath, err)
+	}
+	return nil
+}
+
+func (q *Queue) deleteNZBEntryFiles(downloadRoot, metadataRoot string, entry *storage.Entry) error {
+	if _, err := safeUsenetEntryDownloadPath(downloadRoot, entry); err != nil {
+		return fmt.Errorf("refusing unsafe NZB cleanup: %w", err)
+	}
+
+	// Validate the staged metadata path before removing either artifact. The
+	// persisted path must identify this entry's exact <UUID>.queued file, not
+	// merely any descendant under the metadata root.
+	if err := usenet.ValidateStagedNZBAt(metadataRoot, entry.InfoHash, entry.Magnet); err != nil {
+		return fmt.Errorf("refusing unsafe staged NZB cleanup: %w", err)
+	}
+
+	if err := removeOwnedUsenetEntryDirectory(downloadRoot, entry); err != nil {
+		return fmt.Errorf("delete NZB download path: %w", err)
+	}
+	if err := usenet.RemoveStagedNZBAt(metadataRoot, entry.InfoHash, entry.Magnet); err != nil {
+		return fmt.Errorf("delete staged NZB: %w", err)
+	}
+	return nil
 }
 
 func (q *Queue) Delete(infohash string, cleanup func(t *storage.Entry) error) error {
-	return q.storage.DeleteQueued(infohash, q.wrapCleanupWithFileDelete(cleanup))
+	_, err := q.deleteWithResult(infohash, cleanup)
+	return err
+}
+
+// deleteWithResult reports whether this call loaded and deleted a durable
+// queue row. A nil error with deleted=false is an authoritative, idempotent
+// miss; callers that also own main-storage state must still finish that work.
+func (q *Queue) deleteWithResult(infohash string, cleanup func(t *storage.Entry) error) (deleted bool, err error) {
+	return q.deleteWithResultAndSnapshots(infohash, cleanup)
+}
+
+func (q *Queue) deleteWithResultAndSnapshots(
+	infohash string,
+	cleanup func(t *storage.Entry) error,
+	placementSnapshots ...*storage.Entry,
+) (deleted bool, err error) {
+	deletion, err := q.lifecycle.beginDelete(infohash)
+	if err != nil {
+		return false, err
+	}
+	deleteSucceeded := false
+	defer func() {
+		deletion.Finish(deleteSucceeded)
+	}()
+
+	if q.removePendingJobs != nil {
+		q.removePendingJobs(infohash)
+	}
+
+	timeout := q.deleteDrainTimeout
+	if timeout <= 0 {
+		timeout = defaultEntryDeleteDrainTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	waitErr := deletion.Wait(waitCtx)
+	cancel()
+	if waitErr != nil {
+		return false, fmt.Errorf("cancel active queue work for %s: %w", infohash, waitErr)
+	}
+
+	// Snapshot and sync the exact final incarnation only after all work has
+	// drained. From this point onward every queue read/update/add fails closed,
+	// and restart recovery can finish without resurrecting this job.
+	intent, err := q.storage.PrepareQueuedDeletion(
+		infohash,
+		cleanup != nil,
+		placementSnapshots...,
+	)
+	if err != nil {
+		if storage.IsQueuedEntryNotFound(err) {
+			deleteSucceeded = true
+			return false, nil
+		}
+		return false, err
+	}
+	if err := q.storage.StartQueuedDeletionCleanup(
+		intent.InfoHash,
+		intent.QueueIncarnation,
+	); err != nil {
+		return false, err
+	}
+	if intent.UnrecoverableCleanupPending {
+		return false, fmt.Errorf(
+			"queued entry %s retains non-recoverable cleanup intent",
+			intent.InfoHash,
+		)
+	}
+	if intent.PlacementCleanupPending {
+		if cleanup == nil {
+			return false, fmt.Errorf(
+				"queued entry %s requires provider placement cleanup",
+				intent.InfoHash,
+			)
+		}
+		if err := cleanup(intent.Entry); err != nil {
+			return false, err
+		}
+		if err := q.storage.MarkQueuedDeletionPlacementsClean(
+			intent.InfoHash,
+			intent.QueueIncarnation,
+		); err != nil {
+			return false, err
+		}
+	}
+	if err := q.deleteEntryFiles(intent.Entry); err != nil {
+		return false, err
+	}
+	if err := q.storage.RetireQueuedDeletionRow(
+		intent.InfoHash,
+		intent.QueueIncarnation,
+	); err != nil {
+		return false, err
+	}
+	if err := q.storage.CompleteQueuedDeletion(
+		intent.InfoHash,
+		intent.QueueIncarnation,
+	); err != nil {
+		return false, err
+	}
+	deleteSucceeded = true
+	return true, nil
 }
 
 func (q *Queue) DeleteWhere(category string, protocol config.Protocol, state storage.TorrentState, hashes []string, cleanup func(t *storage.Entry) error) error {
-	return q.storage.DeleteWhereQueued(q.ListFilterFunc(category, protocol, state, hashes), q.wrapCleanupWithFileDelete(cleanup))
+	return q.deleteWhere(q.ListFilterFunc(category, protocol, state, hashes), cleanup)
 }
 
 func (q *Queue) DeleteStalled() error {
 	cutoff := time.Now().Add(-q.removeStalledAfter)
-	return q.storage.DeleteWhereQueued(func(t *storage.Entry) bool {
+	return q.deleteWhere(func(t *storage.Entry) bool {
 		if !t.AddedOn.Before(cutoff) {
 			return false
 		}
@@ -163,9 +301,25 @@ func (q *Queue) DeleteStalled() error {
 	}, nil)
 }
 
+func (q *Queue) deleteWhere(predicate func(*storage.Entry) bool, cleanup func(*storage.Entry) error) error {
+	entries, err := q.storage.FilterQueued(predicate)
+	if err != nil {
+		return fmt.Errorf("scan queued entries for deletion: %w", err)
+	}
+
+	var errs []error
+	for _, entry := range entries {
+		if err := q.Delete(entry.InfoHash, cleanup); err != nil {
+			errs = append(errs, fmt.Errorf("delete queued entry %s: %w", entry.InfoHash, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (q *Queue) Update(torrent *storage.Entry) error {
-	// Update the state here
-	return q.storage.UpdateQueue(torrent)
+	return q.lifecycle.withUpdate(torrent, func() error {
+		return q.storage.UpdateQueueExisting(torrent)
+	})
 }
 
 func (q *Queue) ListFilterFunc(category string, protocol config.Protocol, state storage.TorrentState, hashes []string) func(*storage.Entry) bool {
@@ -201,10 +355,25 @@ func (q *Queue) ListFilterFunc(category string, protocol config.Protocol, state 
 
 func (q *Queue) ListFilter(category string, protocol config.Protocol, state storage.TorrentState, hashes []string, sortBy string, reverse bool) []*storage.Entry {
 	filterFunc := q.ListFilterFunc(category, protocol, state, hashes)
-	torrents, err := q.storage.FilterQueued(filterFunc)
+	snapshots, err := q.storage.FilterQueued(filterFunc)
 	if err != nil {
 		// return empty list on error
 		return []*storage.Entry{}
+	}
+	torrents := make([]*storage.Entry, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		torrent, err := q.GetTorrent(snapshot.InfoHash)
+		if err != nil {
+			if !storage.IsQueuedEntryNotFound(err) && !errors.Is(err, ErrQueueEntryDeleting) {
+				q.logger.Error().Err(err).Str("entry", snapshot.InfoHash).Msg("Failed to re-read queue entry under lifecycle gate")
+			}
+			continue
+		}
+		// A delete/re-add between the scan and authoritative re-read may have
+		// replaced the payload. Reapply the filter to the current incarnation.
+		if filterFunc == nil || filterFunc(torrent) {
+			torrents = append(torrents, torrent)
+		}
 	}
 
 	if sortBy != "" {
@@ -222,7 +391,7 @@ func (q *Queue) ListFilter(category string, protocol config.Protocol, state stor
 			case "added_on":
 				return torrents[i].AddedOn.Before(torrents[j].AddedOn)
 			case "completed", "downloaded":
-				return torrents[i].CompletedAt.Before(*torrents[j].CompletedAt)
+				return queueCompletedBefore(torrents[i].CompletedAt, torrents[j].CompletedAt)
 			case "progress":
 				return torrents[i].Progress < torrents[j].Progress
 			case "category":
@@ -238,6 +407,35 @@ func (q *Queue) ListFilter(category string, protocol config.Protocol, state stor
 	return torrents
 }
 
+func queueCompletedBefore(left, right *time.Time) bool {
+	switch {
+	case left == nil:
+		return right != nil
+	case right == nil:
+		return false
+	default:
+		return left.Before(*right)
+	}
+}
+
 func (q *Queue) UpdateWhere(predicate func(*storage.Entry) bool, updateFunc func(*storage.Entry) bool) error {
-	return q.storage.UpdateWhereQueued(predicate, updateFunc)
+	entries, err := q.storage.FilterQueued(predicate)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, entry := range entries {
+		if err := q.lifecycle.bindEntry(entry); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if updateFunc != nil && !updateFunc(entry) {
+			continue
+		}
+		if err := q.Update(entry); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

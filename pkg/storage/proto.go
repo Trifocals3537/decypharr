@@ -157,6 +157,7 @@ func EntryToProto(e *Entry) *EntryProto {
 		SkipMultiSeason:  e.SkipMultiSeason,
 		LastError:        e.LastError,
 		ErrorCount:       int32(e.ErrorCount),
+		QueueIncarnation: e.QueueIncarnation,
 	}
 
 	// Timestamps
@@ -225,6 +226,7 @@ func ProtoToEntry(pb *EntryProto) *Entry {
 		SkipMultiSeason:  pb.SkipMultiSeason,
 		LastError:        pb.LastError,
 		ErrorCount:       int(pb.ErrorCount),
+		QueueIncarnation: pb.QueueIncarnation,
 	}
 
 	// Timestamps

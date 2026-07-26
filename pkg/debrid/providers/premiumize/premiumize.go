@@ -33,6 +33,8 @@ import (
 const (
 	defaultHost          = "https://www.premiumize.me"
 	profileCacheDuration = time.Hour
+	premiumizeTreeDepth  = 64
+	premiumizeTreeItems  = 100_000
 )
 
 var _ common.Client = (*Premiumize)(nil)
@@ -112,26 +114,32 @@ func (pm *Premiumize) do(req *http.Request, out any) (*http.Response, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp, fmt.Errorf("reading response body: %w", err)
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp, fmt.Errorf("premiumize API error: Status: %d || Body: %s", resp.StatusCode, string(body))
+		// Provider error bodies may echo submitted magnets or signed URLs. Read
+		// only a bounded prefix for connection/resource safety and never expose
+		// the raw body in the returned error.
+		_, _ = utils.ReadAllLimited(resp.Body, 64<<10)
+		return resp, fmt.Errorf("premiumize API error: Status: %d", resp.StatusCode)
 	}
 
-	if len(bytes.TrimSpace(body)) == 0 || out == nil {
+	if out == nil || resp.ContentLength == 0 {
 		return resp, nil
 	}
 
+	var body json.RawMessage
+	if err := utils.DecodeJSONResponse(resp.Body, &body); err != nil {
+		return resp, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return resp, nil
+	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return resp, err
 	}
 
 	var envelope apiError
 	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Status == "error" {
-		return resp, fmt.Errorf("premiumize API error: %s (%s)", envelope.Message, envelope.Code)
+		return resp, fmt.Errorf("premiumize API error (code %s)", envelope.Code)
 	}
 
 	return resp, nil
@@ -273,7 +281,10 @@ func (pm *Premiumize) UpdateTorrent(t *types.Torrent) error {
 }
 
 func (pm *Premiumize) DeleteTorrent(torrentID string) error {
-	_, err := pm.doForm(context.Background(), http.MethodPost, "/api/transfer/delete", url.Values{"id": {torrentID}}, nil)
+	resp, err := pm.doForm(context.Background(), http.MethodPost, "/api/transfer/delete", url.Values{"id": {torrentID}}, nil)
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return customerror.TorrentNotFoundError
+	}
 	return err
 }
 
@@ -385,24 +396,32 @@ func (pm *Premiumize) transferToTorrent(tr premiumizeTransfer, fallbackInfoHash 
 }
 
 func (pm *Premiumize) filesForTransfer(tr premiumizeTransfer) (map[string]types.File, []string, bool, error) {
-	files := make(map[string]types.File)
+	fileRecords := make([]types.File, 0)
 	links := make([]string, 0)
 	if fileID := tr.FileID.String(); fileID != "" {
 		item, err := pm.itemDetails(fileID)
 		if err != nil {
 			return nil, nil, false, err
 		}
-		pm.addFile(files, &links, tr.ID, item.Name, item.Name, item.Size, item.ID, item.Link)
+		pm.addFile(&fileRecords, &links, tr.ID, item.Name, item.Name, item.Size, item.ID, item.Link)
+		files, err := types.FilesByLogicalName(fileRecords)
+		if err != nil {
+			return nil, nil, false, err
+		}
 		return files, links, item.Link != "", nil
 	}
 	if folderID := tr.FolderID.String(); folderID != "" {
-		linkedFiles, err := pm.addFolderFiles(files, &links, tr.ID, folderID, "")
+		linkedFiles, err := pm.addFolderFiles(&fileRecords, &links, tr.ID, folderID, "")
+		if err != nil {
+			return nil, nil, false, err
+		}
+		files, err := types.FilesByLogicalName(fileRecords)
 		if err != nil {
 			return nil, nil, false, err
 		}
 		return files, links, linkedFiles > 0, nil
 	}
-	return files, links, false, nil
+	return make(map[string]types.File), links, false, nil
 }
 
 func (pm *Premiumize) itemDetails(id string) (*itemDetailsResponse, error) {
@@ -417,7 +436,45 @@ func (pm *Premiumize) itemDetails(id string) (*itemDetailsResponse, error) {
 	return &data, nil
 }
 
-func (pm *Premiumize) addFolderFiles(files map[string]types.File, links *[]string, transferID, folderID, prefix string) (int, error) {
+func (pm *Premiumize) addFolderFiles(files *[]types.File, links *[]string, transferID, folderID, prefix string) (int, error) {
+	visitedItems := 0
+	return pm.addFolderFilesBounded(
+		files,
+		links,
+		transferID,
+		folderID,
+		prefix,
+		0,
+		make(map[string]struct{}),
+		&visitedItems,
+	)
+}
+
+func (pm *Premiumize) addFolderFilesBounded(
+	files *[]types.File,
+	links *[]string,
+	transferID, folderID, prefix string,
+	depth int,
+	visitedFolders map[string]struct{},
+	visitedItems *int,
+) (int, error) {
+	if depth > premiumizeTreeDepth {
+		return 0, fmt.Errorf(
+			"premiumize folder tree exceeds depth %d",
+			premiumizeTreeDepth,
+		)
+	}
+	if folderID == "" {
+		return 0, fmt.Errorf("premiumize folder tree contains an empty folder ID")
+	}
+	if _, exists := visitedFolders[folderID]; exists {
+		return 0, fmt.Errorf(
+			"premiumize folder tree repeats folder ID %q",
+			folderID,
+		)
+	}
+	visitedFolders[folderID] = struct{}{}
+
 	var data folderListResponse
 	req, err := http.NewRequest(http.MethodGet, pm.endpoint("/api/folder/list?id="+url.QueryEscape(folderID)), nil)
 	if err != nil {
@@ -430,9 +487,25 @@ func (pm *Premiumize) addFolderFiles(files map[string]types.File, links *[]strin
 	// Decypharr's extension/size filters, so readiness reflects Premiumize.
 	linkedFiles := 0
 	for _, item := range data.Content {
+		(*visitedItems)++
+		if *visitedItems > premiumizeTreeItems {
+			return 0, fmt.Errorf(
+				"premiumize folder tree exceeds %d items",
+				premiumizeTreeItems,
+			)
+		}
 		itemPath := path.Join(prefix, item.Name)
 		if item.Type == "folder" {
-			n, err := pm.addFolderFiles(files, links, transferID, item.ID, itemPath)
+			n, err := pm.addFolderFilesBounded(
+				files,
+				links,
+				transferID,
+				item.ID,
+				itemPath,
+				depth+1,
+				visitedFolders,
+				visitedItems,
+			)
 			if err != nil {
 				return 0, err
 			}
@@ -447,7 +520,7 @@ func (pm *Premiumize) addFolderFiles(files map[string]types.File, links *[]strin
 	return linkedFiles, nil
 }
 
-func (pm *Premiumize) addFile(files map[string]types.File, links *[]string, transferID, name, itemPath string, size int64, id, link string) {
+func (pm *Premiumize) addFile(files *[]types.File, links *[]string, transferID, name, itemPath string, size int64, id, link string) {
 	if link == "" {
 		return
 	}
@@ -461,18 +534,14 @@ func (pm *Premiumize) addFile(files map[string]types.File, links *[]string, tran
 	} else if filepath.Ext(itemPath) == "" {
 		return
 	}
-	fileName := filepath.Base(itemPath)
-	if _, exists := files[fileName]; exists {
-		fileName = itemPath
-	}
-	files[fileName] = types.File{
+	*files = append(*files, types.File{
 		TorrentId: transferID,
 		Id:        id,
-		Name:      fileName,
+		Name:      name,
 		Path:      itemPath,
 		Size:      size,
 		Link:      link,
-	}
+	})
 	*links = append(*links, link)
 }
 
@@ -524,7 +593,8 @@ func (pm *Premiumize) CheckFile(ctx context.Context, infohash, fileID string) er
 		}
 		resp, err := pm.client.Do(req)
 		if err != nil {
-			return err
+			// net/http errors contain the complete signed provider URL.
+			return fmt.Errorf("premiumize link check request failed")
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
@@ -568,18 +638,15 @@ func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("premiumize API error: Status: %d || Body: %s", resp.StatusCode, string(body))
+		_, _ = utils.ReadAllLimited(resp.Body, 64<<10)
+		return nil, fmt.Errorf("premiumize API error: Status: %d", resp.StatusCode)
 	}
-	if err := json.Unmarshal(body, &data); err != nil {
+	if err := utils.DecodeJSONResponse(resp.Body, &data); err != nil {
 		return nil, err
 	}
 	if data.Status == "error" {
-		return nil, fmt.Errorf("premiumize API error: %s (%s)", data.Message, data.Code)
+		return nil, fmt.Errorf("premiumize API error (code %s)", data.Code)
 	}
 	expiration := time.Time{}
 	premium := int64(0)
@@ -666,23 +733,24 @@ func (pm *Premiumize) SpeedTest(ctx context.Context) types.SpeedTestResult {
 	if !found || link.DownloadLink == "" {
 		return result
 	}
+	const downloadSize = 1 << 20
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, link.DownloadLink, nil)
 	if err != nil {
 		return result
 	}
-	req.Header.Set("Range", "bytes=0-1048575")
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", downloadSize-1))
 	downloadStart := time.Now()
 	dlResp, err := current.Client().Do(req)
 	if err != nil {
 		return result
 	}
 	defer dlResp.Body.Close()
-	data, err := io.ReadAll(dlResp.Body)
+	bytesRead, err := io.Copy(io.Discard, io.LimitReader(dlResp.Body, downloadSize))
 	duration := time.Since(downloadStart)
-	if err != nil || len(data) == 0 {
+	if err != nil || bytesRead == 0 {
 		return result
 	}
-	result.BytesRead = int64(len(data))
+	result.BytesRead = bytesRead
 	if duration.Seconds() > 0 {
 		result.SpeedMBps = float64(result.BytesRead) / duration.Seconds() / (1024 * 1024)
 	}

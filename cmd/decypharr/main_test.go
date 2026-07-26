@@ -107,3 +107,108 @@ func TestStartServicesRejectsUnexpectedCleanExit(t *testing.T) {
 		t.Fatalf("startServices() error = %v, want %v", err, errServicesStopped)
 	}
 }
+
+func TestFinishRestartDoesNotResetAfterServiceStopError(t *testing.T) {
+	expected := errors.New("graceful shutdown deadline exceeded")
+	serviceDone := make(chan error, 1)
+	serviceDone <- expected
+
+	resetCalled := false
+	shutdownCalled := false
+	restarted, err := finishRestart(
+		context.Background(),
+		serviceDone,
+		func() error {
+			resetCalled = true
+			return nil
+		},
+		func() { shutdownCalled = true },
+	)
+
+	if !errors.Is(err, expected) {
+		t.Fatalf("finishRestart() error = %v, want %v", err, expected)
+	}
+	if restarted {
+		t.Fatal("finishRestart() restarted after a failed service stop")
+	}
+	if resetCalled {
+		t.Fatal("finishRestart() reset storage after a failed service stop")
+	}
+	if shutdownCalled {
+		t.Fatal("finishRestart() ran normal shutdown cleanup after a failed service stop")
+	}
+}
+
+func TestFinishRestartResetsOnlyAfterCleanServiceStop(t *testing.T) {
+	serviceDone := make(chan error, 1)
+	serviceDone <- nil
+
+	resetCalled := false
+	restarted, err := finishRestart(
+		context.Background(),
+		serviceDone,
+		func() error {
+			resetCalled = true
+			return nil
+		},
+		func() { t.Fatal("finishRestart() unexpectedly ran shutdown cleanup") },
+	)
+
+	if err != nil {
+		t.Fatalf("finishRestart() error = %v, want nil", err)
+	}
+	if !restarted {
+		t.Fatal("finishRestart() did not restart after a clean service stop")
+	}
+	if !resetCalled {
+		t.Fatal("finishRestart() did not reset storage after a clean service stop")
+	}
+}
+
+func TestFinishRestartShutsDownWhenParentWasCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	serviceDone := make(chan error, 1)
+	serviceDone <- nil
+
+	shutdownCalled := false
+	restarted, err := finishRestart(
+		ctx,
+		serviceDone,
+		func() error {
+			t.Fatal("finishRestart() reset storage after parent cancellation")
+			return nil
+		},
+		func() { shutdownCalled = true },
+	)
+
+	if err != nil {
+		t.Fatalf("finishRestart() error = %v, want nil", err)
+	}
+	if restarted {
+		t.Fatal("finishRestart() restarted after parent cancellation")
+	}
+	if !shutdownCalled {
+		t.Fatal("finishRestart() did not run shutdown cleanup after parent cancellation")
+	}
+}
+
+func TestFinishRestartPropagatesResetFailure(t *testing.T) {
+	serviceDone := make(chan error, 1)
+	serviceDone <- nil
+	expected := errors.New("manager drain timed out")
+
+	restarted, err := finishRestart(
+		context.Background(),
+		serviceDone,
+		func() error { return expected },
+		func() { t.Fatal("finishRestart() unexpectedly ran shutdown cleanup") },
+	)
+
+	if !errors.Is(err, expected) {
+		t.Fatalf("finishRestart() error = %v, want %v", err, expected)
+	}
+	if restarted {
+		t.Fatal("finishRestart() restarted after reset failed")
+	}
+}

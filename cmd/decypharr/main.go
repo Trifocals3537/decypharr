@@ -80,23 +80,23 @@ func Start(ctx context.Context) error {
 
 		srv.SetRestartFunc(restartFunc)
 
-		resetFunc := func() {
-
+		resetFunc := func() error {
 			config.Reset()
 			// Stop manager to reset ready channel and cleanup resources
 			if err := mgr.Reset(); err != nil {
-				_log.Warn().Err(err).Msg("Failed to reset manager")
+				return err
 			}
 			// refresh GC
 			runtime.GC()
+			return nil
 		}
 
 		shutdownFunc := func() {
-			config.Reset()
 			// Stop manager to cleanup all resources including mounts
 			if err := mgr.Stop(); err != nil {
 				_log.Warn().Err(err).Msg("Failed to stop manager during shutdown")
 			}
+			config.Reset()
 			// refresh GC
 			runtime.GC()
 		}
@@ -111,41 +111,69 @@ func Start(ctx context.Context) error {
 			// graceful shutdown
 			cancelSvc() // propagate to services
 			if err := <-serviceDone; err != nil {
-				_log.Warn().Err(err).Msg("Service reported an error while shutting down")
+				// A forced HTTP close can return before a stuck handler exits.
+				// Do not close manager storage underneath any such handler;
+				// return an error and let the process terminate as one unit.
+				return fmt.Errorf("services did not stop cleanly: %w", err)
 			}
-			_log.Info().Msg("Decypharr has been stopped gracefully.")
 			shutdownFunc() // cleanup all resources including mounts
+			_log.Info().Msg("Decypharr has been stopped gracefully.")
 			return nil
 
 		case <-restartCh:
 			cancelSvc() // tell existing services to shut down
 			_log.Info().Msg("Restarting Decypharr...")
-			if err := <-serviceDone; err != nil {
-				_log.Warn().Err(err).Msg("Service reported an error while restarting")
+			restarted, err := finishRestart(ctx, serviceDone, resetFunc, shutdownFunc)
+			if err != nil {
+				return fmt.Errorf("restart aborted: %w", err)
 			}
-
-			if ctx.Err() != nil {
-				shutdownFunc()
+			if !restarted {
 				return nil
 			}
 
 			_log.Info().Msg("Decypharr has been restarted.")
-			resetFunc() // reset store and services for restart
 			// rebuild svcCtx off the original parent
 			svcCtx, cancelSvc = context.WithCancel(ctx)
 
 		case err := <-serviceDone:
 			cancelSvc()
+			if err != nil {
+				// An error may represent a forced HTTP close with handlers
+				// still unwinding. Let the process supervisor restart from a
+				// clean address space instead of closing shared resources
+				// underneath those handlers.
+				return err
+			}
 			shutdownFunc()
 			if ctx.Err() != nil {
 				return nil
 			}
-			if err == nil {
-				err = errServicesStopped
-			}
-			return err
+			return errServicesStopped
 		}
 	}
+}
+
+// finishRestart only resets shared storage after every service reports a clean
+// stop. An HTTP shutdown timeout may leave handler goroutines running even
+// after their connections are force-closed, so an error must abort the process
+// instead of reopening storage underneath those handlers.
+func finishRestart(
+	ctx context.Context,
+	serviceDone <-chan error,
+	resetFunc func() error,
+	shutdownFunc func(),
+) (bool, error) {
+	if err := <-serviceDone; err != nil {
+		return false, err
+	}
+	if ctx.Err() != nil {
+		shutdownFunc()
+		return false, nil
+	}
+	if err := resetFunc(); err != nil {
+		return false, fmt.Errorf("reset services: %w", err)
+	}
+	return true, nil
 }
 
 func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountManager {

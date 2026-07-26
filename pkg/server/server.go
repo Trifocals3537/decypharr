@@ -102,12 +102,7 @@ func New(mgr *manager.Manager) *Server {
 		"templates/register.html",
 		"templates/setup.html",
 	))
-	cookieStore := sessions.NewCookieStore([]byte(cfg.SecretKey()))
-	cookieStore.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   86400 * 7,
-		HttpOnly: false,
-	}
+	cookieStore := newSessionCookieStore(cfg.SecretKey())
 
 	statsCollector := stats.New(mgr)
 
@@ -166,6 +161,17 @@ func New(mgr *manager.Manager) *Server {
 	})
 	s.router = r
 	return s
+}
+
+func newSessionCookieStore(secret string) *sessions.CookieStore {
+	store := sessions.NewCookieStore([]byte(secret))
+	store.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400 * 7,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	return store
 }
 
 func (s *Server) SetRestartFunc(restartFunc func()) {

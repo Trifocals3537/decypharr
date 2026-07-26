@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -72,7 +73,7 @@ func (s *Server) isValidAPIToken(r *http.Request) bool {
 	}
 
 	// Check if the provided token matches the configured token
-	return token == auth.APIToken
+	return subtle.ConstantTimeCompare([]byte(token), []byte(auth.APIToken)) == 1
 }
 
 // generateAPIToken creates a new random API token

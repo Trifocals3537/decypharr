@@ -22,15 +22,19 @@ func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.UseAuth {
-		cookie := &http.Cookie{
-			Name:     "SID",
-			Value:    createSID(a.Host, a.Token),
-			Path:     "/",
-			SameSite: http.SameSiteNoneMode,
-		}
-		http.SetCookie(w, cookie)
+		http.SetCookie(w, newSIDCookie(createSID(a.Host, a.Token)))
 	}
 	_, _ = w.Write([]byte("Ok."))
+}
+
+func newSIDCookie(value string) *http.Cookie {
+	return &http.Cookie{
+		Name:     "SID",
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
 }
 
 func (q *QBit) handleVersion(w http.ResponseWriter, r *http.Request) {

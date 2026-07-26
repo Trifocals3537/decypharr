@@ -174,9 +174,10 @@ type CustomFolders struct {
 }
 
 type Auth struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	APIToken string `json:"api_token,omitempty"`
+	Username      string `json:"username,omitempty"`
+	Password      string `json:"password,omitempty"`
+	APIToken      string `json:"api_token,omitempty"`
+	SessionSecret string `json:"session_secret,omitempty"`
 }
 
 // RepairSource selects where the health checker enumerates entries from.
@@ -413,23 +414,42 @@ func (c *Config) GetMaxFileSize() int64 {
 }
 
 func (c *Config) SecretKey() string {
-	return cmp.Or(getEnv("SECRET_KEY"), "\"wqj(v%lj*!-+kf@4&i95rhh_!5_px5qnuwqbr%cjrvrozz_r*(\"")
+	if secret := getEnv("SECRET_KEY"); secret != "" {
+		return secret
+	}
+
+	auth := c.loadAuth()
+	if auth.SessionSecret == "" {
+		secret, err := generateAPIToken()
+		if err != nil {
+			panic(fmt.Errorf("generate session secret: %w", err))
+		}
+		auth.SessionSecret = secret
+		if err := c.SaveAuth(auth); err != nil {
+			// Keep the in-memory random key rather than falling back to a
+			// shared public key. Sessions will simply need to log in again
+			// after restart if the auth file remains unwritable.
+			_, _ = fmt.Fprintf(os.Stderr, "failed to persist session secret: %v\n", err)
+		}
+	}
+	return auth.SessionSecret
+}
+
+func (c *Config) loadAuth() *Auth {
+	if c.Auth == nil {
+		c.Auth = &Auth{}
+		if data, err := os.ReadFile(c.AuthFile()); err == nil {
+			_ = json.Unmarshal(data, c.Auth)
+		}
+	}
+	return c.Auth
 }
 
 func (c *Config) GetAuth() *Auth {
 	if !c.UseAuth {
 		return nil
 	}
-	if c.Auth == nil {
-		c.Auth = &Auth{}
-		if _, err := os.Stat(c.AuthFile()); err == nil {
-			file, err := os.ReadFile(c.AuthFile())
-			if err == nil {
-				_ = json.Unmarshal(file, c.Auth)
-			}
-		}
-	}
-	return c.Auth
+	return c.loadAuth()
 }
 
 func (c *Config) SaveAuth(auth *Auth) error {
@@ -654,21 +674,30 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) {
 		}
 	}
 	if initializeAuth {
-		// Load the auth file.
-		c.Auth = c.GetAuth()
+		// Always initialize a private session-signing key, even when auth is
+		// currently disabled. Authentication can be enabled at runtime without
+		// restarting the HTTP server and must never fall back to a shared key.
+		c.Auth = c.loadAuth()
+		authChanged := false
+		if c.Auth.SessionSecret == "" {
+			if secret, err := generateAPIToken(); err == nil {
+				c.Auth.SessionSecret = secret
+				authChanged = true
+			}
+		}
 
 		// Generate an API token for the live runtime if auth is enabled and no
 		// token exists. Read-only validation intentionally skips this block.
 		if c.UseAuth {
-			if c.Auth == nil {
-				c.Auth = &Auth{}
-			}
 			if c.Auth.APIToken == "" {
 				if token, err := generateAPIToken(); err == nil {
 					c.Auth.APIToken = token
-					_ = c.SaveAuth(c.Auth)
+					authChanged = true
 				}
 			}
+		}
+		if authChanged {
+			_ = c.SaveAuth(c.Auth)
 		}
 	}
 

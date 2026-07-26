@@ -312,7 +312,9 @@ func (c *Config) loadConfig() error {
 	}
 
 	// Set defaults for any missing values
-	c.setDefaults()
+	if err := c.setDefaults(); err != nil {
+		return err
+	}
 
 	// Apply environment variable overrides
 	c.applyEnvOverrides()
@@ -335,7 +337,9 @@ func LoadForValidation(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config file %s: %w", configFile, err)
 	}
 
-	cfg.setDefaultsForPath(path, false)
+	if err := cfg.setDefaultsForPath(path, false); err != nil {
+		return nil, err
+	}
 	cfg.applyEnvOverrides()
 	return cfg, nil
 }
@@ -418,7 +422,10 @@ func (c *Config) SecretKey() string {
 		return secret
 	}
 
-	auth := c.loadAuth()
+	auth, err := c.loadAuth()
+	if err != nil {
+		panic(err)
+	}
 	if auth.SessionSecret == "" {
 		secret, err := generateAPIToken()
 		if err != nil {
@@ -426,30 +433,49 @@ func (c *Config) SecretKey() string {
 		}
 		auth.SessionSecret = secret
 		if err := c.SaveAuth(auth); err != nil {
-			// Keep the in-memory random key rather than falling back to a
-			// shared public key. Sessions will simply need to log in again
-			// after restart if the auth file remains unwritable.
-			_, _ = fmt.Fprintf(os.Stderr, "failed to persist session secret: %v\n", err)
+			panic(fmt.Errorf("persist session secret: %w", err))
 		}
 	}
 	return auth.SessionSecret
 }
 
-func (c *Config) loadAuth() *Auth {
-	if c.Auth == nil {
-		c.Auth = &Auth{}
-		if data, err := os.ReadFile(c.AuthFile()); err == nil {
-			_ = json.Unmarshal(data, c.Auth)
-		}
+func (c *Config) loadAuth() (*Auth, error) {
+	if c.Auth != nil {
+		return c.Auth, nil
 	}
-	return c.Auth
+
+	authFile := c.AuthFile()
+	data, err := os.ReadFile(authFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.Auth = &Auth{}
+			return c.Auth, nil
+		}
+		return nil, fmt.Errorf("read auth config %s: %w", authFile, err)
+	}
+
+	trimmed := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil, fmt.Errorf("parse auth config %s: expected a JSON object", authFile)
+	}
+
+	auth := &Auth{}
+	if err := json.Unmarshal(data, auth); err != nil {
+		return nil, fmt.Errorf("parse auth config %s: %w", authFile, err)
+	}
+	c.Auth = auth
+	return c.Auth, nil
 }
 
 func (c *Config) GetAuth() *Auth {
 	if !c.UseAuth {
 		return nil
 	}
-	return c.loadAuth()
+	auth, err := c.loadAuth()
+	if err != nil {
+		panic(err)
+	}
+	return auth
 }
 
 func (c *Config) SaveAuth(auth *Auth) error {
@@ -526,11 +552,11 @@ func (c *Config) migrateNotifications() {
 	}
 }
 
-func (c *Config) setDefaults() {
-	c.setDefaultsForPath(GetMainPath(), true)
+func (c *Config) setDefaults() error {
+	return c.setDefaultsForPath(GetMainPath(), true)
 }
 
-func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) {
+func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) error {
 	// Migrate deprecated fields to Manager (backward compatibility)
 	c.migrateQBitTorrentToManager(configRoot)
 	c.migrateNotifications()
@@ -677,27 +703,37 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) {
 		// Always initialize a private session-signing key, even when auth is
 		// currently disabled. Authentication can be enabled at runtime without
 		// restarting the HTTP server and must never fall back to a shared key.
-		c.Auth = c.loadAuth()
+		auth, err := c.loadAuth()
+		if err != nil {
+			return err
+		}
+		c.Auth = auth
 		authChanged := false
 		if c.Auth.SessionSecret == "" {
-			if secret, err := generateAPIToken(); err == nil {
-				c.Auth.SessionSecret = secret
-				authChanged = true
+			secret, err := generateAPIToken()
+			if err != nil {
+				return fmt.Errorf("generate session secret: %w", err)
 			}
+			c.Auth.SessionSecret = secret
+			authChanged = true
 		}
 
 		// Generate an API token for the live runtime if auth is enabled and no
 		// token exists. Read-only validation intentionally skips this block.
 		if c.UseAuth {
 			if c.Auth.APIToken == "" {
-				if token, err := generateAPIToken(); err == nil {
-					c.Auth.APIToken = token
-					authChanged = true
+				token, err := generateAPIToken()
+				if err != nil {
+					return fmt.Errorf("generate API token: %w", err)
 				}
+				c.Auth.APIToken = token
+				authChanged = true
 			}
 		}
 		if authChanged {
-			_ = c.SaveAuth(c.Auth)
+			if err := c.SaveAuth(c.Auth); err != nil {
+				return fmt.Errorf("persist auth defaults: %w", err)
+			}
 		}
 	}
 
@@ -707,6 +743,7 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) {
 	}
 
 	c.applyRepairDefaults()
+	return nil
 }
 
 func (c *Config) applyRepairDefaults() {
@@ -729,7 +766,9 @@ func (c *Config) applyRepairDefaults() {
 }
 
 func (c *Config) Save() error {
-	c.setDefaults()
+	if err := c.setDefaults(); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err

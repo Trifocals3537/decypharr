@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +20,8 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"golang.org/x/term"
 )
+
+const defaultPprofAddress = "127.0.0.1:6060"
 
 func main() {
 	defer func() {
@@ -34,7 +38,12 @@ func main() {
 
 	// Create a default config directory if it doesn't exist
 	flag.StringVar(&configPath, "config", "", "path to the data folder")
-	flag.StringVar(&pprofAddr, "pprof", ":6060", "pprof server address (set to empty to disable)")
+	flag.StringVar(
+		&pprofAddr,
+		"pprof",
+		defaultPprofAddress,
+		"loopback pprof server address (set to empty to disable)",
+	)
 	flag.BoolVar(&checkConfig, "check-config", false, "validate configuration without starting services")
 	flag.StringVar(
 		&setAuthUsername,
@@ -106,6 +115,9 @@ func main() {
 
 	// Start pprof server if enabled
 	if pprofAddr != "" && enablePprof {
+		if err := validatePprofListenAddress(pprofAddr); err != nil {
+			log.Fatalf("refusing unsafe pprof listener: %v", err)
+		}
 		go func() {
 			log.Printf("Starting pprof server on %s", pprofAddr)
 			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
@@ -121,6 +133,21 @@ func main() {
 	if err := decypharr.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func validatePprofListenAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("parse %q: %w", address, err)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("pprof host must be a loopback IP literal: %q", host)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("pprof host must be loopback, got %q", host)
+	}
+	return nil
 }
 
 func configureAuthFromTerminal(cfg *config.Config, username string) error {

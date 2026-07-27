@@ -72,6 +72,12 @@ func main() {
 		if err := cfg.ValidateDeployment(); err != nil {
 			log.Fatalf("Decypharr deployment safety check failed: %v", err)
 		}
+		if len(cfg.AllowedClientCIDRs) == 0 &&
+			!config.IsLoopbackBindAddress(cfg.BindAddress) {
+			log.Printf(
+				"WARNING: non-loopback HTTP listener has no allowed_client_cidrs boundary; use a trusted network or TLS proxy and do not send credentials to the listener over the public Internet",
+			)
+		}
 		fmt.Printf(
 			"Decypharr configuration is valid: %s\n",
 			filepath.Join(configPath, "config.json"),

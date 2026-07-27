@@ -6,7 +6,7 @@ import (
 )
 
 func TestSessionCookieDefaultsAreBrowserSafe(t *testing.T) {
-	store := newSessionCookieStore("test-secret")
+	store := newSessionCookieStore("test-secret", false)
 	options := store.Options
 
 	if !options.HttpOnly {
@@ -17,5 +17,12 @@ func TestSessionCookieDefaultsAreBrowserSafe(t *testing.T) {
 	}
 	if options.MaxAge != 7*24*60*60 {
 		t.Fatalf("MaxAge = %d, want seven days", options.MaxAge)
+	}
+}
+
+func TestSessionCookieCanRequireHTTPS(t *testing.T) {
+	store := newSessionCookieStore("test-secret", true)
+	if !store.Options.Secure {
+		t.Fatal("session cookie must be Secure when configured behind HTTPS")
 	}
 }

@@ -181,7 +181,7 @@ func TestWebhookUsesAPIAuthentication(t *testing.T) {
 			APIToken: "webhook-token",
 		},
 	)
-	s := &Server{cookie: newSessionCookieStore("test-session-secret")}
+	s := &Server{cookie: newSessionCookieStore("test-session-secret", false)}
 	called := false
 	handler := s.authMiddleware(http.HandlerFunc(func(
 		w http.ResponseWriter,

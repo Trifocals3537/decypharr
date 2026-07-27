@@ -716,6 +716,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	newConfig.Arrs = validArrs
 
+	if err := validateConfigUpdate(newConfig); err != nil {
+		s.logger.Warn().Err(err).Msg("Rejected unsafe configuration update")
+		http.Error(w, "Invalid configuration: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Save the updated config. This also applies defaults to newConfig, so the
 	// restart comparison below sees a fully-normalized config on both sides.
 	if err := newConfig.Save(); err != nil {
@@ -748,6 +754,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)
+}
+
+func validateConfigUpdate(candidate *config.Config) error {
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	if err := candidate.ValidateDeployment(); err != nil {
+		return fmt.Errorf("deployment safety check: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) handleGetRepairConfig(w http.ResponseWriter, r *http.Request) {

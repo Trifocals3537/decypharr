@@ -33,9 +33,9 @@ ssh -L 8282:127.0.0.1:8282 user@seedbox
 
 Then visit `http://127.0.0.1:8282`. For permanent remote access, prefer a
 trusted reverse proxy. Set `bind_address` explicitly only when you intend to
-listen on another interface. Decypharr logs a security warning when
-authentication is disabled on a non-loopback listener because the UI, APIs,
-and provider configuration can otherwise be exposed over plain HTTP.
+listen on another interface. Decypharr refuses to start when authentication
+is disabled on a non-loopback listener because the UI, APIs, and provider
+configuration could otherwise be exposed over plain HTTP.
 
 ### Shared seedboxes
 
@@ -49,10 +49,10 @@ outbound HTTPS connections; Usenet providers, including an NNTP endpoint
 supplied by TorBox, use outbound NNTP or NNTPS connections. Those outbound
 connections do not require additional assigned application ports.
 
-Some shared hosts provide a private per-user subnet address for communication
-between applications. Binding to that address and pointing the Arr clients to
-it is also safe when the provider confirms the subnet is not public; reach the
-UI through the provider's VPN or an SSH tunnel to that private address.
+Some shared hosts provide a private per-user address for communication between
+applications. Bind to that address, point local automation clients to it, and
+reach the UI through a private HTTPS service. Avoid binding a native shared-host
+installation to `0.0.0.0`.
 If the WebDAV endpoint is not needed, set `disable_webdav` to `true`. Otherwise
 enable both application authentication and `enable_webdav_auth`.
 
@@ -75,6 +75,67 @@ credential changes are rejected. Authentication also cannot be disabled while
 the service is listening on a non-loopback address. Put the single assigned
 HTTP port behind the host's TLS reverse proxy; do not publish the same
 unencrypted port directly to the Internet.
+
+#### Rootless Tailscale HTTPS
+
+Tailscale Serve is a good fit when a shared host has no supported TLS reverse
+proxy for custom applications. It terminates private HTTPS inside the tailnet
+and proxies to Decypharr's existing HTTP listener, so it does not require
+Docker or another public port. Keep Decypharr authentication enabled as a
+second layer; do not use Tailscale Funnel.
+
+Bind Decypharr to the account's private address and restrict the listener to
+that same source address:
+
+```json
+{
+  "bind_address": "192.0.2.10",
+  "port": "8282",
+  "use_auth": true,
+  "secure_session_cookie": true,
+  "disable_webdav": true,
+  "allowed_client_cidrs": [
+    "192.0.2.10/32"
+  ]
+}
+```
+
+`192.0.2.10` is a documentation-only address. Replace it and the example port
+with values assigned to your account. The list applies to the UI and all
+compatibility routes and ignores forwarded-IP headers. Binding to the private
+address keeps the listener off the public interface, while the allowlist
+continues to admit local automation clients and the local Tailscale proxy.
+
+For a named Tailscale Service:
+
+1. In the Tailscale admin console, define `svc:decypharr` with endpoint
+   `tcp:443` and grant only the intended users or devices access.
+2. Confirm the seedbox node has a tag-based identity and Tailscale 1.86 or
+   later.
+3. Advertise the HTTPS proxy from the seedbox, using the correct path to the
+   rootless client and socket:
+
+   ```bash
+   ~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve \
+     --service=svc:decypharr --https=443 http://192.0.2.10:8282
+   ```
+
+4. Approve the service host if the tailnet does not auto-approve it.
+5. Verify the named `https://decypharr.<tailnet>.ts.net` URL reaches the
+   Decypharr login, both Arr clients still pass their tests, and the public
+   host cannot connect to the assigned application port.
+
+Named services run in the background by default and resume with the Tailscale
+daemon. To roll back only this mapping, first drain it, then clear it:
+
+```bash
+~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve drain svc:decypharr
+~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve clear svc:decypharr
+```
+
+See the official
+[Tailscale Services guide](https://tailscale.com/docs/features/tailscale-services)
+for service definition, approval, and access grants.
 
 Before replacing an existing seedbox binary:
 
@@ -103,8 +164,11 @@ provider-specific service override; preserve its CPU/task limits and paths,
 but update its effective binary path deliberately.
 
 `--check-config` is for an existing configuration and never creates or changes
-files. It also rejects a non-loopback deployment when application
-authentication is disabled, or when WebDAV would remain unprotected:
+files. It rejects invalid client networks, a non-loopback deployment when
+application authentication is disabled, or a deployment where WebDAV would
+remain unprotected. It warns when a non-loopback listener has no client
+network boundary. Normal startup and configuration updates enforce the same
+deployment-safety checks:
 
 ```bash
 ~/.local/bin/decypharr --config ~/.decypharr --check-config

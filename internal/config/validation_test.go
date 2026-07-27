@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
@@ -204,6 +205,23 @@ func TestValidateDeploymentRejectsUnprotectedRemoteServices(t *testing.T) {
 				EnableWebdavAuth: true,
 			},
 		},
+		{
+			name: "remote auth with valid client networks",
+			cfg: Config{
+				BindAddress:        "0.0.0.0",
+				UseAuth:            true,
+				DisableWebDav:      true,
+				AllowedClientCIDRs: []string{"127.0.0.0/8", "192.0.2.10"},
+			},
+		},
+		{
+			name: "invalid client network",
+			cfg: Config{
+				BindAddress:        "127.0.0.1",
+				AllowedClientCIDRs: []string{"not-a-network"},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -217,6 +235,26 @@ func TestValidateDeploymentRejectsUnprotectedRemoteServices(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestParseAllowedClientCIDRs(t *testing.T) {
+	prefixes, err := ParseAllowedClientCIDRs([]string{
+		"127.0.0.1",
+		"10.100.7.99/24",
+		"::1",
+	})
+	if err != nil {
+		t.Fatalf("ParseAllowedClientCIDRs() error = %v", err)
+	}
+
+	got := make([]string, len(prefixes))
+	for index, prefix := range prefixes {
+		got[index] = prefix.String()
+	}
+	want := []string{"127.0.0.1/32", "10.100.7.0/24", "::1/128"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("prefixes = %v, want %v", got, want)
 	}
 }
 

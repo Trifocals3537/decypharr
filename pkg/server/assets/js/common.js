@@ -387,13 +387,25 @@ class DecypharrUtils {
             const versionBadge = document.getElementById('version-badge');
 
             if (versionBadge) {
-                versionBadge.innerHTML = `
-                    <a href="https://github.com/Trifocals3537/decypharr/releases/tag/v${data.version}"
-                       target="_blank"
-                       class="text-current hover:text-primary transition-colors">
-                        ${data.channel}-${data.version}
-                    </a>
-                `;
+                const version = String(data.version || '').trim();
+                const channel = String(data.channel || '').trim();
+
+                versionBadge.replaceChildren();
+                if (!version) {
+                    versionBadge.textContent = 'Development';
+                } else if (channel === 'ci') {
+                    versionBadge.textContent = version;
+                } else {
+                    const releaseLink = document.createElement('a');
+                    releaseLink.href =
+                        `https://github.com/Trifocals3537/decypharr/releases/tag/v${encodeURIComponent(version)}`;
+                    releaseLink.target = '_blank';
+                    releaseLink.rel = 'noopener noreferrer';
+                    releaseLink.className =
+                        'text-current hover:text-primary transition-colors';
+                    releaseLink.textContent = version;
+                    versionBadge.appendChild(releaseLink);
+                }
 
                 // Remove existing badge classes
                 versionBadge.classList.remove('badge-warning', 'badge-error', 'badge-ghost');
@@ -402,6 +414,8 @@ class DecypharrUtils {
                     versionBadge.classList.add('badge-warning');
                 } else if (data.channel === 'nightly') {
                     versionBadge.classList.add('badge-error');
+                } else if (!version || data.channel === 'ci') {
+                    versionBadge.classList.add('badge-ghost');
                 }
             }
         } catch (error) {

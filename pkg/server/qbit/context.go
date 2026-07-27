@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 )
 
@@ -77,23 +78,41 @@ func decodeAuthHeader(header string) (string, string, error) {
 }
 
 func (q *QBit) categoryContext(next http.Handler) http.Handler {
-	// Print full URL for debugging
-
-	// Try to get category from URL query first
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Print request method and URL
-		category := strings.Trim(r.URL.Query().Get("category"), "")
-		if category == "" {
-			// GetReader from form
-			_ = r.ParseForm()
-			category = r.Form.Get("category")
-			if category == "" {
-				// GetReader from multipart form
-				_ = r.ParseMultipartForm(32 << 20)
-				category = r.FormValue("category")
+		contentType := strings.ToLower(r.Header.Get("Content-Type"))
+		var err error
+		if strings.Contains(contentType, "multipart/form-data") {
+			err = utils.ParseMultipartFormBounded(
+				w,
+				r,
+				utils.MaxImportRequestBytes,
+				utils.MaxMultipartMemoryBytes,
+			)
+			if r.MultipartForm != nil {
+				defer r.MultipartForm.RemoveAll()
 			}
+			if err == nil &&
+				utils.MultipartFormPartCount(r.MultipartForm) > utils.MaxMultipartFormParts {
+				http.Error(w, "Request has too many multipart fields", http.StatusRequestEntityTooLarge)
+				return
+			}
+		} else {
+			err = utils.ParseFormBounded(w, r, utils.MaxImportRequestBytes)
 		}
-		ctx := context.WithValue(r.Context(), categoryKey, strings.TrimSpace(category))
+		if err != nil {
+			if utils.IsRequestTooLarge(err) {
+				http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "Invalid form request", http.StatusBadRequest)
+			return
+		}
+
+		category := strings.TrimSpace(r.URL.Query().Get("category"))
+		if category == "" {
+			category = strings.TrimSpace(r.FormValue("category"))
+		}
+		ctx := context.WithValue(r.Context(), categoryKey, category)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -50,14 +50,12 @@ func Start(ctx context.Context) error {
 
 	mgr := manager.New()
 
-	svcCtx, cancelSvc := context.WithCancel(ctx)
-	defer func() {
-		cancelSvc()
-	}()
-
 	// Create the logger path if it doesn't exist
 	for {
 		cfg := config.Get()
+		if err := validateDeploymentConfig(cfg); err != nil {
+			return err
+		}
 		_log := logger.Default()
 
 		// ascii banner
@@ -79,6 +77,7 @@ func Start(ctx context.Context) error {
 		srv := server.New(mgr)
 
 		srv.SetRestartFunc(restartFunc)
+		svcCtx, cancelSvc := context.WithCancel(ctx)
 
 		resetFunc := func() error {
 			config.Reset()
@@ -132,8 +131,6 @@ func Start(ctx context.Context) error {
 			}
 
 			_log.Info().Msg("Decypharr has been restarted.")
-			// rebuild svcCtx off the original parent
-			svcCtx, cancelSvc = context.WithCancel(ctx)
 
 		case err := <-serviceDone:
 			cancelSvc()
@@ -151,6 +148,13 @@ func Start(ctx context.Context) error {
 			return errServicesStopped
 		}
 	}
+}
+
+func validateDeploymentConfig(cfg *config.Config) error {
+	if err := cfg.ValidateDeployment(); err != nil {
+		return fmt.Errorf("deployment safety check: %w", err)
+	}
+	return nil
 }
 
 // finishRestart only resets shared storage after every service reports a clean

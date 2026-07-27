@@ -35,6 +35,14 @@ func (s *Server) skipAuthHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	if !isLoopbackBindAddress(cfg.BindAddress) {
+		http.Error(
+			w,
+			"Authentication cannot be disabled on a non-loopback listener",
+			http.StatusForbidden,
+		)
+		return
+	}
 	cfg.UseAuth = false
 	if err := cfg.Save(); err != nil {
 		s.logger.Error().Err(err).Msg("failed to save config")

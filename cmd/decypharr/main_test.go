@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 type serviceFunc func(context.Context) error
@@ -105,6 +107,57 @@ func TestStartServicesRejectsUnexpectedCleanExit(t *testing.T) {
 	err := startServices(context.Background(), service, service)
 	if !errors.Is(err, errServicesStopped) {
 		t.Fatalf("startServices() error = %v, want %v", err, errServicesStopped)
+	}
+}
+
+func TestValidateDeploymentConfigFailsClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		wantErr bool
+	}{
+		{
+			name: "private subnet is protected",
+			cfg: config.Config{
+				BindAddress:        "192.0.2.10",
+				UseAuth:            true,
+				DisableWebDav:      true,
+				AllowedClientCIDRs: []string{"192.0.2.10/32"},
+			},
+		},
+		{
+			name: "private subnet without authentication",
+			cfg: config.Config{
+				BindAddress:   "192.0.2.10",
+				DisableWebDav: true,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid allowlist",
+			cfg: config.Config{
+				BindAddress:        "127.0.0.1",
+				AllowedClientCIDRs: []string{"invalid"},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateDeploymentConfig(&test.cfg)
+			if (err != nil) != test.wantErr {
+				t.Fatalf(
+					"validateDeploymentConfig() error = %v, wantErr %t",
+					err,
+					test.wantErr,
+				)
+			}
+			if test.wantErr &&
+				!strings.Contains(err.Error(), "deployment safety check") {
+				t.Fatalf("error = %q, want deployment safety context", err)
+			}
+		})
 	}
 }
 

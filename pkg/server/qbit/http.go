@@ -1,6 +1,8 @@
 package qbit
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -90,21 +93,61 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Parse form based on content type
-	contentType := r.Header.Get("Content-Type")
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "multipart/form-data") {
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			q.logger.Error().Err(err).Msgf("Error parsing multipart form")
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := utils.ParseMultipartFormBounded(
+			w,
+			r,
+			utils.MaxImportRequestBytes,
+			utils.MaxMultipartMemoryBytes,
+		); err != nil {
+			if utils.IsRequestTooLarge(err) {
+				http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			q.logger.Error().Err(err).Msg("Error parsing multipart form")
+			http.Error(w, "Invalid multipart form", http.StatusBadRequest)
+			return
+		}
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
+		}
+		if utils.MultipartFormPartCount(r.MultipartForm) > utils.MaxMultipartFormParts {
+			http.Error(w, "Request has too many multipart fields", http.StatusRequestEntityTooLarge)
 			return
 		}
 	} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-		if err := r.ParseForm(); err != nil {
-			q.logger.Error().Err(err).Msgf("Error parsing form")
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := utils.ParseFormBounded(w, r, utils.MaxImportRequestBytes); err != nil {
+			if utils.IsRequestTooLarge(err) {
+				http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			q.logger.Error().Err(err).Msg("Error parsing form")
+			http.Error(w, "Invalid form", http.StatusBadRequest)
 			return
 		}
 	} else {
 		http.Error(w, "Invalid content type", http.StatusBadRequest)
+		return
+	}
+
+	itemCount := 0
+	if urls := r.FormValue("urls"); urls != "" {
+		for rawURL := range strings.SplitSeq(urls, "\n") {
+			if strings.TrimSpace(rawURL) != "" {
+				itemCount++
+			}
+		}
+	}
+	if r.MultipartForm != nil {
+		itemCount += len(r.MultipartForm.File["torrents"])
+	}
+	if itemCount > utils.MaxImportItems {
+		http.Error(
+			w,
+			fmt.Sprintf("Request exceeds the %d-item limit", utils.MaxImportItems),
+			http.StatusRequestEntityTooLarge,
+		)
 		return
 	}
 
@@ -129,17 +172,49 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		_arr = arr.New(category, "", "", false, nil, "", "")
 	}
 	atleastOne := false
+	var retainedBytes int64
 
 	// Handle magnet URLs
 	if urls := r.FormValue("urls"); urls != "" {
-		var urlList []string
 		for u := range strings.SplitSeq(urls, "\n") {
-			urlList = append(urlList, strings.TrimSpace(u))
-		}
-		for _, url := range urlList {
-			if err := q.addMagnet(ctx, url, _arr, debridName, action, cfg.Notifications.CallbackURL, rmTrackerUrls, cfg.SkipMultiSeason); err != nil {
-				q.logger.Debug().Msgf("Error adding magnet: %s", err.Error())
-				http.Error(w, err.Error(), http.StatusBadRequest)
+			rawURL := strings.TrimSpace(u)
+			if rawURL == "" {
+				continue
+			}
+			remainingBytes := utils.MaxImportRequestBytes - retainedBytes
+			maxBytes := min(utils.MaxMetadataFileBytes, remainingBytes)
+			if maxBytes <= 0 {
+				http.Error(w, "Request metadata exceeds the byte limit", http.StatusRequestEntityTooLarge)
+				return
+			}
+			itemBytes, err := q.addMagnet(
+				ctx,
+				rawURL,
+				_arr,
+				debridName,
+				action,
+				cfg.Notifications.CallbackURL,
+				rmTrackerUrls,
+				cfg.SkipMultiSeason,
+				maxBytes,
+			)
+			retainedBytes += itemBytes
+			if err != nil {
+				q.logger.Debug().Err(err).Msg("Error adding magnet")
+				status, idempotent := torrentAddErrorStatus(err)
+				if idempotent {
+					atleastOne = true
+					continue
+				}
+				if errors.Is(err, utils.ErrContentTooLarge) {
+					http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+					return
+				}
+				if status == http.StatusTooManyRequests ||
+					status == http.StatusServiceUnavailable {
+					w.Header().Set("Retry-After", "5")
+				}
+				http.Error(w, err.Error(), status)
 				return
 			}
 			atleastOne = true
@@ -150,9 +225,40 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil && r.MultipartForm.File != nil {
 		if files := r.MultipartForm.File["torrents"]; len(files) > 0 {
 			for _, fileHeader := range files {
-				if err := q.addTorrent(ctx, fileHeader, _arr, debridName, action, cfg.Notifications.CallbackURL, rmTrackerUrls, cfg.SkipMultiSeason); err != nil {
+				remainingBytes := utils.MaxImportRequestBytes - retainedBytes
+				maxBytes := min(utils.MaxMetadataFileBytes, remainingBytes)
+				if maxBytes <= 0 || fileHeader.Size > maxBytes {
+					http.Error(w, "Request metadata exceeds the byte limit", http.StatusRequestEntityTooLarge)
+					return
+				}
+				itemBytes, err := q.addTorrent(
+					ctx,
+					fileHeader,
+					_arr,
+					debridName,
+					action,
+					cfg.Notifications.CallbackURL,
+					rmTrackerUrls,
+					cfg.SkipMultiSeason,
+					maxBytes,
+				)
+				retainedBytes += itemBytes
+				if err != nil {
 					q.logger.Debug().Err(err).Str("torrent", fileHeader.Filename).Msgf("Error adding torrent")
-					http.Error(w, err.Error(), http.StatusBadRequest)
+					status, idempotent := torrentAddErrorStatus(err)
+					if idempotent {
+						atleastOne = true
+						continue
+					}
+					if errors.Is(err, utils.ErrContentTooLarge) {
+						http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+						return
+					}
+					if status == http.StatusTooManyRequests ||
+						status == http.StatusServiceUnavailable {
+						w.Header().Set("Retry-After", "5")
+					}
+					http.Error(w, err.Error(), status)
 					return
 				}
 				atleastOne = true
@@ -166,6 +272,24 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func torrentAddErrorStatus(err error) (status int, idempotent bool) {
+	switch {
+	case errors.Is(err, manager.ErrJobQueueDuplicate):
+		// qBittorrent treats re-adding an already admitted hash as a successful
+		// idempotent operation.
+		return http.StatusOK, true
+	case errors.Is(err, manager.ErrJobQueueFull):
+		return http.StatusTooManyRequests, false
+	case errors.Is(err, manager.ErrJobQueueClosed):
+		return http.StatusServiceUnavailable, false
+	case errors.Is(err, manager.ErrQueueEntryDeleting),
+		errors.Is(err, storage.ErrQueuedEntryDeleting):
+		return http.StatusConflict, false
+	default:
+		return http.StatusBadRequest, false
+	}
 }
 
 func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {

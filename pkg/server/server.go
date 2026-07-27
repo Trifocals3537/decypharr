@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,25 +67,25 @@ type ContentResponse struct {
 }
 
 type Server struct {
-	router         *chi.Mux
-	logger         zerolog.Logger
-	manager        *manager.Manager
-	stats          *stats.Collector
-	cookie         *sessions.CookieStore
-	templates      *template.Template
-	nzbUserAgent   string
-	urlBase        string
-	restartFunc    func()
-	configMu       sync.Mutex
-	restartPending bool
+	router          *chi.Mux
+	logger          zerolog.Logger
+	manager         *manager.Manager
+	stats           *stats.Collector
+	cookie          *sessions.CookieStore
+	templates       *template.Template
+	nzbUserAgent    string
+	urlBase         string
+	restartFunc     func()
+	configMu        sync.Mutex
+	restartPending  bool
+	allowedClients  []netip.Prefix
+	accessPolicyErr error
 }
 
 func New(mgr *manager.Manager) *Server {
 	l := logger.New("http")
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.StripSlashes)
-	r.Use(middleware.RedirectSlashes)
 
 	cfg := config.Get()
 
@@ -102,7 +103,10 @@ func New(mgr *manager.Manager) *Server {
 		"templates/register.html",
 		"templates/setup.html",
 	))
-	cookieStore := newSessionCookieStore(cfg.SecretKey())
+	cookieStore := newSessionCookieStore(
+		cfg.SecretKey(),
+		cfg.SecureSessionCookie,
+	)
 
 	statsCollector := stats.New(mgr)
 
@@ -114,6 +118,11 @@ func New(mgr *manager.Manager) *Server {
 		templates: templates,
 		urlBase:   cfg.URLBase,
 	}
+	s.allowedClients, s.accessPolicyErr =
+		config.ParseAllowedClientCIDRs(cfg.AllowedClientCIDRs)
+	r.Use(s.clientNetworkMiddleware)
+	r.Use(middleware.StripSlashes)
+	r.Use(middleware.RedirectSlashes)
 
 	qb := qbit.New(mgr)
 	sb := sabnzbd.New(mgr)
@@ -156,20 +165,22 @@ func New(mgr *manager.Manager) *Server {
 			})
 		})
 
-		//webhooks
-		r.Post("/webhooks/tautulli", s.handleTautulli)
+		// Webhooks can trigger repair work and require the same bearer token or
+		// authenticated session as the rest of the control-plane API.
+		r.With(s.authMiddleware).Post("/webhooks/tautulli", s.handleTautulli)
 	})
 	s.router = r
 	return s
 }
 
-func newSessionCookieStore(secret string) *sessions.CookieStore {
+func newSessionCookieStore(secret string, secure bool) *sessions.CookieStore {
 	store := sessions.NewCookieStore([]byte(secret))
 	store.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   86400 * 7,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
 	}
 	return store
 }
@@ -189,6 +200,23 @@ func (s *Server) Restart() {
 
 func (s *Server) Start(ctx context.Context) error {
 	cfg := config.Get()
+	if err := cfg.ValidateDeployment(); err != nil {
+		return fmt.Errorf("deployment safety check: %w", err)
+	}
+	if s.accessPolicyErr != nil {
+		return fmt.Errorf("client network policy: %w", s.accessPolicyErr)
+	}
+	if len(s.allowedClients) > 0 {
+		s.logger.Info().
+			Int("network_count", len(s.allowedClients)).
+			Msg("Client network access policy enabled")
+	}
+
+	if !isLoopbackBindAddress(cfg.BindAddress) && len(s.allowedClients) == 0 {
+		s.logger.Warn().
+			Str("bind_address", cfg.BindAddress).
+			Msg("The non-loopback HTTP listener has no client network boundary. Use a trusted network or TLS proxy and do not send credentials to this listener over the public Internet")
+	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddress, cfg.Port)
 	listener, err := net.Listen("tcp", addr)
@@ -212,6 +240,10 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("HTTP server: %w", err)
 	}
 	return nil
+}
+
+func isLoopbackBindAddress(bindAddress string) bool {
+	return config.IsLoopbackBindAddress(bindAddress)
 }
 
 func serveHTTP(ctx context.Context, srv *http.Server, listener net.Listener, shutdownTimeout time.Duration) error {

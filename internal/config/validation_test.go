@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -75,6 +77,70 @@ func TestLoadForValidationRequiresExistingConfig(t *testing.T) {
 	}
 }
 
+func TestLiveLoadSecuresExistingConfigAndAuthFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+
+	previousPath := GetMainPath()
+	configDir := t.TempDir()
+	SetConfigPath(configDir)
+	t.Cleanup(func() {
+		SetConfigPath(previousPath)
+	})
+
+	configPath := filepath.Join(configDir, "config.json")
+	authPath := filepath.Join(configDir, "auth.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		authPath,
+		[]byte(`{"session_secret":"existing-secret"}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	if err := cfg.loadConfig(); err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+
+	for _, path := range []string{configPath, authPath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != privateFileMode {
+			t.Fatalf("%s mode = %o, want %o", path, got, privateFileMode)
+		}
+	}
+}
+
+func TestValidationDoesNotChangeExistingConfigMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadForValidation(configDir); err != nil {
+		t.Fatalf("LoadForValidation() error = %v", err)
+	}
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("validation changed config mode to %o, want 644", got)
+	}
+}
+
 func TestSetDefaultsUsesLoopbackBindAddress(t *testing.T) {
 	cfg := &Config{}
 	if err := cfg.setDefaultsForPath(t.TempDir(), false); err != nil {
@@ -92,6 +158,135 @@ func TestSetDefaultsPreservesExplicitBindAddress(t *testing.T) {
 	}
 	if cfg.BindAddress != "0.0.0.0" {
 		t.Fatalf("BindAddress = %q, want explicit override", cfg.BindAddress)
+	}
+}
+
+func TestValidateDeploymentRejectsUnprotectedRemoteServices(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{
+			name: "loopback without auth",
+			cfg: Config{
+				BindAddress: "127.0.0.1",
+			},
+		},
+		{
+			name: "remote without auth",
+			cfg: Config{
+				BindAddress:   "0.0.0.0",
+				DisableWebDav: true,
+			},
+			wantErr: true,
+		},
+		{
+			name: "remote auth with open WebDAV",
+			cfg: Config{
+				BindAddress: "10.0.0.2",
+				UseAuth:     true,
+			},
+			wantErr: true,
+		},
+		{
+			name: "remote auth with WebDAV disabled",
+			cfg: Config{
+				BindAddress:   "10.0.0.2",
+				UseAuth:       true,
+				DisableWebDav: true,
+			},
+		},
+		{
+			name: "remote auth with WebDAV auth",
+			cfg: Config{
+				BindAddress:      "10.0.0.2",
+				UseAuth:          true,
+				EnableWebdavAuth: true,
+			},
+		},
+		{
+			name: "remote auth with valid client networks",
+			cfg: Config{
+				BindAddress:        "0.0.0.0",
+				UseAuth:            true,
+				DisableWebDav:      true,
+				AllowedClientCIDRs: []string{"127.0.0.0/8", "192.0.2.10"},
+			},
+		},
+		{
+			name: "invalid client network",
+			cfg: Config{
+				BindAddress:        "127.0.0.1",
+				AllowedClientCIDRs: []string{"not-a-network"},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.cfg.ValidateDeployment()
+			if (err != nil) != test.wantErr {
+				t.Fatalf(
+					"ValidateDeployment() error = %v, wantErr %t",
+					err,
+					test.wantErr,
+				)
+			}
+		})
+	}
+}
+
+func TestParseAllowedClientCIDRs(t *testing.T) {
+	prefixes, err := ParseAllowedClientCIDRs([]string{
+		"127.0.0.1",
+		"10.100.7.99/24",
+		"::1",
+	})
+	if err != nil {
+		t.Fatalf("ParseAllowedClientCIDRs() error = %v", err)
+	}
+
+	got := make([]string, len(prefixes))
+	for index, prefix := range prefixes {
+		got[index] = prefix.String()
+	}
+	want := []string{"127.0.0.1/32", "10.100.7.0/24", "::1/128"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("prefixes = %v, want %v", got, want)
+	}
+}
+
+func TestSetDefaultsBoundsJobQueueCapacity(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{name: "missing uses backward compatible default", want: DefaultJobQueueCapacity},
+		{name: "explicit value", in: 64, want: 64},
+		{name: "upper bound", in: MaxJobQueueCapacity + 1, want: MaxJobQueueCapacity},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{JobQueueCapacity: test.in}
+			if err := cfg.setDefaultsForPath(t.TempDir(), false); err != nil {
+				t.Fatalf("setDefaultsForPath() error = %v", err)
+			}
+			if cfg.JobQueueCapacity != test.want {
+				t.Fatalf("JobQueueCapacity = %d, want %d", cfg.JobQueueCapacity, test.want)
+			}
+		})
+	}
+}
+
+func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
+	t.Setenv("DECYPHARR_JOB_QUEUE_CAPACITY", "73")
+	cfg := &Config{}
+	cfg.applyEnvOverrides()
+	if cfg.JobQueueCapacity != 73 {
+		t.Fatalf("JobQueueCapacity = %d, want 73", cfg.JobQueueCapacity)
 	}
 }
 

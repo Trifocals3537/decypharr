@@ -3,6 +3,8 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,6 +32,7 @@ func representativeConfig() *config.Config {
 			MaxConnections: 12,
 			ReadAhead:      "16MB",
 		},
+		DownloadFolder: "/downloads",
 	}
 }
 
@@ -156,5 +159,120 @@ func TestHandleUpdateConfigRejectsWhileRestartPending(t *testing.T) {
 	}
 	if response.Header().Get("Retry-After") != "1" {
 		t.Fatalf("Retry-After = %q, want 1", response.Header().Get("Retry-After"))
+	}
+}
+
+func TestValidateConfigUpdateFailsClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*config.Config)
+		wantErr bool
+	}{
+		{
+			name: "private subnet with authentication and WebDAV disabled",
+			mutate: func(cfg *config.Config) {
+				cfg.BindAddress = "192.0.2.10"
+				cfg.UseAuth = true
+				cfg.DisableWebDav = true
+				cfg.AllowedClientCIDRs = []string{"192.0.2.10/32"}
+			},
+		},
+		{
+			name: "private subnet without authentication",
+			mutate: func(cfg *config.Config) {
+				cfg.BindAddress = "192.0.2.10"
+				cfg.DisableWebDav = true
+			},
+			wantErr: true,
+		},
+		{
+			name: "private subnet with unprotected WebDAV",
+			mutate: func(cfg *config.Config) {
+				cfg.BindAddress = "192.0.2.10"
+				cfg.UseAuth = true
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid client network",
+			mutate: func(cfg *config.Config) {
+				cfg.AllowedClientCIDRs = []string{"not-a-network"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing providers",
+			mutate: func(cfg *config.Config) {
+				cfg.Debrids = nil
+				cfg.Usenet = config.Usenet{}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := representativeConfig()
+			test.mutate(cfg)
+			err := validateConfigUpdate(cfg)
+			if (err != nil) != test.wantErr {
+				t.Fatalf(
+					"validateConfigUpdate() error = %v, wantErr %t",
+					err,
+					test.wantErr,
+				)
+			}
+		})
+	}
+}
+
+func TestHandleUpdateConfigRejectsInvalidPolicyBeforePersistence(t *testing.T) {
+	previousPath := config.GetMainPath()
+	configDir := t.TempDir()
+	config.Reset()
+	config.SetConfigPath(configDir)
+	t.Cleanup(func() {
+		config.Reset()
+		config.SetConfigPath(previousPath)
+	})
+
+	configPath := filepath.Join(configDir, "config.json")
+	original := []byte(`{
+		"bind_address":"192.0.2.10",
+		"port":"8282",
+		"use_auth":true,
+		"disable_webdav":true,
+		"allowed_client_cidrs":["192.0.2.10/32"],
+		"debrids":[{"name":"primary","provider":"realdebrid","api_key":"secret"}],
+		"download_folder":"/downloads"
+	}`)
+	if err := os.WriteFile(configPath, original, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	s := &Server{}
+	request := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/config",
+		strings.NewReader(`{"allowed_client_cidrs":["not-a-network"]}`),
+	)
+	response := httptest.NewRecorder()
+
+	s.handleUpdateConfig(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"status = %d, want %d; body = %q",
+			response.Code,
+			http.StatusBadRequest,
+			response.Body.String(),
+		)
+	}
+	persisted, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(persisted), "not-a-network") {
+		t.Fatalf("invalid network policy was persisted: %s", persisted)
 	}
 }

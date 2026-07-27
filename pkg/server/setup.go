@@ -8,7 +8,7 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // SetupState tracks the current setup wizard state
@@ -121,7 +121,16 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SetupCompleteRequest
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := utils.DecodeJSONRequestBounded(
+		w,
+		r,
+		&req,
+		utils.MaxControlRequestBytes,
+	); err != nil {
+		if utils.IsRequestTooLarge(err) {
+			http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.sendSetupError(w, "Invalid request format", err)
 		return
 	}
@@ -136,27 +145,30 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 1: Handle Authentication
 	if req.Auth.SkipAuth {
-		cfg.UseAuth = false
-	} else if req.Auth.Username != "" && req.Auth.Password != "" {
-		auth := cfg.GetAuth()
-		if auth == nil {
-			auth = &config.Auth{}
-		}
-		auth.Username = req.Auth.Username
-
-		// Hash password using bcrypt
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Auth.Password), bcrypt.DefaultCost)
-		if err != nil {
-			s.sendSetupError(w, "Failed to hash password", err)
+		if !isLoopbackBindAddress(cfg.BindAddress) {
+			s.sendSetupError(
+				w,
+				"Authentication cannot be disabled on a non-loopback listener",
+				nil,
+			)
 			return
 		}
-		auth.Password = string(hashedPassword)
-
-		cfg.UseAuth = true
-		if err := cfg.SaveAuth(auth); err != nil {
+		cfg.UseAuth = false
+	} else if req.Auth.Username != "" && req.Auth.Password != "" {
+		if err := cfg.SetAuthCredentials(
+			req.Auth.Username,
+			req.Auth.Password,
+		); err != nil {
 			s.sendSetupError(w, "Failed to save authentication", err)
 			return
 		}
+	} else {
+		s.sendSetupError(
+			w,
+			"Username and password are required unless authentication is explicitly skipped",
+			nil,
+		)
+		return
 	}
 
 	// Step 2: Handle Debrid Provider (optional)

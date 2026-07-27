@@ -3,7 +3,6 @@ package manager
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
@@ -32,11 +31,17 @@ func (m *Manager) restoreActiveDownloadJobs(ctx context.Context) {
 		if entry.Status == debridTypes.TorrentStatusQueued || m.nzbNeedsReprocessing(entry) {
 			continue
 		}
-		_ = m.SubmitJob(&Job{
+		if err := m.submitRestoredJob(ctx, &Job{
 			ID:    entry.InfoHash,
 			Type:  jobTypeForEntry(entry),
 			Entry: entry,
-		})
+		}); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			entry.MarkAsError(err)
+			_ = m.queue.Update(entry)
+		}
 	}
 
 	for _, entry := range entries {
@@ -59,7 +64,7 @@ func (m *Manager) restoreActiveDownloadJobs(ctx context.Context) {
 			entry.Status = debridTypes.TorrentStatusQueued
 		}
 		_ = m.queue.Update(entry)
-		if err := m.SubmitJob(job); err != nil {
+		if err := m.submitRestoredJob(ctx, job); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -129,13 +134,21 @@ func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry)
 	if m.usenet == nil {
 		return nil, fmt.Errorf("usenet is not configured")
 	}
-	sourcePath := entry.Magnet
-	if meta, err := m.usenet.GetNZBHeader(entry.InfoHash); err == nil && meta != nil && meta.Path != "" {
-		sourcePath = meta.Path
+	var (
+		content []byte
+		err     error
+	)
+	meta, metaErr := m.usenet.GetNZBHeader(entry.InfoHash)
+	if metaErr == nil && meta != nil && meta.Path != "" {
+		content, err = m.usenet.ReadNZBSource(entry.InfoHash, meta.Path)
+	} else {
+		if metaErr != nil && !usenet.IsNZBNotFound(metaErr) {
+			return nil, fmt.Errorf("inspect queued NZB metadata: %w", metaErr)
+		}
+		content, err = m.usenet.ReadStagedNZB(entry.InfoHash, entry.Magnet)
 	}
-	content, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read queued NZB source: %w", err)
 	}
 
 	name := entry.OriginalFilename
@@ -146,8 +159,13 @@ func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry)
 	if err != nil {
 		return nil, fmt.Errorf("usenet parse failed: %w", err)
 	}
-	if entry.Magnet != "" && sourcePath == entry.Magnet {
-		m.usenet.RemoveStagedNZB(entry.Magnet)
+	// A previous attempt may have parsed successfully and then failed before
+	// removing its staged source. Always retry the exact ID-bound removal even
+	// when this attempt preferred the persisted .nzb source.
+	if entry.Magnet != "" {
+		if err := m.usenet.RemoveStagedNZB(entry.InfoHash, entry.Magnet); err != nil {
+			return nil, fmt.Errorf("remove staged NZB source: %w", err)
+		}
 	}
 
 	entry.Magnet = ""
@@ -161,7 +179,7 @@ func (m *Manager) rebuildQueuedNZBJob(ctx context.Context, entry *storage.Entry)
 
 	req := NewNZBRequest(
 		meta.Name,
-		downloadFolderForEntry(m.config.DownloadFolder, entry),
+		m.config.DownloadFolder,
 		content,
 		m.arr.GetOrCreate(entry.Category),
 		entry.Action,

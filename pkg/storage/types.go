@@ -41,6 +41,33 @@ var (
 
 // Entry is the unified model across debrids and nzbs
 type Entry struct {
+	// MainGeneration is an in-process optimistic mutation token for the durable
+	// main-entry row. It is deliberately not serialized. Every successful main
+	// mutation advances the token, invalidating stale read-to-write snapshots.
+	MainGeneration uint64 `msgpack:"-" json:"-"`
+
+	// MainProviderSnapshot and MainMutationProvider form a transient
+	// authorization for provider rediscovery after explicit deletion. They are
+	// populated only after a full provider snapshot observed the key absent.
+	MainProviderSnapshot uint64 `msgpack:"-" json:"-"`
+	MainMutationProvider string `msgpack:"-" json:"-"`
+
+	// QueueGeneration is an in-process lifecycle token. It is deliberately not
+	// serialized: workers cannot survive a restart, and stale workers from an
+	// earlier incarnation of the same queue key must never mutate a later one.
+	QueueGeneration uint64 `msgpack:"-" json:"-"`
+
+	// QueueIncarnation is a durable, opaque identity assigned when a queue row
+	// is first created. It lets a completed queue item explicitly re-import a
+	// same-key main entry after deletion without granting that authority to an
+	// older worker or to provider refresh.
+	QueueIncarnation string `msgpack:"-" json:"-"`
+
+	// MainReimportIncarnation is a transient capability bound only after
+	// PrepareQueuedReplacement verifies that QueueIncarnation still owns the
+	// current durable queue row. It is never serialized.
+	MainReimportIncarnation string `msgpack:"-" json:"-"`
+
 	Protocol         config.Protocol `msgpack:"protocol" json:"protocol"`                   // torrent or nzb
 	InfoHash         string          `msgpack:"info_hash" json:"info_hash"`                 // Primary key - torrent hash
 	Name             string          `msgpack:"name" json:"name"`                           // Entry name
@@ -280,7 +307,6 @@ func (e *Entry) AddUsenetProvider(metadata *NZB) *ProviderEntry {
 			Link: path.Join(e.MountPath, f.Name),
 			Path: path.Join(e.MountPath, f.Name),
 		}
-		e.Providers[f.Name] = providerEntry
 	}
 	e.Providers["usenet"] = providerEntry
 	return providerEntry
@@ -611,6 +637,7 @@ func (ct *CachedTorrent) ToManagedTorrent() *Entry {
 	for name, f := range ct.Files {
 		mt.Files[name] = &File{
 			Name:      f.Name,
+			Path:      f.Path,
 			Size:      f.Size,
 			ByteRange: f.ByteRange,
 			InfoHash:  ct.InfoHash, // Track which torrent this file came from

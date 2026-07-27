@@ -55,6 +55,23 @@ starting services:
 ~/.local/bin/decypharr --config ~/.decypharr --check-config
 ```
 
+For a shared seedbox that must listen beyond loopback, create credentials
+interactively on the host before exposing the new process:
+
+```bash
+~/.local/bin/decypharr --config ~/.decypharr --set-auth admin
+```
+
+Use the host's TLS reverse proxy for the single assigned Decypharr port.
+Remote first-time registration is intentionally rejected on non-loopback
+listeners.
+
+On a shared host, bind Decypharr directly to a provider-assigned private
+address instead of `0.0.0.0` when one is available. The native installation
+guide includes a rootless private HTTPS setup that keeps Decypharr
+username/password authentication as a second layer and uses no additional
+public port.
+
 The release archive includes a user-level systemd unit. See the
 [native installation guide](docs/src/content/docs/guides/installation.md) for
 service and non-systemd options.

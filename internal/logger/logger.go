@@ -48,6 +48,16 @@ func sharedRotatingLogFile() *lumberjack.Logger {
 	return rotatingLogFile
 }
 
+// Close releases the process-wide rotating log file. Normal process shutdown
+// closes it through the operating system; explicit close is useful for test
+// suites and embedded callers that remove their runtime directory in-process.
+func Close() error {
+	if rotatingLogFile == nil {
+		return nil
+	}
+	return rotatingLogFile.Close()
+}
+
 func New(prefix string) zerolog.Logger {
 	level := config.Get().LogLevel
 

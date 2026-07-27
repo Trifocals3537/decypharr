@@ -51,6 +51,11 @@ const (
 	WebdavUseHash              WebDavFolderNaming = "infohash"
 )
 
+const (
+	DefaultJobQueueCapacity = 256
+	MaxJobQueueCapacity     = 4096
+)
+
 var (
 	instance   *Config
 	once       sync.Once
@@ -225,6 +230,10 @@ type Config struct {
 	URLBase     string `json:"url_base,omitempty"`
 	AppURL      string `json:"app_url,omitempty"`
 	Port        string `json:"port,omitempty"`
+	// AllowedClientCIDRs restricts the single HTTP listener by the TCP peer
+	// address. An empty list preserves the historical allow-all behavior.
+	// Reverse-proxy headers are intentionally ignored.
+	AllowedClientCIDRs []string `json:"allowed_client_cidrs,omitempty"`
 
 	LogLevel string   `json:"log_level,omitempty"`
 	Debrids  []Debrid `json:"debrids,omitzero"`
@@ -235,15 +244,16 @@ type Config struct {
 	Rclone      Rclone      `json:"rclone,omitzero"`      // Deprecated: use Mounts instead
 	Mount       Mount       `json:"mount,omitzero"`
 
-	AllowedExt         []string `json:"allowed_file_types,omitempty"`
-	AllowSamples       bool     `json:"allow_samples,omitempty"`
-	MinFileSize        string   `json:"min_file_size,omitempty"`
-	MaxFileSize        string   `json:"max_file_size,omitempty"`
-	RemoveStalledAfter string   `json:"remove_stalled_after,omitzero"`
-	EnableWebdavAuth   bool     `json:"enable_webdav_auth,omitempty"`
-	UseAuth            bool     `json:"use_auth,omitempty"`
-	NZBUserAgent       string   `json:"nzb_user_agent,omitempty"` // User agent for downloading NZBs
-	Auth               *Auth    `json:"-"`
+	AllowedExt          []string `json:"allowed_file_types,omitempty"`
+	AllowSamples        bool     `json:"allow_samples,omitempty"`
+	MinFileSize         string   `json:"min_file_size,omitempty"`
+	MaxFileSize         string   `json:"max_file_size,omitempty"`
+	RemoveStalledAfter  string   `json:"remove_stalled_after,omitzero"`
+	EnableWebdavAuth    bool     `json:"enable_webdav_auth,omitempty"`
+	UseAuth             bool     `json:"use_auth,omitempty"`
+	SecureSessionCookie bool     `json:"secure_session_cookie,omitempty"`
+	NZBUserAgent        string   `json:"nzb_user_agent,omitempty"` // User agent for downloading NZBs
+	Auth                *Auth    `json:"-"`
 
 	DisableWebDav bool `json:"disable_webdav,omitempty"`
 
@@ -259,6 +269,7 @@ type Config struct {
 	DownloadFolder        string                   `json:"download_folder,omitempty"`
 	RefreshInterval       string                   `json:"refresh_interval,omitempty"`
 	MaxActiveDownloads    int                      `json:"max_active_downloads,omitempty"`
+	JobQueueCapacity      int                      `json:"job_queue_capacity,omitempty"`
 	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
 	SkipMultiSeason       bool                     `json:"skip_multi_season,omitempty"`
 	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
@@ -312,6 +323,9 @@ func (c *Config) loadConfig() error {
 			return nil
 		}
 		return fmt.Errorf("error reading config file: %w", err)
+	}
+	if err := os.Chmod(configFile, privateFileMode); err != nil {
+		return fmt.Errorf("secure config file permissions: %w", err)
 	}
 
 	// Parse JSON
@@ -461,6 +475,9 @@ func (c *Config) loadAuth() (*Auth, error) {
 		}
 		return nil, fmt.Errorf("read auth config %s: %w", authFile, err)
 	}
+	if err := os.Chmod(authFile, privateFileMode); err != nil {
+		return nil, fmt.Errorf("secure auth config permissions: %w", err)
+	}
 
 	trimmed := strings.TrimSpace(string(data))
 	if !strings.HasPrefix(trimmed, "{") {
@@ -584,6 +601,12 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 	}
 	if c.MaxActiveDownloads <= 0 {
 		c.MaxActiveDownloads = 5
+	}
+	switch {
+	case c.JobQueueCapacity <= 0:
+		c.JobQueueCapacity = DefaultJobQueueCapacity
+	case c.JobQueueCapacity > MaxJobQueueCapacity:
+		c.JobQueueCapacity = MaxJobQueueCapacity
 	}
 
 	for i, debrid := range c.Debrids {
@@ -838,6 +861,7 @@ func clearHotFields(c *Config) {
 	c.DownloadFolder = ""
 	c.RefreshInterval = ""
 	c.MaxActiveDownloads = 0
+	c.JobQueueCapacity = 0
 	c.SkipPreCache = false
 	c.SkipMultiSeason = false
 	c.AlwaysRmTrackerUrls = false

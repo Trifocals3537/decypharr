@@ -5,18 +5,23 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-
 	"github.com/sirrobot01/decypharr/cmd/decypharr"
+	"github.com/sirrobot01/decypharr/internal/config"
+	"golang.org/x/term"
 )
+
+const defaultPprofAddress = "127.0.0.1:6060"
 
 func main() {
 	defer func() {
@@ -29,11 +34,23 @@ func main() {
 	var configPath string
 	var pprofAddr string
 	var checkConfig bool
+	var setAuthUsername string
 
 	// Create a default config directory if it doesn't exist
 	flag.StringVar(&configPath, "config", "", "path to the data folder")
-	flag.StringVar(&pprofAddr, "pprof", ":6060", "pprof server address (set to empty to disable)")
+	flag.StringVar(
+		&pprofAddr,
+		"pprof",
+		defaultPprofAddress,
+		"loopback pprof server address (set to empty to disable)",
+	)
 	flag.BoolVar(&checkConfig, "check-config", false, "validate configuration without starting services")
+	flag.StringVar(
+		&setAuthUsername,
+		"set-auth",
+		"",
+		"securely set the web username and password, then exit",
+	)
 	flag.Parse()
 
 	// get enable pprof flag from environment variable if not set via flag
@@ -49,6 +66,10 @@ func main() {
 		configPath = defaultConfigDir
 	}
 
+	if checkConfig && setAuthUsername != "" {
+		log.Fatal("--check-config and --set-auth cannot be used together")
+	}
+
 	if checkConfig {
 		cfg, err := config.LoadForValidation(configPath)
 		if err != nil {
@@ -56,6 +77,15 @@ func main() {
 		}
 		if err := cfg.Validate(); err != nil {
 			log.Fatalf("Decypharr configuration check failed: %v", err)
+		}
+		if err := cfg.ValidateDeployment(); err != nil {
+			log.Fatalf("Decypharr deployment safety check failed: %v", err)
+		}
+		if len(cfg.AllowedClientCIDRs) == 0 &&
+			!config.IsLoopbackBindAddress(cfg.BindAddress) {
+			log.Printf(
+				"WARNING: non-loopback HTTP listener has no allowed_client_cidrs boundary; use a trusted network or TLS proxy and do not send credentials to the listener over the public Internet",
+			)
 		}
 		fmt.Printf(
 			"Decypharr configuration is valid: %s\n",
@@ -65,7 +95,19 @@ func main() {
 	}
 
 	config.SetConfigPath(configPath)
-	config.Get()
+	cfg := config.Get()
+
+	if setAuthUsername != "" {
+		if err := configureAuthFromTerminal(cfg, setAuthUsername); err != nil {
+			log.Fatalf("Decypharr authentication setup failed: %v", err)
+		}
+		fmt.Printf(
+			"Authentication enabled for %q in %s\n",
+			strings.TrimSpace(setAuthUsername),
+			configPath,
+		)
+		return
+	}
 
 	// Buffer pools are owned by their subsystems: the DFS cache (vfs.NewCache)
 	// and the usenet reader each create a buffer.Pool with their own configured
@@ -73,6 +115,9 @@ func main() {
 
 	// Start pprof server if enabled
 	if pprofAddr != "" && enablePprof {
+		if err := validatePprofListenAddress(pprofAddr); err != nil {
+			log.Fatalf("refusing unsafe pprof listener: %v", err)
+		}
 		go func() {
 			log.Printf("Starting pprof server on %s", pprofAddr)
 			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
@@ -88,4 +133,54 @@ func main() {
 	if err := decypharr.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func validatePprofListenAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("parse %q: %w", address, err)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("pprof host must be a loopback IP literal: %q", host)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("pprof host must be loopback, got %q", host)
+	}
+	return nil
+}
+
+func configureAuthFromTerminal(cfg *config.Config, username string) error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf(
+			"standard input is not a terminal; run --set-auth interactively",
+		)
+	}
+
+	fmt.Fprint(os.Stderr, "Password: ")
+	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+
+	fmt.Fprint(os.Stderr, "Confirm password: ")
+	confirmation, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return fmt.Errorf("read password confirmation: %w", err)
+	}
+	defer clear(password)
+	defer clear(confirmation)
+	if string(password) != string(confirmation) {
+		return fmt.Errorf("passwords do not match")
+	}
+
+	if err := cfg.SetAuthCredentials(username, string(password)); err != nil {
+		return err
+	}
+	if err := cfg.Save(); err != nil {
+		return fmt.Errorf("save authentication setting: %w", err)
+	}
+	return nil
 }

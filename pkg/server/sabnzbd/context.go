@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/utils"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
 )
@@ -29,12 +30,36 @@ func getMode(ctx context.Context) string {
 
 func (s *SABnzbd) categoryContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		category := r.URL.Query().Get("category")
-		if category == "" {
-			// Check form data
-			_ = r.ParseForm()
-			category = r.Form.Get("category")
+		contentType := strings.ToLower(r.Header.Get("Content-Type"))
+		var err error
+		if strings.Contains(contentType, "multipart/form-data") {
+			err = utils.ParseMultipartFormBounded(
+				w,
+				r,
+				utils.MaxImportRequestBytes,
+				utils.MaxMultipartMemoryBytes,
+			)
+			if r.MultipartForm != nil {
+				defer r.MultipartForm.RemoveAll()
+			}
+			if err == nil &&
+				utils.MultipartFormPartCount(r.MultipartForm) > utils.MaxMultipartFormParts {
+				s.writeError(w, "Request has too many multipart fields", http.StatusRequestEntityTooLarge)
+				return
+			}
+		} else {
+			err = utils.ParseFormBounded(w, r, utils.MaxImportRequestBytes)
 		}
+		if err != nil {
+			if utils.IsRequestTooLarge(err) {
+				s.writeError(w, "Request is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			s.writeError(w, "Invalid form request", http.StatusBadRequest)
+			return
+		}
+
+		category := r.URL.Query().Get("category")
 		if category == "" {
 			category = r.FormValue("category")
 		}

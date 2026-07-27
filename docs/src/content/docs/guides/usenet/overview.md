@@ -73,6 +73,36 @@ Lower `priority` = higher preference.
 
 `backbone` is optional. Set it when two providers share the same article spool so Decypharr can skip same-backbone providers after `423/430 article not found` responses.
 
+### TorBox News Server
+
+TorBox News works through the same generic NNTP provider settings; no
+TorBox-specific integration is required. Copy the News Server connection
+details from the [TorBox Tools page](https://torbox.app/tools/) into
+Decypharr:
+
+```json
+{
+  "usenet": {
+    "providers": [
+      {
+        "host": "nntp.torbox.app",
+        "port": 563,
+        "username": "your_torbox_news_username",
+        "password": "your_torbox_news_password",
+        "ssl": true,
+        "max_connections": 10,
+        "priority": 1
+      }
+    ]
+  }
+}
+```
+
+Use the exact host and credentials TorBox provides. The News Server password
+is shown only when created or reset, so store it before leaving the TorBox
+page. Keep TLS enabled and do not configure more than the ten connections
+allowed by TorBox.
+
 ## Performance Tuning
 
 ### Connection Limits
@@ -115,11 +145,13 @@ Prefetch buffer for smoother playback. Higher = smoother but more memory.
 ```json
 {
   "max_active_downloads": 5,
+  "job_queue_capacity": 256,
   "usenet": {"processing_timeout": "10m"}
 }
 ```
 
 - `max_active_downloads`: Shared active-download limit for torrents and NZBs
+- `job_queue_capacity`: Total bound for reserved, waiting, active, and retrying imports
 - `processing_timeout`: Mark as bad if processing exceeds this
 
 ### Availability Checking

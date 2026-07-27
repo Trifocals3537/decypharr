@@ -21,6 +21,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/retry"
+	"github.com/sirrobot01/decypharr/internal/tlsconfig"
 	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
@@ -61,6 +62,11 @@ type Client struct {
 	// (≈ buffer ÷ RTT), so it must cover the bandwidth-delay product.
 	sockReadBuf  int
 	sockWriteBuf int
+
+	// tlsConfig is an optional base configuration used by internal callers and
+	// tests. Every use is cloned and hardened before dialing; nil uses the
+	// platform trust store.
+	tlsConfig *tls.Config
 }
 
 // SpeedTestResult holds the result of a provider speed test
@@ -775,12 +781,39 @@ func (c *Client) tuneTCP(tcpConn *net.TCPConn) {
 	}
 }
 
+func verifiedNNTPConfig(serverName string) *tls.Config {
+	return hardenedNNTPConfig(nil, serverName)
+}
+
+func hardenedNNTPConfig(base *tls.Config, serverName string) *tls.Config {
+	config := tlsconfig.Harden(base)
+	config.ServerName = serverName
+	return config
+}
+
+func completeTLSHandshake(ctx context.Context, conn *tls.Conn) error {
+	handshakeCtx, cancel := context.WithTimeout(ctx, timeouts.HandshakeTimeout)
+	defer cancel()
+
+	deadline, ok := handshakeCtx.Deadline()
+	if !ok {
+		return errors.New("TLS handshake context has no deadline")
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return fmt.Errorf("set TLS handshake deadline: %w", err)
+	}
+	if err := conn.HandshakeContext(handshakeCtx); err != nil {
+		return err
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear TLS handshake deadline: %w", err)
+	}
+	return nil
+}
+
 // createConnection creates a new NNTP connection to a provider
 func (c *Client) createConnection(ctx context.Context, provider config.UsenetProvider) (*Connection, error) {
 	address := fmt.Sprintf("%s:%d", provider.Host, provider.Port)
-
-	var netConn net.Conn
-	var err error
 
 	dialer := &net.Dialer{
 		Timeout:   timeouts.DialTimeout,
@@ -788,26 +821,19 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 		Control:   c.socketControl(),
 	}
 
-	// TLS if enabled
-	if provider.SSL {
-		// Dial with TLS directly if possible, or Dial then Wrap
-		tlsConfig := &tls.Config{
-			ServerName:         provider.Host,
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
-		}
-		// Use tls.Dialer for simpler timeout handling
-		tlsDialer := &tls.Dialer{
-			NetDialer: dialer,
-			Config:    tlsConfig,
-		}
-		netConn, err = tlsDialer.DialContext(ctx, "tcp", address)
-	} else {
-		netConn, err = dialer.DialContext(ctx, "tcp", address)
-	}
-
+	netConn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, NewConnectionError(fmt.Errorf("dial %s: %w", address, err))
+	}
+
+	providerTLSConfig := hardenedNNTPConfig(c.tlsConfig, provider.Host)
+	if provider.SSL {
+		tlsConn := tls.Client(netConn, providerTLSConfig)
+		if err := completeTLSHandshake(ctx, tlsConn); err != nil {
+			_ = tlsConn.Close()
+			return nil, NewConnectionError(fmt.Errorf("TLS handshake with %s: %w", address, err))
+		}
+		netConn = tlsConn
 	}
 
 	// Optimize TCP socket (buffer sizing already applied pre-connect via
@@ -825,20 +851,23 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 	writer := bufio.NewWriterSize(netConn, 64*1024)
 
 	conn := &Connection{
-		conn:     netConn,
-		reader:   reader,
-		text:     textproto.NewReader(reader),
-		writer:   writer,
-		address:  provider.Host,
-		port:     provider.Port,
-		username: provider.Username,
-		password: provider.Password,
-		logger:   c.logger.With().Str("host", provider.Host).Logger(),
+		conn:      netConn,
+		reader:    reader,
+		text:      textproto.NewReader(reader),
+		writer:    writer,
+		address:   provider.Host,
+		port:      provider.Port,
+		username:  provider.Username,
+		password:  provider.Password,
+		logger:    c.logger.With().Str("host", provider.Host).Logger(),
+		tlsConfig: providerTLSConfig,
 	}
 
-	// Set deadline for handshake (greeting + auth)
-	// If the server doesn't respond quickly during setup, we should abort.
-	_ = netConn.SetDeadline(utils.Now().Add(timeouts.HandshakeTimeout))
+	// Bound each setup phase so a server cannot hold a connection indefinitely.
+	if err := conn.conn.SetDeadline(utils.Now().Add(timeouts.HandshakeTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, NewConnectionError(fmt.Errorf("set greeting deadline: %w", err))
+	}
 
 	// Read greeting
 	line, err := reader.ReadString('\n')
@@ -847,20 +876,37 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 		return nil, NewConnectionError(fmt.Errorf("read greeting: %w", err))
 	}
 	if !strings.HasPrefix(line, "200") && !strings.HasPrefix(line, "201") {
-		_ = netConn.Close()
+		_ = conn.Close()
 		return nil, NewConnectionError(fmt.Errorf("unexpected greeting: %s", line))
+	}
+
+	// Port 119 is plaintext until STARTTLS succeeds. Require a verified upgrade
+	// before authentication so provider credentials are never sent in clear.
+	if !provider.SSL {
+		if err := conn.startTLS(ctx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("STARTTLS: %w", err)
+		}
+	}
+
+	if err := conn.conn.SetDeadline(utils.Now().Add(timeouts.HandshakeTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, NewConnectionError(fmt.Errorf("set authentication deadline: %w", err))
 	}
 
 	// Authenticate
 	if provider.Username != "" {
 		if err := conn.authenticate(); err != nil {
-			_ = netConn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("auth: %w", err)
 		}
 	}
 
 	// Clear deadline for normal operation
-	_ = netConn.SetDeadline(time.Time{})
+	if err := conn.conn.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, NewConnectionError(fmt.Errorf("clear connection setup deadline: %w", err))
+	}
 
 	return conn, nil
 }

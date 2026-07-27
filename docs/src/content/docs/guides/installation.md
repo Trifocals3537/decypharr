@@ -33,10 +33,142 @@ ssh -L 8282:127.0.0.1:8282 user@seedbox
 
 Then visit `http://127.0.0.1:8282`. For permanent remote access, prefer a
 trusted reverse proxy. Set `bind_address` explicitly only when you intend to
-listen on another interface.
+listen on another interface. Decypharr refuses to start when authentication
+is disabled on a non-loopback listener because the UI, APIs, and provider
+configuration could otherwise be exposed over plain HTTP.
+
+### Shared seedboxes
+
+A native shared-seedbox installation uses one HTTP listener for the Web UI,
+qBittorrent-compatible API, SABnzbd-compatible API, and WebDAV routes. When
+the Arr applications are on the same host, bind Decypharr to `127.0.0.1`,
+point those clients to `127.0.0.1`, and use an SSH tunnel for the UI; this
+requires no public assigned port. If remote clients need direct access, only
+one assigned inbound application port is required. Real-Debrid and TorBox use
+outbound HTTPS connections; Usenet providers, including an NNTP endpoint
+supplied by TorBox, use outbound NNTP or NNTPS connections. Those outbound
+connections do not require additional assigned application ports.
+
+Some shared hosts provide a private per-user address for communication between
+applications. Bind to that address, point local automation clients to it, and
+reach the UI through a private HTTPS service. Avoid binding a native shared-host
+installation to `0.0.0.0`.
+If the WebDAV endpoint is not needed, set `disable_webdav` to `true`. Otherwise
+enable both application authentication and `enable_webdav_auth`.
+
+Prefer the DFS mount backend when the host supplies `/dev/fuse` and allows
+user mounts. DFS does not start rclone's remote-control listener. Select the
+rclone backend only when rclone is installed and its extra local control
+listener is acceptable on the host.
+
+Do not expose a first-time registration page on a shared listener. When an
+existing configuration uses a non-loopback address, set credentials
+interactively on the host before starting the new binary:
+
+```bash
+~/.local/bin/decypharr --config ~/.decypharr --set-auth admin
+```
+
+The password is read twice without echo and is never placed in shell history
+or process arguments. Remote registration and unauthenticated remote
+credential changes are rejected. Authentication also cannot be disabled while
+the service is listening on a non-loopback address. Put the single assigned
+HTTP port behind the host's TLS reverse proxy; do not publish the same
+unencrypted port directly to the Internet.
+
+#### Rootless Tailscale HTTPS
+
+Tailscale Serve is a good fit when a shared host has no supported TLS reverse
+proxy for custom applications. It terminates private HTTPS inside the tailnet
+and proxies to Decypharr's existing HTTP listener, so it does not require
+Docker or another public port. Keep Decypharr authentication enabled as a
+second layer; do not use Tailscale Funnel.
+
+Bind Decypharr to the account's private address and restrict the listener to
+that same source address:
+
+```json
+{
+  "bind_address": "192.0.2.10",
+  "port": "8282",
+  "use_auth": true,
+  "secure_session_cookie": true,
+  "disable_webdav": true,
+  "allowed_client_cidrs": [
+    "192.0.2.10/32"
+  ]
+}
+```
+
+`192.0.2.10` is a documentation-only address. Replace it and the example port
+with values assigned to your account. The list applies to the UI and all
+compatibility routes and ignores forwarded-IP headers. Binding to the private
+address keeps the listener off the public interface, while the allowlist
+continues to admit local automation clients and the local Tailscale proxy.
+
+For a named Tailscale Service:
+
+1. In the Tailscale admin console, define `svc:decypharr` with endpoint
+   `tcp:443` and grant only the intended users or devices access.
+2. Confirm the seedbox node has a tag-based identity and Tailscale 1.86 or
+   later.
+3. Advertise the HTTPS proxy from the seedbox, using the correct path to the
+   rootless client and socket:
+
+   ```bash
+   ~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve \
+     --service=svc:decypharr --https=443 http://192.0.2.10:8282
+   ```
+
+4. Approve the service host if the tailnet does not auto-approve it.
+5. Verify the named `https://decypharr.<tailnet>.ts.net` URL reaches the
+   Decypharr login, both Arr clients still pass their tests, and the public
+   host cannot connect to the assigned application port.
+
+Named services run in the background by default and resume with the Tailscale
+daemon. To roll back only this mapping, first drain it, then clear it:
+
+```bash
+~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve drain svc:decypharr
+~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve clear svc:decypharr
+```
+
+See the official
+[Tailscale Services guide](https://tailscale.com/docs/features/tailscale-services)
+for service definition, approval, and access grants.
+
+Before replacing an existing seedbox binary:
+
+1. Run `decypharr --config PATH --check-config`.
+2. Inspect the effective supervisor command and any overrides so you replace
+   the binary it actually executes, not merely a similarly named file.
+3. Confirm `bind_address`, `port`, and `use_auth` in the effective
+   configuration.
+4. Confirm the download, mount, cache, and Usenet buffer paths are owned and
+   writable by the service account.
+5. Confirm `/dev/fuse` and `fusermount3` are available when using DFS.
+6. Keep a copy of the working binary and configuration outside the install
+   path for rollback.
+7. Stop the old process cleanly and verify its FUSE mount is gone before
+   starting the replacement.
+8. If the service was remotely exposed without authentication, run
+   `--set-auth` while it is stopped, before starting the replacement.
+9. Rerun `--check-config` after the final authentication, bind, and WebDAV
+   choices; deploy only when it passes.
+
+The live application tightens existing `config.json` and `auth.json`
+permissions to `0600`. Ensure both files are owned by the service account.
+Allow at least 90 seconds for a supervised shutdown so active HTTP work can
+drain and the DFS mount can be released. Managed seedboxes often carry a
+provider-specific service override; preserve its CPU/task limits and paths,
+but update its effective binary path deliberately.
 
 `--check-config` is for an existing configuration and never creates or changes
-files:
+files. It rejects invalid client networks, a non-loopback deployment when
+application authentication is disabled, or a deployment where WebDAV would
+remain unprotected. It warns when a non-loopback listener has no client
+network boundary. Normal startup and configuration updates enforce the same
+deployment-safety checks:
 
 ```bash
 ~/.local/bin/decypharr --config ~/.decypharr --check-config

@@ -13,30 +13,63 @@ Configuration is stored in `config.json`. Most settings can be managed via the W
   "port": "8282",
   "url_base": "",
   "app_url": "http://localhost:8282",
+  "allowed_client_cidrs": [],
   "log_level": "info"
 }
 ```
 
-| Field          | Type   | Description                                      | Default       |
-|----------------|--------|--------------------------------------------------|---------------|
-| `bind_address` | string | IP to bind to                                    | `127.0.0.1`   |
-| `port`         | string | Port to listen on                                | `8282`        |
-| `url_base`     | string | Base path for reverse proxy                      | `""`          |
-| `app_url`      | string | External URL for callbacks                       | Auto-detected |
-| `log_level`    | string | Logging level (`debug`, `info`, `warn`, `error`) | `info`        |
+| Field                  | Type   | Description                                                   | Default       |
+|------------------------|--------|---------------------------------------------------------------|---------------|
+| `bind_address`         | string | IP to bind to                                                 | `127.0.0.1`   |
+| `port`                 | string | Port to listen on                                             | `8282`        |
+| `url_base`             | string | Base path for reverse proxy                                   | `""`          |
+| `app_url`              | string | External URL for callbacks                                    | Auto-detected |
+| `allowed_client_cidrs` | array  | TCP peer IP addresses or CIDRs allowed to use the listener     | Allow all     |
+| `log_level`            | string | Logging level (`debug`, `info`, `warn`, `error`)              | `info`        |
+
+`allowed_client_cidrs` applies to every route on the listener, including the
+UI, qBittorrent-compatible API, SABnzbd-compatible API, and WebDAV. It checks
+the actual TCP peer and deliberately ignores `X-Forwarded-For` and similar
+headers. An empty list keeps the backward-compatible allow-all behavior.
+Changing the list requires a restart.
+
+On a shared host, bind directly to the private address assigned to the account
+instead of listening on every interface. Point local automation applications
+and any private HTTPS proxy backend at that same address:
+
+```json
+{
+  "bind_address": "192.0.2.10",
+  "allowed_client_cidrs": [
+    "192.0.2.10/32"
+  ]
+}
+```
+
+`192.0.2.10` is a documentation-only address. Replace it with the private
+address assigned to your account. Test both the proxy and automation
+integrations before removing a working configuration. The single-address
+allowlist remains useful defense in depth if the listener address is changed
+accidentally later.
 
 ## Authentication
 
 ```json
 {
   "use_auth": true,
-  "username": "admin",
-  "password": "$2a$10$...",
-  "api_token": "..."
+  "secure_session_cookie": false
 }
 ```
 
-Password is bcrypt-hashed. API token is auto-generated.
+The username, bcrypt password hash, API token, and session secret are stored
+separately in the private `auth.json` file. Use `--set-auth USERNAME` to set
+credentials without placing a password in shell history.
+
+Set `secure_session_cookie` to `true` when the UI is available only through an
+HTTPS proxy such as Tailscale Serve. Browsers will then refuse to send the UI
+session cookie over plain HTTP. Leave it `false` only when the UI itself must
+be used over a trusted plain-HTTP connection. This setting does not change the
+separate qBittorrent-compatible login cookie used by local Arr clients.
 
 Native installations use the loopback-only bind default so the first-run setup
 wizard is not exposed to the network. The official container image explicitly
@@ -46,13 +79,20 @@ firewall rules, and a reverse proxy.
 After upgrading, an older native configuration that omitted `bind_address`
 also uses `127.0.0.1`. If the service intentionally needs to accept remote
 connections, set a specific trusted interface address (or `0.0.0.0`) in
-`config.json` or with `DECYPHARR_BIND_ADDRESS`.
+`config.json` or with `DECYPHARR_BIND_ADDRESS`. A non-loopback Decypharr
+listener is plain HTTP; application authentication controls access but does
+not encrypt credentials. Use a trusted network or TLS proxy, and use
+`allowed_client_cidrs` when the underlying port could otherwise be reached
+directly. Normal startup and API configuration updates reject a non-loopback
+listener without application authentication, an invalid client allowlist, or
+an unprotected WebDAV endpoint.
 
 ## Downloads
 
 ```json
 {
   "max_active_downloads": 5,
+  "job_queue_capacity": 256,
   "allowed_file_types": ["mkv", "mp4"],
   "allow_samples": false,
   "min_file_size": "10MB",
@@ -62,9 +102,14 @@ connections, set a specific trusted interface address (or `0.0.0.0`) in
 
 `max_active_downloads` is the shared active-processing limit for torrent and NZB downloads. Additional imports remain queued until an active download completes.
 
+`job_queue_capacity` bounds all reserved, waiting, active, and delayed-retry
+imports. New qBittorrent and SABnzbd requests receive a retryable overload
+response when the bound is reached. Values above `4096` are clamped.
+
 | Field                  | Type   | Description                                      | Default       |
 |------------------------|--------|--------------------------------------------------|---------------|
 | `max_active_downloads` | int    | Shared active-processing limit                   | `5`           |
+| `job_queue_capacity`   | int    | Total admitted import limit (maximum `4096`)     | `256`         |
 | `allowed_file_types`   | array  | Extensions eligible for import                   | Media formats |
 | `allow_samples`        | bool   | Include files identified as samples              | `false`       |
 | `min_file_size`        | string | Minimum eligible file size                       | `""`          |
@@ -401,6 +446,7 @@ All config options support environment variable overrides using double underscor
 # Server
 PORT=8282
 LOG_LEVEL=debug
+DECYPHARR_JOB_QUEUE_CAPACITY=256
 
 # Debrid
 DEBRIDS__0__PROVIDER=realdebrid

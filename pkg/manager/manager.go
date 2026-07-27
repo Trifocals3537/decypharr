@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/tlsconfig"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
@@ -66,6 +67,7 @@ type Manager struct {
 	backgroundMu          sync.Mutex
 	backgroundStopping    bool
 	backgroundWaitTimeout time.Duration
+	initializationErr     error
 
 	customFolders *CustomFolders
 	mountManager  MountManager
@@ -90,11 +92,46 @@ type Manager struct {
 	processingEntries *xsync.Map[string, struct{}]
 
 	// Unified active-download queue for torrent and NZB imports.
-	jobQueue  *JobQueue
-	nzbSyncMu sync.Mutex
+	jobQueue       *JobQueue
+	entryLifecycle *entryLifecycle
+	nzbSyncMu      sync.Mutex
 
 	// Notifications service
 	Notifications *notifications.Service
+}
+
+func newStreamHTTPClient() *http.Client {
+	// Optimized transport for high-performance streaming with HTTP/2
+	// multiplexing and verified TLS.
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: tlsconfig.Harden(&tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(200),
+		}),
+		TLSHandshakeTimeout:    20 * time.Second,
+		ResponseHeaderTimeout:  30 * time.Second,
+		MaxIdleConns:           1000,
+		MaxIdleConnsPerHost:    500,
+		MaxConnsPerHost:        500,
+		IdleConnTimeout:        120 * time.Second,
+		DisableCompression:     false,
+		DialContext:            dialer.DialContext,
+		Proxy:                  http.ProxyFromEnvironment,
+		MaxResponseHeaderBytes: 1 << 20,
+		WriteBufferSize:        32 << 10,
+		ReadBufferSize:         32 << 10,
+		ForceAttemptHTTP2:      true,
+	}
+
+	return &http.Client{
+		Timeout:   0,
+		Transport: transport,
+	}
 }
 
 // New creates a new Manager instance
@@ -107,41 +144,11 @@ func New() *Manager {
 		panic(fmt.Errorf("failed to create manager storage: %w", err))
 	}
 
-	// Optimized transport for high-performance streaming with HTTP/2 multiplexing
-	// DNS resolver with caching
-	dialer := &net.Dialer{
-		Timeout:   5 * time.Second,  // Fast connection timeout
-		KeepAlive: 30 * time.Second, // Keep connections alive
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
-			ClientSessionCache: tls.NewLRUClientSessionCache(200),
-		},
-		TLSHandshakeTimeout:    20 * time.Second,
-		MaxIdleConns:           1000,
-		MaxIdleConnsPerHost:    500,
-		MaxConnsPerHost:        500,
-		IdleConnTimeout:        120 * time.Second,
-		DisableCompression:     false, // Enable compression for better multiplexing
-		DialContext:            dialer.DialContext,
-		Proxy:                  http.ProxyFromEnvironment,
-		MaxResponseHeaderBytes: 1 << 20,  // 1MB header buffer for CDN responses
-		WriteBufferSize:        32 << 10, // 32KB write buffer
-		ReadBufferSize:         32 << 10, // 32KB read buffer
-	}
-
-	streamClient := &http.Client{
-		Timeout:   0,
-		Transport: transport,
-	}
-
 	usenetTimeout, err := utils.ParseDuration(cfg.Usenet.ProcessingTimeout)
 	if err != nil {
 		usenetTimeout = 10 * time.Minute
 	}
+	entryLifecycle := newEntryLifecycle()
 
 	instance := &Manager{
 		storage:                strg,
@@ -150,13 +157,14 @@ func New() *Manager {
 		migrationJobs:          xsync.NewMap[string, *storage.SwitcherJob](),
 		config:                 cfg,
 		arr:                    arr.NewStorage(),
-		queue:                  newQueue(strg, cfg.RemoveStalledAfter),
+		queue:                  newQueue(strg, cfg.RemoveStalledAfter, entryLifecycle),
 		ready:                  make(chan struct{}),
-		streamClient:           streamClient,
+		streamClient:           newStreamHTTPClient(),
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),
 		processingEntries:      xsync.NewMap[string, struct{}](),
+		entryLifecycle:         entryLifecycle,
 	}
 
 	instance.resetLifecycle()
@@ -201,6 +209,54 @@ func (m *Manager) startBackground(name string, work func()) bool {
 	return true
 }
 
+// startEntryBackground registers scheduler work with the per-entry lifecycle
+// before the goroutine is admitted. Explicit deletion can therefore cancel and
+// drain it, while a stale scheduler snapshot cannot start against a replacement
+// row with the same key.
+func (m *Manager) startEntryBackground(parent context.Context, name string, entry *storage.Entry, work func(context.Context) error) bool {
+	if entry == nil || work == nil {
+		return false
+	}
+	lease, err := m.entryLifecycle.startWork(parent, entry.InfoHash, entry.QueueGeneration)
+	if err != nil {
+		m.logger.Debug().
+			Err(err).
+			Str("task", name).
+			Str("entry", entry.InfoHash).
+			Msg("Skipping stale or deleting scheduled entry")
+		return false
+	}
+
+	if !m.startBackground(name, func() {
+		var workErr error
+		func() {
+			defer lease.Close()
+			workErr = work(lease.Context())
+		}()
+
+		if errors.Is(workErr, errDeleteQueueEntryOnJobFinish) {
+			if err := m.queue.Delete(entry.InfoHash, nil); err != nil {
+				m.logger.Error().
+					Err(err).
+					Str("entry", entry.InfoHash).
+					Msg("Failed to delete completed queue entry after scheduled work drained")
+			}
+			return
+		}
+		if workErr != nil && !errors.Is(workErr, context.Canceled) {
+			m.logger.Error().
+				Err(workErr).
+				Str("task", name).
+				Str("entry", entry.InfoHash).
+				Msg("Scheduled entry processing failed")
+		}
+	}) {
+		lease.Close()
+		return false
+	}
+	return true
+}
+
 func (m *Manager) stopAcceptingBackgroundWork() {
 	m.backgroundMu.Lock()
 	m.backgroundStopping = true
@@ -232,6 +288,7 @@ func (m *Manager) waitForBackground() error {
 }
 
 func (m *Manager) init() {
+	m.initializationErr = nil
 	cfg := config.Get()
 	scheduler, err := gocron.NewScheduler(gocron.WithLocation(time.Local), gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-manager")))
 	if err != nil {
@@ -251,7 +308,10 @@ func (m *Manager) init() {
 	m.config = cfg
 
 	// Recreate queue with new config
-	m.queue = newQueue(m.storage, cfg.RemoveStalledAfter)
+	if m.entryLifecycle == nil {
+		m.entryLifecycle = newEntryLifecycle()
+	}
+	m.queue = newQueue(m.storage, cfg.RemoveStalledAfter, m.entryLifecycle)
 
 	// Clear debrid clients so they get recreated with new config
 	m.clients = xsync.NewMap[string, debrid.Client]()
@@ -303,8 +363,10 @@ func (m *Manager) init() {
 	// Initialize repair service. It registers with the scheduler in StartWorker.
 	m.repair = NewRepair(m)
 
-	// Initialize the unified active-download queue after all processors exist.
-	m.initJobQueue()
+	// Adopt legacy NZB ownership before workers, restore, or new intake can
+	// touch queue entries. On failure Start surfaces the stored error and no
+	// JobQueue or restore goroutine is created.
+	m.initializeActiveDownloads(m.adoptLegacyUsenetOwnership)
 }
 
 func (m *Manager) initUsenet() {
@@ -331,7 +393,25 @@ func (m *Manager) initLinkService() {
 }
 
 func (m *Manager) initJobQueue() {
-	m.jobQueue = NewJobQueue(m.ctx, m.config.MaxActiveDownloads, m.processJob)
+	m.jobQueue = NewJobQueueWithCapacity(
+		m.ctx,
+		m.config.MaxActiveDownloads,
+		m.config.JobQueueCapacity,
+		m.processJob,
+		m.entryLifecycle,
+	)
+	m.queue.removePendingJobs = m.jobQueue.DeleteJobs
+	m.jobQueue.afterFunc = func(job *Job) {
+		if job == nil || job.Entry == nil {
+			return
+		}
+		if err := m.queue.Delete(job.Entry.InfoHash, nil); err != nil {
+			m.logger.Error().
+				Err(err).
+				Str("entry", job.Entry.InfoHash).
+				Msg("Failed to delete completed queue entry after job drain")
+		}
+	}
 	// Restore persisted active/queued downloads in the background. With large
 	// queues this re-parses thousands of NZBs over the network, and running it
 	// inline blocked manager construction — and therefore the HTTP server —
@@ -341,6 +421,34 @@ func (m *Manager) initJobQueue() {
 	m.startBackground("restore active downloads", func() {
 		m.restoreActiveDownloadJobs(m.ctx)
 	})
+}
+
+func (m *Manager) initializeActiveDownloads(adopt func() error) {
+	if adopt == nil {
+		m.initializationErr = fmt.Errorf("legacy NZB ownership adoption is unavailable")
+		m.jobQueue = nil
+		return
+	}
+	if err := adopt(); err != nil {
+		m.initializationErr = fmt.Errorf("initialize legacy NZB ownership: %w", err)
+		m.jobQueue = nil
+		return
+	}
+	residual, fatal := m.recoverQueuedDeletions()
+	if fatal != nil {
+		m.initializationErr = fmt.Errorf(
+			"recover interrupted queue deletions: %w",
+			fatal,
+		)
+		m.jobQueue = nil
+		return
+	}
+	if residual != nil {
+		m.logger.Error().
+			Err(residual).
+			Msg("Interrupted queue deletions retained cleanup tombstones")
+	}
+	m.initJobQueue()
 }
 
 func (m *Manager) processJob(ctx context.Context, job *Job) {
@@ -363,6 +471,10 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 	}
 
 	if err != nil {
+		if errors.Is(err, errDeleteQueueEntryOnJobFinish) {
+			job.DeleteOnFinish = true
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -371,7 +483,16 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 				job.Entry.Status = debridTypes.TorrentStatusQueued
 				_ = m.queue.Update(job.Entry)
 			}
-			m.jobQueue.Retry(job, 30*time.Second)
+			if retryErr := m.jobQueue.Retry(job, 30*time.Second); retryErr != nil {
+				m.logger.Error().
+					Err(retryErr).
+					Str("job_id", job.ID).
+					Msg("Failed to schedule active-download retry")
+				if job.Entry != nil {
+					job.Entry.MarkAsError(retryErr)
+					_ = m.queue.Update(job.Entry)
+				}
+			}
 			return
 		}
 		m.logger.Error().Err(err).Str("job_id", job.ID).Str("type", string(job.Type)).Msg("Active download failed")
@@ -448,6 +569,12 @@ func (m *Manager) migrate(ctx context.Context) {
 
 // Start starts the manager and all its components
 func (m *Manager) Start(ctx context.Context) error {
+	if m.initializationErr != nil {
+		return m.initializationErr
+	}
+	if m.jobQueue == nil {
+		return fmt.Errorf("active download queue is not initialized")
+	}
 	m.startTime = time.Now()
 	m.logger.Info().
 		Str("version", version.GetInfo().String()).
@@ -619,6 +746,9 @@ func (m *Manager) Reset() error {
 
 	// Reload configuration
 	m.init()
+	if m.initializationErr != nil {
+		return fmt.Errorf("manager reset initialization failed: %w", m.initializationErr)
+	}
 	m.logger.Info().Msg("Manager reset complete")
 	return nil
 }
@@ -689,7 +819,7 @@ func (m *Manager) GetEntryByName(torrentName, filename string) (*storage.Entry, 
 
 func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Entry)) error {
 	entry.UpdatedAt = time.Now()
-	if err := m.storage.AddOrUpdate(entry); err != nil {
+	if err := m.storage.AddOrUpdateDurable(entry); err != nil {
 		return err
 	}
 	if callback != nil {
@@ -727,25 +857,125 @@ func (m *Manager) GetTorrentsCount() (int, error) {
 
 // DeleteEntry deletes a torrent by infohash
 func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
-	torr, err := m.GetEntry(infohash)
-	if err != nil {
+	return m.deleteMainEntryWithCleanup(infohash, func(mainEntry *storage.Entry) error {
+		// A completed entry is written to main storage before its post-download
+		// action finishes. The main-entry tombstone is already installed here;
+		// queue deletion then drains that worker before provider or main-row
+		// cleanup can complete.
+		if m.queue != nil {
+			var queueCleanup func(queued *storage.Entry) error
+			if removePlacements {
+				queueCleanup = func(queued *storage.Entry) error {
+					return m.RemoveTorrentPlacements(mainEntry, queued)
+				}
+			}
+			deletedQueue, err := m.queue.deleteWithResultAndSnapshots(
+				infohash,
+				queueCleanup,
+				mainEntry,
+			)
+			if err != nil {
+				return err
+			}
+			if removePlacements && !deletedQueue {
+				if err := m.RemoveTorrentPlacements(mainEntry); err != nil {
+					return fmt.Errorf("remove entry placements: %w", err)
+				}
+			}
+			return nil
+		}
+		if removePlacements {
+			if err := m.RemoveTorrentPlacements(mainEntry); err != nil {
+				return fmt.Errorf("remove entry placements: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func (m *Manager) deleteMainEntryWithCleanup(
+	infohash string,
+	cleanup func(*storage.Entry) error,
+) error {
+	if err := m.storage.DeleteWithCleanup(infohash, cleanup); err != nil {
 		return err
 	}
-	// Delete active placements from debrid clients
-	if removePlacements {
-		if !m.startBackground("remove torrent placements", func() {
-			m.RemoveTorrentPlacements(torr)
-		}) {
-			return fmt.Errorf("cannot delete entry while manager is stopping")
+	if m.entry != nil {
+		m.RefreshEntries(true)
+	}
+	return nil
+}
+
+// DeleteEntryForQueueCleanup removes the union of main-storage and queued
+// placements without deleting main storage. Queue.Delete callers use it before
+// filesystem cleanup; main deletion, when requested, must happen only after
+// queue filesystem cleanup succeeds.
+func (m *Manager) DeleteEntryForQueueCleanup(queued *storage.Entry) error {
+	if queued == nil {
+		return fmt.Errorf("queued entry is nil")
+	}
+	mainEntry, err := m.GetEntry(queued.InfoHash)
+	if err != nil {
+		if storage.IsEntryNotFound(err) {
+			return m.RemoveTorrentPlacements(queued)
 		}
+		return fmt.Errorf("load main entry for queue cleanup: %w", err)
+	}
+	if err := m.RemoveTorrentPlacements(mainEntry, queued); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteQueueEntry is the API-facing queue deletion path. It preserves legacy
+// behavior when removePlacements is false. When true, provider cleanup happens
+// before queue files, and an associated main row is deleted only after queue
+// filesystem cleanup succeeds.
+func (m *Manager) DeleteQueueEntry(infohash string, removePlacements bool) error {
+	if !removePlacements {
+		_, err := m.queue.deleteWithResult(infohash, nil)
+		return err
 	}
 
-	if err := m.storage.Delete(infohash); err != nil {
+	err := m.deleteMainEntryWithCleanup(infohash, func(mainEntry *storage.Entry) error {
+		deletedQueue, err := m.queue.deleteWithResultAndSnapshots(
+			infohash,
+			func(queued *storage.Entry) error {
+				return m.RemoveTorrentPlacements(mainEntry, queued)
+			},
+			mainEntry,
+		)
+		if err != nil {
+			return err
+		}
+		if !deletedQueue {
+			return m.RemoveTorrentPlacements(mainEntry)
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	if !storage.IsEntryNotFound(err) {
 		return err
 	}
-	// Refresh entry cache
-	m.RefreshEntries(true)
-	return nil
+
+	// An authoritative main miss still permits queue-only deletion. Any
+	// indeterminate main lookup error returned above fails closed.
+	_, queueErr := m.queue.deleteWithResult(infohash, func(queued *storage.Entry) error {
+		return m.RemoveTorrentPlacements(queued)
+	})
+	return queueErr
+}
+
+func (m *Manager) DeleteQueueEntries(infohashes []string, removePlacements bool) error {
+	var errs []error
+	for _, infohash := range infohashes {
+		if err := m.DeleteQueueEntry(infohash, removePlacements); err != nil {
+			errs = append(errs, fmt.Errorf("delete queue entry %s: %w", infohash, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (m *Manager) DeleteTorrents(infohashes []string, removeFromDebrid bool) error {
@@ -770,5 +1000,75 @@ func (m *Manager) SubmitJob(job *Job) error {
 	if m.jobQueue == nil {
 		return fmt.Errorf("active download queue not initialized")
 	}
+	if err := m.prepareJobSubmission(job); err != nil {
+		return err
+	}
 	return m.jobQueue.Submit(job)
+}
+
+func (m *Manager) submitRestoredJob(ctx context.Context, job *Job) error {
+	if m.jobQueue == nil {
+		return fmt.Errorf("%w: active download queue not initialized", ErrJobQueueClosed)
+	}
+	if err := m.prepareJobSubmission(job); err != nil {
+		return err
+	}
+	return m.jobQueue.submitWait(ctx, job)
+}
+
+func (m *Manager) reserveJob(
+	ctx context.Context,
+	jobID string,
+) (*jobReservation, error) {
+	if m.jobQueue == nil {
+		return nil, fmt.Errorf("%w: active download queue not initialized", ErrJobQueueClosed)
+	}
+	reservation, err := m.jobQueue.reserveContext(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if m.queue == nil {
+		reservation.release()
+		return nil, fmt.Errorf("active download storage is unavailable")
+	}
+
+	_, lookupErr := m.queue.GetTorrent(jobID)
+	switch {
+	case lookupErr == nil:
+		reservation.release()
+		return nil, &DuplicateJobError{Key: normalizeQueueEntryKey(jobID)}
+	case errors.Is(lookupErr, storage.ErrQueuedEntryDeleting):
+		reservation.release()
+		return nil, lookupErr
+	case storage.IsQueuedEntryNotFound(lookupErr):
+		return reservation, nil
+	default:
+		reservation.release()
+		return nil, fmt.Errorf("check durable queue admission for %s: %w", jobID, lookupErr)
+	}
+}
+
+func (m *Manager) submitReservedJob(reservation *jobReservation, job *Job) error {
+	if m.jobQueue == nil {
+		return fmt.Errorf("%w: active download queue not initialized", ErrJobQueueClosed)
+	}
+	if err := m.prepareJobSubmission(job); err != nil {
+		return err
+	}
+	return m.jobQueue.submitReserved(reservation, job)
+}
+
+func (m *Manager) prepareJobSubmission(job *Job) error {
+	if job != nil && job.Entry != nil {
+		if job.Entry.QueueGeneration == 0 {
+			if m.entryLifecycle == nil {
+				return fmt.Errorf("active download lifecycle not initialized")
+			}
+			if err := m.entryLifecycle.bindEntry(job.Entry); err != nil {
+				return err
+			}
+		}
+		job.Generation = job.Entry.QueueGeneration
+	}
+	return nil
 }

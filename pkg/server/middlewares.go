@@ -3,12 +3,57 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 )
+
+func (s *Server) clientNetworkMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.accessPolicyErr != nil {
+			http.Error(w, "Client network policy is invalid", http.StatusServiceUnavailable)
+			return
+		}
+		if !clientAddressAllowed(r.RemoteAddr, s.allowedClients) {
+			// Keep this at debug level: an Internet scan must not be able to
+			// turn a correctly-blocked request into unbounded warning logs.
+			s.logger.Debug().
+				Str("remote_address", r.RemoteAddr).
+				Msg("Rejected request outside allowed client networks")
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func clientAddressAllowed(remoteAddress string, allowed []netip.Prefix) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+
+	remoteAddress = strings.TrimSpace(remoteAddress)
+	addressPort, err := netip.ParseAddrPort(remoteAddress)
+	var address netip.Addr
+	if err == nil {
+		address = addressPort.Addr()
+	} else {
+		address, err = netip.ParseAddr(remoteAddress)
+	}
+	if err != nil {
+		return false
+	}
+	address = address.Unmap().WithZone("")
+	for _, prefix := range allowed {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +100,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 // isAPIRequest checks if the request is for an API endpoint
 func (s *Server) isAPIRequest(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, "/api/")
+	return strings.HasPrefix(r.URL.Path, "/api/") ||
+		strings.HasPrefix(r.URL.Path, "/webhooks/")
 }
 
 // sendJSONError sends a JSON error response

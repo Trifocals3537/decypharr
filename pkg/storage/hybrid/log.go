@@ -3,6 +3,7 @@ package hybrid
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -65,15 +66,110 @@ type appendLog struct {
 
 // openAppendLog opens an existing log or creates a new one
 func openAppendLog(path string) (*appendLog, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	file, created, err := openAppendLogFile(path, true)
 	if err != nil {
 		return nil, err
 	}
+	return initializeAppendLog(file, path, created)
+}
 
+// openExistingAppendLog opens an existing regular append log without creating
+// it. Compaction recovery uses this so inspecting a missing artifact can never
+// manufacture an empty database and accidentally make it authoritative.
+func openExistingAppendLog(path string) (*appendLog, error) {
+	file, _, err := openAppendLogFile(path, false)
+	if err != nil {
+		return nil, err
+	}
 	info, err := file.Stat()
 	if err != nil {
-		file.Close()
+		return nil, errors.Join(err, file.Close())
+	}
+	if info.Size() == 0 {
+		return nil, errors.Join(
+			fmt.Errorf("existing append log is empty: %s", path),
+			file.Close(),
+		)
+	}
+	return initializeAppendLog(file, path, false)
+}
+
+// createAppendLogExclusive creates a fresh regular append log and refuses to
+// follow or replace an existing path. In particular, a stale .compact symlink
+// cannot redirect compaction writes into an unrelated file.
+func createAppendLogExclusive(path string) (*appendLog, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
 		return nil, err
+	}
+	info, statErr := file.Stat()
+	if statErr != nil || !info.Mode().IsRegular() {
+		closeErr := file.Close()
+		removeErr := os.Remove(path)
+		return nil, errors.Join(
+			statErr,
+			closeErr,
+			removeErr,
+			fmt.Errorf("append log path is not a regular file: %s", path),
+		)
+	}
+	return initializeAppendLog(file, path, true)
+}
+
+func openAppendLogFile(path string, create bool) (*os.File, bool, error) {
+	for attempts := 0; attempts < 2; attempts++ {
+		info, err := os.Lstat(path)
+		switch {
+		case err == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, false, fmt.Errorf("append log path must not be a symlink: %s", path)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, false, fmt.Errorf("append log path is not a regular file: %s", path)
+			}
+
+			file, openErr := os.OpenFile(path, os.O_RDWR, 0)
+			if openErr != nil {
+				return nil, false, openErr
+			}
+			openedInfo, statErr := file.Stat()
+			currentInfo, lstatErr := os.Lstat(path)
+			if statErr != nil || lstatErr != nil ||
+				currentInfo.Mode()&os.ModeSymlink != 0 ||
+				!openedInfo.Mode().IsRegular() ||
+				!os.SameFile(openedInfo, currentInfo) {
+				closeErr := file.Close()
+				return nil, false, errors.Join(
+					statErr,
+					lstatErr,
+					closeErr,
+					fmt.Errorf("append log path changed while opening: %s", path),
+				)
+			}
+			return file, false, nil
+		case !errors.Is(err, os.ErrNotExist):
+			return nil, false, err
+		case !create:
+			return nil, false, err
+		}
+
+		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
+		if createErr == nil {
+			return file, true, nil
+		}
+		if !errors.Is(createErr, os.ErrExist) {
+			return nil, false, createErr
+		}
+		// A concurrent creator won the race. Inspect the resulting path once,
+		// including the no-symlink and file-identity checks above.
+	}
+	return nil, false, fmt.Errorf("append log path changed repeatedly while opening: %s", path)
+}
+
+func initializeAppendLog(file *os.File, path string, created bool) (*appendLog, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
 	}
 
 	log := &appendLog{
@@ -85,42 +181,22 @@ func openAppendLog(path string) (*appendLog, error) {
 	if info.Size() == 0 {
 		// New file - write header
 		if err := log.writeHeader(); err != nil {
-			file.Close()
-			return nil, err
+			closeErr := file.Close()
+			if created {
+				return nil, errors.Join(err, closeErr, os.Remove(path))
+			}
+			return nil, errors.Join(err, closeErr)
 		}
 		log.writePos = logHeaderSize
 	} else {
 		// Existing file - validate header and find write position
 		version, err := log.validateHeader()
 		if err != nil {
-			file.Close()
-			return nil, err
+			return nil, errors.Join(err, file.Close())
 		}
 		log.version = version
 		log.writePos = info.Size()
 	}
-
-	return log, nil
-}
-
-// createAppendLog creates a new log file (always fresh)
-func createAppendLog(path string) (*appendLog, error) {
-	file, err := os.Create(path)
-	if err != nil {
-		return nil, err
-	}
-
-	log := &appendLog{
-		file:    file,
-		path:    path,
-		version: logVersion,
-	}
-
-	if err := log.writeHeader(); err != nil {
-		file.Close()
-		return nil, err
-	}
-	log.writePos = logHeaderSize
 
 	return log, nil
 }
@@ -294,8 +370,8 @@ func (l *appendLog) Iterate(fn func(*LogRecord) error) error {
 
 	pos := int64(logHeaderSize)
 	fileSize := l.writePos
-	var fixed [8]byte    // scratch for fixed-width fields
-	var sbuf []byte      // reused scratch for length-prefixed strings
+	var fixed [8]byte // scratch for fixed-width fields
+	var sbuf []byte   // reused scratch for length-prefixed strings
 
 	for pos < fileSize {
 		record, nextPos, err := readRecordFrom(r, pos, l.version, fixed[:], &sbuf)
@@ -311,6 +387,39 @@ func (l *appendLog) Iterate(fn func(*LogRecord) error) error {
 		pos = nextPos
 	}
 
+	return nil
+}
+
+// ValidateComplete verifies that every byte after the header belongs to a
+// complete record. Iterate intentionally tolerates a torn final append for
+// normal crash recovery; compaction artifacts must be stricter because startup
+// may promote one to the canonical database.
+func (l *appendLog) ValidateComplete() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, err := l.file.Seek(logHeaderSize, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReaderSize(l.file, 1<<20)
+
+	pos := int64(logHeaderSize)
+	fileSize := l.writePos
+	var fixed [8]byte
+	var sbuf []byte
+	for pos < fileSize {
+		_, nextPos, err := readRecordFrom(r, pos, l.version, fixed[:], &sbuf)
+		if err != nil {
+			return fmt.Errorf("incomplete record at offset %d: %w", pos, err)
+		}
+		if nextPos <= pos || nextPos > fileSize {
+			return fmt.Errorf("invalid record boundary %d after offset %d (file size %d)", nextPos, pos, fileSize)
+		}
+		pos = nextPos
+	}
+	if pos != fileSize {
+		return fmt.Errorf("append log ended at %d, expected %d", pos, fileSize)
+	}
 	return nil
 }
 

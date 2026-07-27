@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,6 +67,8 @@ func (m *Manager) refreshTorrents(ctx context.Context, provider string, debridCl
 
 // doRefreshTorrents performs the actual refresh logic
 func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debridClient debrid.Client) error {
+	providerSnapshot := m.storage.BeginProviderSnapshot()
+
 	// GetTorrents predates the context-aware provider methods. Keep the
 	// manager-owned sync cancellable by isolating that legacy call in a
 	// provider-only goroutine. Once canceled, the detached call can report its
@@ -95,11 +98,6 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(remote) == 0 {
-		m.logger.Debug().Str("debrid", provider).Msg("No remote found")
-		return nil
-	}
-
 	// Build map of current remote by infohash
 	remoteTorrentsByHash := make(map[string]*types.Torrent, len(remote))
 	for _, t := range remote {
@@ -135,7 +133,7 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 
 	// Process new torrents
 	if len(newTorrents) > 0 {
-		if err := m.processNewTorrents(provider, newTorrents); err != nil {
+		if err := m.processNewTorrents(provider, providerSnapshot, newTorrents); err != nil {
 			m.logger.Error().Err(err).Str("debrid", provider).Msg("Failed to process new torrents")
 		}
 	}
@@ -143,6 +141,20 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 	// Wait for concurrent update to finish
 	updateWg.Wait()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	present := make(map[string]struct{}, len(remoteTorrentsByHash))
+	for infohash := range remoteTorrentsByHash {
+		present[infohash] = struct{}{}
+	}
+	if err := m.storage.ObserveProviderSnapshot(provider, providerSnapshot, present); err != nil {
+		return fmt.Errorf("record provider snapshot: %w", err)
+	}
+
+	if len(remote) == 0 {
+		m.logger.Debug().Str("debrid", provider).Msg("No remote found")
+	}
 	return nil
 }
 
@@ -150,12 +162,12 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map[string]*types.Torrent) (
 	newTorrents []*types.Torrent,
 	torrentsToUpdate []*storage.Entry,
-	torrentsToDelete []string,
+	torrentsToDelete []*storage.Entry,
 	err error,
 ) {
 	newTorrents = make([]*types.Torrent, 0, 100)
 	torrentsToUpdate = make([]*storage.Entry, 0, 100)
-	torrentsToDelete = make([]string, 0, 10)
+	torrentsToDelete = make([]*storage.Entry, 0, 10)
 	cachedInfoHashes := make(map[string]bool, len(remoteTorrentsByHash))
 
 	err = m.storage.ForEachBatch(refreshBatchSize, func(batch []*storage.Entry) error {
@@ -169,7 +181,7 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 				if !onRemote {
 					entry.RemoveProvider(provider, nil)
 					if len(entry.Providers) == 0 {
-						torrentsToDelete = append(torrentsToDelete, entry.InfoHash)
+						torrentsToDelete = append(torrentsToDelete, entry)
 					} else {
 						torrentsToUpdate = append(torrentsToUpdate, entry)
 					}
@@ -203,34 +215,34 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 }
 
 // handleTorrentDeletions processes torrent deletions concurrently
-func (m *Manager) handleTorrentDeletions(torrentsToDelete []string) {
+func (m *Manager) handleTorrentDeletions(torrentsToDelete []*storage.Entry) {
 	if len(torrentsToDelete) == 0 {
 		return
 	}
 
 	var deleteWg sync.WaitGroup
-	deleteChan := make(chan string, len(torrentsToDelete))
+	deleteChan := make(chan *storage.Entry, len(torrentsToDelete))
 
 	deleteWorkers := min(refreshDeleteWorkers, len(torrentsToDelete))
 	for range deleteWorkers {
 		deleteWg.Go(func() {
-			for infohash := range deleteChan {
-				if err := m.storage.Delete(infohash); err != nil {
-					m.logger.Error().Err(err).Str("infohash", infohash).Msg("Failed to delete torrent")
+			for entry := range deleteChan {
+				if err := m.storage.DeleteSnapshot(entry); err != nil {
+					m.logger.Error().Err(err).Str("infohash", entry.InfoHash).Msg("Failed to delete torrent")
 				}
 			}
 		})
 	}
 
-	for _, infohash := range torrentsToDelete {
-		deleteChan <- infohash
+	for _, entry := range torrentsToDelete {
+		deleteChan <- entry
 	}
 	close(deleteChan)
 	deleteWg.Wait()
 }
 
 // processNewTorrents processes new torrents with worker pool and batch writing
-func (m *Manager) processNewTorrents(provider string, newTorrents []*types.Torrent) error {
+func (m *Manager) processNewTorrents(provider string, providerSnapshot uint64, newTorrents []*types.Torrent) error {
 	workChan := make(chan *types.Torrent, min(refreshWorkChanBuffer, len(newTorrents)))
 	batchChan := make(chan *storage.Entry, refreshBatchChanBuffer)
 	errChan := make(chan error, 1) // Buffer for first error
@@ -251,7 +263,7 @@ func (m *Manager) processNewTorrents(provider string, newTorrents []*types.Torre
 	for range workers {
 		processWg.Go(func() {
 			for t := range workChan {
-				if mt, err := m.processSyncTorrent(t); err != nil {
+				if mt, err := m.processSyncTorrent(t, providerSnapshot); err != nil {
 					m.logger.Error().Err(err).Str("debrid", provider).Msgf("Failed to process torrent %s", t.Id)
 				} else if mt != nil {
 					batchChan <- mt
@@ -328,7 +340,12 @@ func (m *Manager) runBatchWriter(batchChan <-chan *storage.Entry, errChan chan<-
 }
 
 // processSyncTorrent processes a single torrent and returns it for batched writing
-func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
+func (m *Manager) processSyncTorrent(t *types.Torrent, providerSnapshots ...uint64) (*storage.Entry, error) {
+	var providerSnapshot uint64
+	if len(providerSnapshots) > 0 {
+		providerSnapshot = providerSnapshots[0]
+	}
+
 	// GetReader the debrid client
 	client := m.ProviderClient(t.Debrid)
 	if client == nil {
@@ -359,7 +376,10 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 	// Note: This is a database read per torrent - could be optimized with batch reads
 	// or an in-memory cache, but storage.GetReader is likely fast (indexed by InfoHash)
 	mt, err := m.storage.Get(t.InfoHash)
-	if err != nil {
+	if err != nil && !storage.IsEntryNotFound(err) {
+		return nil, err
+	}
+	if storage.IsEntryNotFound(err) {
 		// Create new managed torrent
 		var magnet *utils.Magnet
 		if t.Magnet == nil || t.Magnet.Link == "" {
@@ -393,12 +413,16 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 			UpdatedAt:        time.Now(),
 		}
 	}
+	if err := m.storage.PrepareProviderEntry(mt, t.Debrid, providerSnapshot); err != nil {
+		return nil, err
+	}
 
 	// Populate global Files metadata (only if empty)
 	if len(mt.Files) == 0 {
 		for _, f := range t.GetFiles() {
 			mt.Files[f.Name] = &storage.File{
 				Name:      f.Name,
+				Path:      f.Path,
 				Size:      f.Size,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,

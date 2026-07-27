@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -19,7 +20,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"github.com/sourcegraph/conc/iter"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type mountCacheCleaner interface {
@@ -36,8 +36,43 @@ func (s *Server) handleGetArrs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := utils.ParseMultipartFormBounded(
+		w,
+		r,
+		utils.MaxImportRequestBytes,
+		utils.MaxMultipartMemoryBytes,
+	); err != nil {
+		if utils.IsRequestTooLarge(err) {
+			http.Error(w, "Import request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Invalid multipart import request", http.StatusBadRequest)
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	if utils.MultipartFormPartCount(r.MultipartForm) > utils.MaxMultipartFormParts {
+		http.Error(
+			w,
+			fmt.Sprintf("Import request exceeds the %d-part limit", utils.MaxMultipartFormParts),
+			http.StatusRequestEntityTooLarge,
+		)
+		return
+	}
+
+	itemCount := countImportLines(r.FormValue("urls")) +
+		countImportLines(r.FormValue("nzbURLs"))
+	if r.MultipartForm != nil {
+		itemCount += len(r.MultipartForm.File["files"])
+		itemCount += len(r.MultipartForm.File["nzbFiles"])
+	}
+	if itemCount > utils.MaxImportItems {
+		http.Error(
+			w,
+			fmt.Sprintf("Import request exceeds the %d-item limit", utils.MaxImportItems),
+			http.StatusRequestEntityTooLarge,
+		)
 		return
 	}
 
@@ -76,24 +111,99 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 		magnet     *utils.Magnet
 		nzbContent []byte
 		name       string
-		source     string // for error messages
+		source     string // redacted source for logs
+		errMessage string
 	}
 
-	var tasks []addTask
+	tasks := make([]addTask, 0, itemCount)
+	var retainedBytes int64
+	remainingBytes := func() int64 {
+		return utils.MaxImportRequestBytes - retainedBytes
+	}
+	reserveBytes := func(size int64) error {
+		if size < 0 || size > remainingBytes() {
+			retainedBytes = utils.MaxImportRequestBytes
+			return fmt.Errorf(
+				"%w: aggregate maximum is %d bytes",
+				utils.ErrContentTooLarge,
+				utils.MaxImportRequestBytes,
+			)
+		}
+		retainedBytes += size
+		return nil
+	}
+	addErrorTask := func(message string) {
+		tasks = append(tasks, addTask{taskType: "error", errMessage: message})
+	}
 
 	// Collect torrent URLs
 	if urls := r.FormValue("urls"); urls != "" {
 		for u := range strings.SplitSeq(urls, "\n") {
 			if trimmed := strings.TrimSpace(u); trimmed != "" {
-				magnet, err := utils.GetMagnetFromUrl(trimmed, rmTrackerUrls)
-				if err != nil {
-					tasks = append(tasks, addTask{
-						taskType: "error",
-						source:   fmt.Sprintf("Failed to parse URL %s: %v", trimmed, err),
-					})
+				safeURL := utils.RedactedURL(trimmed)
+				maxBytes := min(utils.MaxMetadataFileBytes, remainingBytes())
+				if maxBytes <= 0 {
+					addErrorTask("Import metadata exceeds the aggregate byte limit")
 					continue
 				}
-				tasks = append(tasks, addTask{taskType: "torrent", magnet: magnet, source: fmt.Sprintf("URL %s", trimmed)})
+
+				var magnet *utils.Magnet
+				var err error
+				lowerURL := strings.ToLower(trimmed)
+				if strings.HasPrefix(lowerURL, "http://") ||
+					strings.HasPrefix(lowerURL, "https://") {
+					_, torrentData, downloadErr := utils.DownloadFileBounded(
+						ctx,
+						trimmed,
+						maxBytes,
+					)
+					downloaded := int64(len(torrentData))
+					if downloaded == 0 && errors.Is(downloadErr, utils.ErrContentTooLarge) {
+						// A declared Content-Length can be rejected before reading
+						// the body. Pessimistically charge this URL its full
+						// allowance so repeated oversized responses cannot bypass
+						// the aggregate download budget.
+						downloaded = maxBytes
+					}
+					if reserveErr := reserveBytes(downloaded); reserveErr != nil {
+						addErrorTask("Import metadata exceeds the aggregate byte limit")
+						continue
+					}
+					if downloadErr != nil {
+						addErrorTask(fmt.Sprintf(
+							"Failed to fetch torrent URL %s: %v",
+							safeURL,
+							downloadErr,
+						))
+						continue
+					}
+					magnet, err = utils.GetMagnetFromBytes(torrentData, rmTrackerUrls)
+				} else {
+					magnet, err = utils.GetMagnetFromURLContext(
+						ctx,
+						trimmed,
+						rmTrackerUrls,
+						maxBytes,
+					)
+				}
+				if err != nil {
+					addErrorTask(fmt.Sprintf("Failed to parse torrent URL %s: %v", safeURL, err))
+					continue
+				}
+				retained := magnetRetainedBytes(magnet)
+				if magnet.File != nil {
+					// HTTP torrent bytes were already charged above.
+					retained -= int64(len(magnet.File))
+				}
+				if err := reserveBytes(retained); err != nil {
+					addErrorTask("Import metadata exceeds the aggregate byte limit")
+					continue
+				}
+				tasks = append(tasks, addTask{
+					taskType: "torrent",
+					magnet:   magnet,
+					source:   "torrent URL " + safeURL,
+				})
 			}
 		}
 	}
@@ -101,24 +211,49 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	// Collect torrent files
 	if files := r.MultipartForm.File["files"]; len(files) > 0 {
 		for _, fileHeader := range files {
-			file, err := fileHeader.Open()
-			if err != nil {
-				tasks = append(tasks, addTask{
-					taskType: "error",
-					source:   fmt.Sprintf("Failed to open file %s: %v", fileHeader.Filename, err),
-				})
+			maxBytes := min(utils.MaxMetadataFileBytes, remainingBytes())
+			if fileHeader.Size > maxBytes || maxBytes <= 0 {
+				addErrorTask(fmt.Sprintf(
+					"Torrent file %s exceeds the import byte limit",
+					fileHeader.Filename,
+				))
 				continue
 			}
 
-			magnet, err := utils.GetMagnetFromFile(file, fileHeader.Filename, rmTrackerUrls)
+			file, err := fileHeader.Open()
 			if err != nil {
-				tasks = append(tasks, addTask{
-					taskType: "error",
-					source:   fmt.Sprintf("Failed to parse torrent file %s: %v", fileHeader.Filename, err),
-				})
+				addErrorTask(fmt.Sprintf("Failed to open torrent file %s", fileHeader.Filename))
 				continue
 			}
-			tasks = append(tasks, addTask{taskType: "torrent", magnet: magnet, source: fmt.Sprintf("File %s", fileHeader.Filename), name: fileHeader.Filename})
+
+			magnet, parseErr := utils.GetMagnetFromFileBounded(
+				file,
+				fileHeader.Filename,
+				rmTrackerUrls,
+				maxBytes,
+			)
+			closeErr := file.Close()
+			if parseErr == nil && closeErr != nil {
+				parseErr = closeErr
+			}
+			if parseErr != nil {
+				addErrorTask(fmt.Sprintf(
+					"Failed to parse torrent file %s: %v",
+					fileHeader.Filename,
+					parseErr,
+				))
+				continue
+			}
+			if err := reserveBytes(magnetRetainedBytes(magnet)); err != nil {
+				addErrorTask("Import metadata exceeds the aggregate byte limit")
+				continue
+			}
+			tasks = append(tasks, addTask{
+				taskType: "torrent",
+				magnet:   magnet,
+				source:   "torrent file " + fileHeader.Filename,
+				name:     fileHeader.Filename,
+			})
 		}
 	}
 
@@ -126,15 +261,36 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	if nzbURLs := r.FormValue("nzbURLs"); nzbURLs != "" {
 		for u := range strings.SplitSeq(nzbURLs, "\n") {
 			if trimmed := strings.TrimSpace(u); trimmed != "" {
-				filename, content, err := utils.DownloadFile(trimmed, utils.WithHeader("User-Agent", s.nzbUserAgent))
-				if err != nil {
-					tasks = append(tasks, addTask{
-						taskType: "error",
-						source:   fmt.Sprintf("Failed to fetch NZB from URL %s: %v", trimmed, err),
-					})
+				safeURL := utils.RedactedURL(trimmed)
+				maxBytes := min(utils.MaxMetadataFileBytes, remainingBytes())
+				if maxBytes <= 0 {
+					addErrorTask("Import metadata exceeds the aggregate byte limit")
 					continue
 				}
-				tasks = append(tasks, addTask{taskType: "nzb", nzbContent: content, name: filename, source: fmt.Sprintf("NZB URL %s", trimmed)})
+				filename, content, err := utils.DownloadFileBounded(
+					ctx,
+					trimmed,
+					maxBytes,
+					utils.WithHeader("User-Agent", s.nzbUserAgent),
+				)
+				downloaded := int64(len(content))
+				if downloaded == 0 && errors.Is(err, utils.ErrContentTooLarge) {
+					downloaded = maxBytes
+				}
+				if reserveErr := reserveBytes(downloaded); reserveErr != nil {
+					addErrorTask("Import metadata exceeds the aggregate byte limit")
+					continue
+				}
+				if err != nil {
+					addErrorTask(fmt.Sprintf("Failed to fetch NZB from URL %s: %v", safeURL, err))
+					continue
+				}
+				tasks = append(tasks, addTask{
+					taskType:   "nzb",
+					nzbContent: content,
+					name:       filename,
+					source:     "NZB URL " + safeURL,
+				})
 			}
 		}
 	}
@@ -142,16 +298,39 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	// Collect NZB files
 	if nzbFiles := r.MultipartForm.File["nzbFiles"]; len(nzbFiles) > 0 {
 		for _, fileHeader := range nzbFiles {
-			content, err := getNZBContentFromFile(fileHeader)
-			if err != nil {
-				tasks = append(tasks, addTask{
-					taskType: "error",
-					source:   fmt.Sprintf("Failed to read NZB file %s: %v", fileHeader.Filename, err),
-				})
+			maxBytes := min(utils.MaxMetadataFileBytes, remainingBytes())
+			if fileHeader.Size > maxBytes || maxBytes <= 0 {
+				addErrorTask(fmt.Sprintf(
+					"NZB file %s exceeds the import byte limit",
+					fileHeader.Filename,
+				))
 				continue
 			}
-			tasks = append(tasks, addTask{taskType: "nzb", nzbContent: content, source: fmt.Sprintf("NZB File %s", fileHeader.Filename), name: fileHeader.Filename})
+			content, err := getNZBContentFromFile(fileHeader, maxBytes)
+			if err != nil {
+				addErrorTask(fmt.Sprintf(
+					"Failed to read NZB file %s: %v",
+					fileHeader.Filename,
+					err,
+				))
+				continue
+			}
+			if err := reserveBytes(int64(len(content))); err != nil {
+				addErrorTask("Import metadata exceeds the aggregate byte limit")
+				continue
+			}
+			tasks = append(tasks, addTask{
+				taskType:   "nzb",
+				nzbContent: content,
+				source:     "NZB file " + fileHeader.Filename,
+				name:       fileHeader.Filename,
+			})
 		}
+	}
+
+	if len(tasks) == 0 {
+		utils.JSONResponse(w, []*manager.ImportRequest{}, http.StatusOK)
+		return
 	}
 
 	// Parse all tasks in parallel using iter.Map
@@ -165,7 +344,7 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 			// Task already failed during collection phase
 			return &manager.ImportRequest{
 				Status: "error",
-				Error:  fmt.Sprintf("Failed to import torrent %s: %v", task.name, task.magnet),
+				Error:  task.errMessage,
 			}
 
 		case "torrent":
@@ -204,19 +383,35 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, filtered, http.StatusOK)
 }
 
-func getNZBContentFromFile(fileHeader *multipart.FileHeader) ([]byte, error) {
+func getNZBContentFromFile(fileHeader *multipart.FileHeader, maxBytes int64) ([]byte, error) {
 	file, err := fileHeader.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	// Read NZB content
-	nzbContent, err := io.ReadAll(file)
+	nzbContent, err := utils.ReadAllLimited(file, maxBytes)
 	if err != nil {
 		return nil, err
 	}
 	return nzbContent, nil
+}
+
+func countImportLines(values string) int {
+	count := 0
+	for value := range strings.SplitSeq(values, "\n") {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func magnetRetainedBytes(magnet *utils.Magnet) int64 {
+	if magnet == nil {
+		return 0
+	}
+	return int64(len(magnet.File)) + int64(len(magnet.Link)) + int64(len(magnet.Name))
 }
 
 func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
@@ -422,21 +617,7 @@ func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No hash provided", http.StatusBadRequest)
 		return
 	}
-	var cleanup func(torrent *storage.Entry) error
-
-	if removeFromDebrid {
-		cleanup = func(t *storage.Entry) error {
-			exists, _ := s.manager.EntryExists(t.InfoHash)
-			if exists {
-				// Remove the entry from manager fully, which will handle removing from debrid and deleting the entry
-				return s.manager.DeleteEntry(t.InfoHash, true)
-			}
-			go s.manager.RemoveTorrentPlacements(t)
-			return nil
-		}
-	}
-
-	if err := s.manager.Queue().Delete(hash, cleanup); err != nil {
+	if err := s.manager.DeleteQueueEntry(hash, removeFromDebrid); err != nil {
 		s.logger.Error().Err(err).Str("hash", hash).Msg("Failed to delete entry from queue")
 		http.Error(w, "Failed to delete entry from queue", http.StatusInternalServerError)
 		return
@@ -453,19 +634,7 @@ func (s *Server) handleDeleteTorrents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hashes := strings.Split(hashesStr, ",")
-	var cleanup func(torrent *storage.Entry) error
-	if removeFromDebrid {
-		cleanup = func(t *storage.Entry) error {
-			exists, _ := s.manager.EntryExists(t.InfoHash)
-			if exists {
-				// Remove the entry from manager fully, which will handle removing from debrid and deleting the entry
-				return s.manager.DeleteEntry(t.InfoHash, true)
-			}
-			go s.manager.RemoveTorrentPlacements(t)
-			return nil
-		}
-	}
-	if err := s.manager.Queue().DeleteWhere("", config.ProtocolAll, "", hashes, cleanup); err != nil {
+	if err := s.manager.DeleteQueueEntries(hashes, removeFromDebrid); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to delete torrents")
 		http.Error(w, "Failed to delete torrents", http.StatusInternalServerError)
 		return
@@ -547,6 +716,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	newConfig.Arrs = validArrs
 
+	if err := validateConfigUpdate(newConfig); err != nil {
+		s.logger.Warn().Err(err).Msg("Rejected unsafe configuration update")
+		http.Error(w, "Invalid configuration: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Save the updated config. This also applies defaults to newConfig, so the
 	// restart comparison below sees a fully-normalized config on both sides.
 	if err := newConfig.Save(); err != nil {
@@ -579,6 +754,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)
+}
+
+func validateConfigUpdate(candidate *config.Config) error {
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	if err := candidate.ValidateDeployment(); err != nil {
+		return fmt.Errorf("deployment safety check: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) handleGetRepairConfig(w http.ResponseWriter, r *http.Request) {
@@ -985,25 +1170,56 @@ func (s *Server) handleRefreshAPIToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	if !cfg.UseAuth && !isLoopbackBindAddress(cfg.BindAddress) {
+		http.Error(
+			w,
+			"Authentication must be enabled from the host with --set-auth before remote access",
+			http.StatusForbidden,
+		)
+		return
+	}
+
 	var req struct {
 		Username        string `json:"username"`
 		Password        string `json:"password"`
 		ConfirmPassword string `json:"confirm_password"`
 	}
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := utils.DecodeJSONRequestBounded(
+		w,
+		r,
+		&req,
+		utils.MaxControlRequestBytes,
+	); err != nil {
+		if utils.IsRequestTooLarge(err) {
+			http.Error(w, "Request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
-	}
-
-	cfg := config.Get()
-	auth := cfg.GetAuth()
-	if auth == nil {
-		auth = &config.Auth{}
 	}
 
 	// Check if trying to disable authentication (both empty)
 	if req.Username == "" && req.Password == "" {
+		if !cfg.UseAuth {
+			http.Error(w, "Authentication is already disabled", http.StatusBadRequest)
+			return
+		}
+		if !isLoopbackBindAddress(cfg.BindAddress) {
+			http.Error(
+				w,
+				"Authentication cannot be disabled on a non-loopback listener",
+				http.StatusForbidden,
+			)
+			return
+		}
+
 		// Disable authentication
+		auth := cfg.GetAuth()
+		if auth == nil {
+			http.Error(w, "Authentication is not configured", http.StatusConflict)
+			return
+		}
 		cfg.UseAuth = false
 		auth.Username = ""
 		auth.Password = ""
@@ -1024,36 +1240,17 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if req.Username == "" {
-		http.Error(w, "Username is required", http.StatusBadRequest)
-		return
-	}
-	if req.Password == "" {
-		http.Error(w, "Password is required", http.StatusBadRequest)
-		return
-	}
 	if req.Password != req.ConfirmPassword {
 		http.Error(w, "Passwords do not match", http.StatusBadRequest)
 		return
 	}
 
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to hash password")
-		http.Error(w, "Failed to process password", http.StatusInternalServerError)
+	if err := config.ValidateAuthCredentials(req.Username, req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Update auth settings
-	auth.Username = req.Username
-	auth.Password = string(hashedPassword)
-	cfg.UseAuth = true
-
-	// Save auth config
-	if err := cfg.SaveAuth(auth); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to save auth config")
+	if err := cfg.SetAuthCredentials(req.Username, req.Password); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to save authentication settings")
 		http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
 		return
 	}

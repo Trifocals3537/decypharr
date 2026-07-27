@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	json "github.com/bytedance/sonic"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestSecretKeyGeneratesAndPersistsPerInstallSecret(t *testing.T) {
@@ -157,6 +158,80 @@ func TestSecretKeyFailsWhenNewSecretCannotBePersisted(t *testing.T) {
 	}
 	if string(got) != blocker {
 		t.Fatalf("blocking file = %q, want %q", got, blocker)
+	}
+}
+
+func TestSetAuthCredentialsValidatesAndPreservesInstallSecrets(t *testing.T) {
+	configDir := useTemporaryConfigPath(t)
+	cfg := &Config{
+		Auth: &Auth{
+			APIToken:      "existing-api-token",
+			SessionSecret: "existing-session-secret",
+		},
+	}
+
+	if err := cfg.SetAuthCredentials(" admin ", "secret-password"); err != nil {
+		t.Fatalf("SetAuthCredentials() error = %v", err)
+	}
+	if !cfg.UseAuth {
+		t.Fatal("SetAuthCredentials() did not enable authentication")
+	}
+	if cfg.Auth.Username != "admin" {
+		t.Fatalf("username = %q, want trimmed username", cfg.Auth.Username)
+	}
+	if cfg.Auth.Password == "secret-password" {
+		t.Fatal("password was stored in plaintext")
+	}
+	if err := bcrypt.CompareHashAndPassword(
+		[]byte(cfg.Auth.Password),
+		[]byte("secret-password"),
+	); err != nil {
+		t.Fatalf("persisted password hash did not verify: %v", err)
+	}
+	if cfg.Auth.APIToken != "existing-api-token" {
+		t.Fatal("API token was replaced")
+	}
+	if cfg.Auth.SessionSecret != "existing-session-secret" {
+		t.Fatal("session secret was replaced")
+	}
+
+	data, err := os.ReadFile(filepath.Join(configDir, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Auth
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Username != "admin" ||
+		persisted.APIToken != "existing-api-token" ||
+		persisted.SessionSecret != "existing-session-secret" {
+		t.Fatalf("unexpected persisted authentication: %#v", persisted)
+	}
+}
+
+func TestValidateAuthCredentialsRejectsUnsafeValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "empty username", password: "123456"},
+		{name: "whitespace username", username: "   ", password: "123456"},
+		{name: "long username", username: strings.Repeat("u", MaxAuthUsernameBytes+1), password: "123456"},
+		{name: "short password", username: "admin", password: "12345"},
+		{name: "bcrypt overflow", username: "admin", password: strings.Repeat("p", MaxAuthPasswordBytes+1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateAuthCredentials(test.username, test.password); err == nil {
+				t.Fatal("ValidateAuthCredentials() error = nil")
+			}
+		})
+	}
+
+	if err := ValidateAuthCredentials("admin", "123456"); err != nil {
+		t.Fatalf("valid credentials rejected: %v", err)
 	}
 }
 

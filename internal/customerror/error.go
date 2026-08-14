@@ -56,11 +56,21 @@ func (e *Error) IsSilent() bool {
 	return IsSilentError(e.err)
 }
 
+// HTTPStatus returns the status associated with an error. Internal errors and
+// legacy custom errors without an explicit status remain HTTP 500.
+func (e *Error) HTTPStatus() int {
+	if e == nil || e.statusCode < 400 || e.statusCode > 599 {
+		return http.StatusInternalServerError
+	}
+	return e.statusCode
+}
+
 func NewError(err error, statusCode int, code string, silent bool, headersWritten bool) *Error {
 	return &Error{
 		err:            err,
 		silent:         silent,
 		statusCode:     statusCode,
+		Code:           code,
 		HeadersWritten: headersWritten,
 	}
 }
@@ -132,6 +142,8 @@ func NewArticleNotFoundError(err error) *Error {
 		err = errors.New("article not found")
 	}
 	return (&Error{
-		err: err,
+		err:        err,
+		statusCode: http.StatusGone,
+		Code:       "usenet_article_not_found",
 	}).Permanent()
 }

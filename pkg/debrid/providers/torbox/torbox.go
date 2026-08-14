@@ -39,6 +39,7 @@ const (
 	// A TorBox list is an authoritative provider snapshot. These ceilings keep
 	// an ignored offset or a hostile response from turning refresh into an
 	// unbounded loop/allocation while remaining generous for real accounts.
+	torboxTorrentListPageSize = 1_000
 	torboxTorrentListMaxPages = 1_000
 	torboxTorrentListMaxItems = 100_000
 )
@@ -615,11 +616,12 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 	return tb.getTorrentsBounded(
 		torboxTorrentListMaxPages,
 		torboxTorrentListMaxItems,
+		torboxTorrentListPageSize,
 	)
 }
 
-func (tb *Torbox) getTorrentsBounded(maxPages, maxItems int) ([]*types.Torrent, error) {
-	if maxPages <= 0 || maxItems <= 0 {
+func (tb *Torbox) getTorrentsBounded(maxPages, maxItems, pageSize int) ([]*types.Torrent, error) {
+	if maxPages <= 0 || maxItems <= 0 || pageSize <= 0 {
 		return nil, fmt.Errorf("torbox torrent list bounds must be positive")
 	}
 
@@ -628,7 +630,7 @@ func (tb *Torbox) getTorrentsBounded(maxPages, maxItems int) ([]*types.Torrent, 
 	seenIDs := make(map[string]int)
 
 	for page := 0; page < maxPages; page++ {
-		torrents, err := tb.getTorrents(offset)
+		torrents, err := tb.getTorrents(offset, pageSize)
 		if err != nil {
 			// Never expose a partial list: manager reconciliation treats this
 			// return value as the provider's complete authoritative snapshot.
@@ -662,6 +664,14 @@ func (tb *Torbox) getTorrentsBounded(maxPages, maxItems int) ([]*types.Torrent, 
 			seenIDs[torrent.Id] = offset
 		}
 		allTorrents = append(allTorrents, torrents...)
+		// TorBox documents limit as the maximum number of items returned by
+		// /mylist. A short page is therefore terminal. Avoiding a speculative
+		// empty-page request matters when bypass_cache is enabled: each request
+		// may observe a newer list, so a shifted boundary can otherwise repeat
+		// an ID and reject an otherwise complete snapshot.
+		if len(torrents) < pageSize {
+			return allTorrents, nil
+		}
 		nextOffset := offset + len(torrents)
 		if nextOffset <= offset {
 			return nil, fmt.Errorf(
@@ -677,12 +687,13 @@ func (tb *Torbox) getTorrentsBounded(maxPages, maxItems int) ([]*types.Torrent, 
 	)
 }
 
-func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
+func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 	var res TorrentsListResponse
 
 	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{
 		"bypass_cache": "true",
 		"offset":       strconv.Itoa(offset),
+		"limit":        strconv.Itoa(limit),
 	}, &res)
 	if err != nil {
 		return nil, err

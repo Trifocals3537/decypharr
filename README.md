@@ -99,6 +99,28 @@ services:
       - apparmor:unconfined
 ```
 
+If Plex, Jellyfin, Emby, or another consumer runs in a separate Linux
+container, do not use Docker's default `rprivate` bind for the Decypharr mount.
+Mount it read-only with `rslave` so a Decypharr unmount/remount propagates from
+the host into the already-running media container:
+
+```yaml
+services:
+  jellyfin:
+    volumes:
+      - type: bind
+        source: /mnt/decypharr
+        target: /mnt/decypharr
+        read_only: true
+        bind:
+          propagation: rslave
+```
+
+Without this, the host mount can be healthy while the media container keeps the
+old FUSE mount and reports `Transport endpoint is not connected`. See the
+[Docker installation notes](docs/src/content/docs/guides/installation.md#media-server-containers)
+for verification and managed-host guidance.
+
 > Prefer not to self-host? A managed Decypharr instance is available
 > via [ElfHosted](https://store.elfhosted.com/product/decypharr/?utm_source=github&utm_medium=readme&utm_campaign=decypharr-readme),
 > preconfigured alongside Sonarr/Radarr to route requests to your debrid provider (7-day trial).

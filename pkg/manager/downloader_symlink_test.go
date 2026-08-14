@@ -63,6 +63,13 @@ func TestCreateUsenetSymlinksSkipsMatchingDirectoryName(t *testing.T) {
 	if err := os.WriteFile(wantTarget, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	probeLink := filepath.Join(mountPath, "symlink-capability-probe")
+	if err := os.Symlink(wantTarget, probeLink); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	if err := os.Remove(probeLink); err != nil {
+		t.Fatalf("remove symlink capability probe: %v", err)
+	}
 
 	symlinkDir, _, err := claimUsenetEntryDirectory(downloadRoot, entry)
 	if err != nil {

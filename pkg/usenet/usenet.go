@@ -181,9 +181,7 @@ type contextSectionReader struct {
 }
 
 func newContextSectionReader(ctx context.Context, r fs.PrefetchableReaderAt, off, length int64) *contextSectionReader {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = reader.WithPrefetchSession(ctx)
 	return &contextSectionReader{
 		ctx:   ctx,
 		r:     r,
@@ -865,9 +863,8 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	if u.prefetchSize > 0 && prefetchLen > u.prefetchSize {
 		prefetchLen = u.prefetchSize
 	}
-	readerAt.Prefetch(ctx, rangeStart, prefetchLen)
-
 	section := newContextSectionReader(ctx, readerAt, rangeStart, length)
+	readerAt.Prefetch(section.ctx, rangeStart, prefetchLen)
 	buf := acquireStreamBuffer()
 	defer releaseStreamBuffer(buf)
 

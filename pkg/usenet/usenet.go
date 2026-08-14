@@ -338,6 +338,9 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 // getOrCreateEntry returns the fsEntry and its cache key to avoid redundant key computation.
 func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (*fsEntry, string, error) {
 	key := fsKey(nzoID, filename)
+	if err := u.CheckStreamReady(nzoID, filename); err != nil {
+		return nil, key, err
+	}
 
 	// Fast path: entry already exists and isn't being torn down. acquire() (a
 	// CAS, not a blind Add) is what closes the race against cleanupIdleFS:
@@ -800,11 +803,21 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 		return fmt.Errorf("file has no Segments: %s", file.Name)
 	}
 
-	// Check if file was marked as failed previously
-	if cause, ok := u.failedFiles.Load(fsKey(file.NzbID, file.Name)); ok {
-		return customerror.NewSilentError(cause).Permanent()
-	}
+	return u.CheckStreamReady(file.NzbID, file.Name)
+}
 
+// CheckStreamReady returns a permanent error for a file whose serving path has
+// already proven that an article is missing across all configured providers.
+// Callers use this before writing response headers so later WebDAV requests
+// receive a complete HTTP error instead of a successful response with a
+// truncated body that clients may retry indefinitely.
+func (u *Usenet) CheckStreamReady(nzoID, filename string) error {
+	if u == nil || u.failedFiles == nil {
+		return nil
+	}
+	if cause, ok := u.failedFiles.Load(fsKey(nzoID, filename)); ok {
+		return customerror.NewArticleNotFoundError(cause)
+	}
 	return nil
 }
 

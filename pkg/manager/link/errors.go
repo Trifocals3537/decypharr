@@ -3,6 +3,9 @@ package link
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
+	"time"
 )
 
 // ErrorCategory defines the type of link error and its retry behavior
@@ -17,6 +20,8 @@ const (
 	CategoryRefetchable
 	// CategoryAccountIssue - Disable account (bandwidth exceeded)
 	CategoryAccountIssue
+	// CategoryThrottled - wait and retry the same link (429)
+	CategoryThrottled
 )
 
 // String returns a human-readable name for the error category
@@ -30,6 +35,8 @@ func (c ErrorCategory) String() string {
 		return "refetchable"
 	case CategoryAccountIssue:
 		return "account_issue"
+	case CategoryThrottled:
+		return "throttled"
 	default:
 		return "unknown"
 	}
@@ -37,9 +44,10 @@ func (c ErrorCategory) String() string {
 
 // Error represents a structured error with retry semantics
 type Error struct {
-	Err      error
-	Category ErrorCategory
-	Code     string // Error code from provider (e.g., "bandwidth_exceeded", "404")
+	Err        error
+	Category   ErrorCategory
+	Code       string        // Error code from provider (e.g., "bandwidth_exceeded", "404")
+	RetryAfter time.Duration // server-requested delay for throttled responses
 }
 
 // Error implements the error interface
@@ -68,6 +76,17 @@ func (e *Error) ShouldRefetch() bool {
 // ShouldDisableAccount returns true if the account should be disabled
 func (e *Error) ShouldDisableAccount() bool {
 	return e.Category == CategoryAccountIssue
+}
+
+// ShouldBackoff reports whether the same link should be retried after a delay.
+func (e *Error) ShouldBackoff() bool {
+	return e.Category == CategoryThrottled
+}
+
+// IsRetryable allows callers outside this package to preserve transient error
+// semantics without importing ErrorCategory.
+func (e *Error) IsRetryable() bool {
+	return e.Category != CategoryPermanent
 }
 
 // IsPermanent returns true if the error is permanent and no retry should happen
@@ -130,7 +149,7 @@ func NewAccountError(err error, code string) *Error {
 func ErrorCodeToLinkError(code string) *Error {
 	switch code {
 	case "link_not_found":
-		return NewPermanentError(ErrLinkNotFound, code)
+		return NewRefetchableError(ErrLinkNotFound, code)
 	case "bandwidth_exceeded", "quota_exceeded", "daily_limit_exceeded", "bytes_limit_reached":
 		return NewAccountError(ErrBandwidthExceeded, code)
 	case "link_expired":
@@ -142,14 +161,52 @@ func ErrorCodeToLinkError(code string) *Error {
 	case "401", "unauthorized":
 		return NewPermanentError(ErrUnauthorized, code)
 	case "404":
-		return NewPermanentError(Err404, code)
+		return NewRefetchableError(Err404, code)
 	case "429":
-		return NewRetryableError(Err429, code)
-	case "503":
-		return NewRetryableError(Err503, code)
+		return NewLinkError(Err429, CategoryThrottled, code)
+	case "408", "425", "500", "502", "503", "504", "read_pxy_timeout":
+		return NewRetryableError(fmt.Errorf("temporary download-link failure: %s", code), code)
 	default:
 		return NewPermanentError(fmt.Errorf("unknown error code: %s", code), code)
 	}
+}
+
+// ClassifyHTTPStatus classifies errors returned by a generated download URL.
+// Authentication-shaped statuses at this layer usually mean the signed link
+// rotated or expired, while throttling and 5xx failures should reuse the same
+// URL instead of creating provider API traffic.
+func ClassifyHTTPStatus(status int, header http.Header) *Error {
+	switch {
+	case status == http.StatusBadRequest || status == http.StatusUnauthorized ||
+		status == http.StatusForbidden || status == http.StatusNotFound ||
+		status == http.StatusGone:
+		return NewRefetchableError(fmt.Errorf("HTTP %d: download link rejected", status), strconv.Itoa(status))
+	case status == http.StatusRequestedRangeNotSatisfiable:
+		return NewPermanentError(errors.New("HTTP 416: requested range not satisfiable"), "416")
+	case status == http.StatusTooManyRequests:
+		err := NewLinkError(Err429, CategoryThrottled, "429")
+		err.RetryAfter = parseRetryAfter(header.Get("Retry-After"), time.Now())
+		return err
+	case status == http.StatusRequestTimeout || status == http.StatusTooEarly || status >= 500:
+		return NewRetryableError(fmt.Errorf("HTTP %d", status), strconv.Itoa(status))
+	default:
+		return NewPermanentError(fmt.Errorf("unexpected HTTP status %d", status), strconv.Itoa(status))
+	}
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		if delay := at.Sub(now); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 // IsLinkError checks if an error is a LinkError

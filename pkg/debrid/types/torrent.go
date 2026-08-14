@@ -159,6 +159,27 @@ type DownloadLink struct {
 	ExpiresAt    time.Time
 }
 
+const maxDownloadLinkRefreshSkew = time.Minute
+
+// NeedsRefresh reports whether a cached download link is expired or close
+// enough to expiry that starting a new stream with it would be risky. The
+// skew is capped at ten percent of a known lifetime so short-lived links do
+// not become immediately unusable.
+func (dl *DownloadLink) NeedsRefresh(now time.Time) bool {
+	if dl == nil || dl.ExpiresAt.IsZero() {
+		return false
+	}
+
+	skew := maxDownloadLinkRefreshSkew
+	if !dl.Generated.IsZero() && dl.ExpiresAt.After(dl.Generated) {
+		if lifetimeSkew := dl.ExpiresAt.Sub(dl.Generated) / 10; lifetimeSkew < skew {
+			skew = lifetimeSkew
+		}
+	}
+
+	return !now.Add(skew).Before(dl.ExpiresAt)
+}
+
 func (dl *DownloadLink) Valid() error {
 	if dl.Empty() {
 		return EmptyDownloadLinkError

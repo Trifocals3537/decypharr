@@ -601,7 +601,7 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 	dl := types.DownloadLink{
 		Filename:     file.Name,
 		Size:         file.Size,
-		Token:        tb.APIKey,
+		Token:        account.Token,
 		Link:         file.Link,
 		DownloadLink: downloadURL,
 		Debrid:       tb.config.Name,

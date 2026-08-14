@@ -49,6 +49,10 @@ func (a *Account) sliceFileLink(fileLink string) string {
 func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
 	slicedLink := a.sliceFileLink(file.Link)
 	dl, ok := a.links.Load(slicedLink)
+	if ok && dl.NeedsRefresh(time.Now()) {
+		a.links.Delete(slicedLink)
+		ok = false
+	}
 	if !ok {
 		var err error
 		dl, err = fetcher(a, id, file)
@@ -67,9 +71,17 @@ func (a *Account) storeLink(dl types.DownloadLink) {
 	slicedLink := a.sliceFileLink(dl.Link)
 	a.links.Store(slicedLink, dl)
 }
-func (a *Account) DeleteLink(link types.DownloadLink, deleter LinkDeleter) error {
+
+// InvalidateLink evicts only Decypharr's cached URL. It deliberately does not
+// invoke a provider deletion endpoint because link refresh must never remove
+// the user's remote download or download-history record.
+func (a *Account) InvalidateLink(link types.DownloadLink) {
 	slicedLink := a.sliceFileLink(link.Link)
 	a.links.Delete(slicedLink)
+}
+
+func (a *Account) DeleteLink(link types.DownloadLink, deleter LinkDeleter) error {
+	a.InvalidateLink(link)
 	if deleter != nil {
 		return deleter(a, link)
 	}

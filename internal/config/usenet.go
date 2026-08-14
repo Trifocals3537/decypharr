@@ -46,6 +46,10 @@ type Usenet struct {
 	SocketWriteBuffer string `json:"socket_write_buffer,omitempty"`
 	// Processing timeout
 	ProcessingTimeout string `json:"processing_timeout,omitempty"` // Timeout for NZB processing e.g. "5m", "10m" (default: 10m). Mark as bad if exceeded.
+	// ConnIdleTimeout controls how long an unused pooled NNTP connection stays
+	// warm before it is closed. Idle connections are keepalive-pinged so bursty
+	// playback does not pay for a TCP+TLS+AUTH reconnect on every resume.
+	ConnIdleTimeout string `json:"conn_idle_timeout,omitempty"` // Default: 5m
 	// Availability check sampling
 	AvailabilitySamplePercent       int    `json:"availability_sample_percent,omitempty"`        // Percentage of segments to check during repair (1-100, default: 10)
 	ImportAvailabilitySamplePercent int    `json:"import_availability_sample_percent,omitempty"` // Percentage of segments to check when adding an NZB (1-100, default: 1)
@@ -197,6 +201,9 @@ func (c *Config) applyUsenetEnvVars() {
 
 	if processingTimeout := getEnv("USENET__PROCESSING_TIMEOUT"); processingTimeout != "" {
 		c.Usenet.ProcessingTimeout = processingTimeout
+	}
+	if idleTimeout := getEnv("USENET__CONN_IDLE_TIMEOUT"); idleTimeout != "" {
+		c.Usenet.ConnIdleTimeout = idleTimeout
 	}
 
 	if availabilitySample := getEnv("USENET__AVAILABILITY_SAMPLE_PERCENT"); availabilitySample != "" {

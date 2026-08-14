@@ -181,9 +181,7 @@ type contextSectionReader struct {
 }
 
 func newContextSectionReader(ctx context.Context, r fs.PrefetchableReaderAt, off, length int64) *contextSectionReader {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = reader.WithPrefetchSession(ctx)
 	return &contextSectionReader{
 		ctx:   ctx,
 		r:     r,
@@ -223,6 +221,7 @@ type Usenet struct {
 	processingMaxConnections int         // Connections allocated per file for parsing and NZB downloads
 	prefetchSize             int64       // Streaming prefetch size in bytes
 	failedFiles              *xsync.Map[string, error]
+	contentVerifySlots       chan struct{} // Deep repair probes are serialized to protect playback.
 
 	fs *xsync.Map[string, *fsEntry]
 
@@ -305,6 +304,7 @@ func New() (*Usenet, error) {
 		prefetchSize:             prefetchSize,
 		fs:                       xsync.NewMap[string, *fsEntry](),
 		failedFiles:              xsync.NewMap[string, error](),
+		contentVerifySlots:       make(chan struct{}, 1),
 	}
 
 	// Start background cleanup for idle sessions
@@ -319,6 +319,14 @@ func initStreamsDir(streamsDir string) error {
 }
 
 func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
+	return u.createEntryWithReadLimits(file, u.maxConnections, u.prefetchSize)
+}
+
+// createEntryWithReadLimits builds an isolated reader with explicit
+// concurrency and read-ahead limits. Deep verification uses one foreground
+// connection and no prefetch so a 512-byte probe cannot fan out into a full
+// streaming window.
+func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent int, prefetchSize int64) (*fsEntry, error) {
 	volumes := GetFileVolumes(file)
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes available for file %s", file.Name)
@@ -326,7 +334,10 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 
 	fsCtx := context.Background()
 
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger)
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	usenetFS, err := fs.NewFS(fsCtx, u.nntp, maxConcurrent, prefetchSize, volumes, u.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -340,6 +351,9 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 // getOrCreateEntry returns the fsEntry and its cache key to avoid redundant key computation.
 func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (*fsEntry, string, error) {
 	key := fsKey(nzoID, filename)
+	if err := u.CheckStreamReady(nzoID, filename); err != nil {
+		return nil, key, err
+	}
 
 	// Fast path: entry already exists and isn't being torn down. acquire() (a
 	// CAS, not a blind Add) is what closes the race against cleanupIdleFS:
@@ -802,11 +816,21 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 		return fmt.Errorf("file has no Segments: %s", file.Name)
 	}
 
-	// Check if file was marked as failed previously
-	if cause, ok := u.failedFiles.Load(fsKey(file.NzbID, file.Name)); ok {
-		return customerror.NewSilentError(cause).Permanent()
-	}
+	return u.CheckStreamReady(file.NzbID, file.Name)
+}
 
+// CheckStreamReady returns a permanent error for a file whose serving path has
+// already proven that an article is missing across all configured providers.
+// Callers use this before writing response headers so later WebDAV requests
+// receive a complete HTTP error instead of a successful response with a
+// truncated body that clients may retry indefinitely.
+func (u *Usenet) CheckStreamReady(nzoID, filename string) error {
+	if u == nil || u.failedFiles == nil {
+		return nil
+	}
+	if cause, ok := u.failedFiles.Load(fsKey(nzoID, filename)); ok {
+		return customerror.NewArticleNotFoundError(cause)
+	}
 	return nil
 }
 
@@ -865,9 +889,8 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	if u.prefetchSize > 0 && prefetchLen > u.prefetchSize {
 		prefetchLen = u.prefetchSize
 	}
-	readerAt.Prefetch(ctx, rangeStart, prefetchLen)
-
 	section := newContextSectionReader(ctx, readerAt, rangeStart, length)
+	readerAt.Prefetch(section.ctx, rangeStart, prefetchLen)
 	buf := acquireStreamBuffer()
 	defer releaseStreamBuffer(buf)
 

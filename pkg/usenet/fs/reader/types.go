@@ -143,7 +143,7 @@ func PrefetchAheadSegments(readAheadBytes int64, segments []SegmentMeta) int {
 	const (
 		fallbackSegBytes = 750 * 1024 // typical usenet segment
 		minAhead         = 16
-		maxAhead         = 256 // matches the prefetch channel depth
+		maxAhead         = 256 // matches the bounded prefetch scheduler depth
 	)
 	if readAheadBytes <= 0 {
 		return 0
@@ -228,25 +228,31 @@ type ReaderStats struct {
 	DownloadErrors  atomic.Int64
 
 	// Prefetch
-	PrefetchHits   atomic.Int64
-	PrefetchMisses atomic.Int64
+	PrefetchHits       atomic.Int64
+	PrefetchMisses     atomic.Int64
+	PrefetchCancelled  atomic.Int64 // stale hints removed for one canceled/seeking consumer
+	PrefetchRebalanced atomic.Int64 // far-ahead hints displaced to give another consumer a fair share
+	PrefetchCoalesced  atomic.Int64 // duplicate cross-consumer hints served by one active fetch
 }
 
 // Snapshot returns a copy of the current stats.
 func (s *ReaderStats) Snapshot() map[string]int64 {
 	return map[string]int64{
-		"reads":            s.Reads.Load(),
-		"bytes_read":       s.BytesRead.Load(),
-		"read_errors":      s.ReadErrors.Load(),
-		"cache_hits":       s.CacheHits.Load(),
-		"cache_misses":     s.CacheMisses.Load(),
-		"evictions":        s.Evictions.Load(),
-		"downloads":        s.Downloads.Load(),
-		"download_bytes":   s.DownloadBytes.Load(),
-		"download_retries": s.DownloadRetries.Load(),
-		"download_errors":  s.DownloadErrors.Load(),
-		"prefetch_hits":    s.PrefetchHits.Load(),
-		"prefetch_misses":  s.PrefetchMisses.Load(),
+		"reads":               s.Reads.Load(),
+		"bytes_read":          s.BytesRead.Load(),
+		"read_errors":         s.ReadErrors.Load(),
+		"cache_hits":          s.CacheHits.Load(),
+		"cache_misses":        s.CacheMisses.Load(),
+		"evictions":           s.Evictions.Load(),
+		"downloads":           s.Downloads.Load(),
+		"download_bytes":      s.DownloadBytes.Load(),
+		"download_retries":    s.DownloadRetries.Load(),
+		"download_errors":     s.DownloadErrors.Load(),
+		"prefetch_hits":       s.PrefetchHits.Load(),
+		"prefetch_misses":     s.PrefetchMisses.Load(),
+		"prefetch_cancelled":  s.PrefetchCancelled.Load(),
+		"prefetch_rebalanced": s.PrefetchRebalanced.Load(),
+		"prefetch_coalesced":  s.PrefetchCoalesced.Load(),
 	}
 }
 

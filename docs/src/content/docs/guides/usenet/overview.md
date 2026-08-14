@@ -140,6 +140,25 @@ allowed by TorBox.
 
 Prefetch buffer for smoother playback. Higher = smoother but more memory.
 
+### Connection Idle Timeout
+
+```json
+{
+  "usenet": {
+    "conn_idle_timeout": "5m"
+  }
+}
+```
+
+How long an unused NNTP connection stays warm in the pool before it is closed
+(default: `5m`). Decypharr periodically keepalive-pings idle connections and
+verifies them before reuse. This avoids repeated TCP, TLS, and authentication
+setup when a player reads in bursts or resumes after a short pause. Lower the
+value only when a provider enforces a shorter idle-session limit.
+
+Container users can set the same value with
+`USENET__CONN_IDLE_TIMEOUT=5m`.
+
 ### Processing Limits
 
 ```json
@@ -171,6 +190,11 @@ Use `availability_sample_percent` for repair checks and
 - `100`: Check all segments (slow but accurate)
 - `10`: Check 10% (fast but may miss issues)
 - `1`: Quick import check (default)
+
+Availability checks do not inspect decoded media bytes. A manual repair run
+can optionally add a conservative, bounded content-signature check for common
+media containers. It is never run automatically during import or scheduled
+repair; see [Health Checker & Repair](../../repair/#optional-nzb-content-verification).
 
 ## Disk Buffer
 

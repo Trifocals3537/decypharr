@@ -830,12 +830,34 @@ func (s *Server) handleRepairStatus(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, svc.Status(), http.StatusOK)
 }
 
+// normalizeContentVerificationOptions makes a deep verification run safe by
+// default. It is detect-only unless the caller explicitly asks for repair, and
+// an omitted protocol narrows to NZB instead of spending time probing torrents
+// that cannot use the content verifier.
+func normalizeContentVerificationOptions(verifyContent bool, autoRepair *bool, protocolScope string) (*bool, string, error) {
+	if !verifyContent {
+		return autoRepair, protocolScope, nil
+	}
+	if protocolScope == "torrent" {
+		return autoRepair, protocolScope, errors.New("verify_content requires protocol nzb or all")
+	}
+	if protocolScope == "" {
+		protocolScope = "nzb"
+	}
+	if autoRepair == nil {
+		detectOnly := false
+		autoRepair = &detectOnly
+	}
+	return autoRepair, protocolScope, nil
+}
+
 func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IgnoreLastChecked bool   `json:"ignore_last_checked,omitempty"`
 		Force             bool   `json:"force,omitempty"`
 		AutoRepair        *bool  `json:"auto_repair,omitempty"`
 		UnrestrictLink    bool   `json:"unrestrict_link,omitempty"`
+		VerifyContent     bool   `json:"verify_content,omitempty"`
 		Protocol          string `json:"protocol,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
@@ -869,6 +891,13 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	case "0", "false", "no", "off":
 		unrestrictLink = false
 	}
+	verifyContent := req.VerifyContent
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("verify_content"))) {
+	case "1", "true", "yes", "on":
+		verifyContent = true
+	case "0", "false", "no", "off":
+		verifyContent = false
+	}
 	protocolScope := strings.ToLower(strings.TrimSpace(req.Protocol))
 	if queryProtocol := strings.TrimSpace(r.URL.Query().Get("protocol")); queryProtocol != "" {
 		protocolScope = strings.ToLower(queryProtocol)
@@ -882,6 +911,11 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid protocol; expected all, torrent, or nzb", http.StatusBadRequest)
 		return
 	}
+	autoRepair, protocolScope, err := normalizeContentVerificationOptions(verifyContent, autoRepair, protocolScope)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	svc := s.manager.Repair()
 	if svc == nil {
@@ -892,6 +926,7 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		IgnoreLastChecked: ignoreLastChecked,
 		AutoRepair:        autoRepair,
 		UnrestrictLink:    unrestrictLink,
+		VerifyContent:     verifyContent,
 		ProtocolScope:     protocolScope,
 	})
 	if err != nil {

@@ -194,10 +194,18 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, p []byte, off int64)
 	sr.cache.PinRange(startSeg, endSeg)
 	defer sr.cache.UnpinRange(startSeg, endSeg)
 
+	// Track seek position per consumer, not globally. A distant seek may drop
+	// this session's stale queued hints, but it must never discard read-ahead
+	// requested by another viewer sharing the same StreamingReader.
+	session := prefetchSessionFromContext(ctx)
+	if session != nil && session.observeRead(startSeg, endSeg, sr.config.PrefetchAhead) {
+		sr.fetcher.CancelPendingPrefetch(session)
+	}
+
 	// Queue prefetch for read-ahead (non-blocking)
 	prefetchEnd := min(endSeg+sr.config.PrefetchAhead, sr.segCount-1)
 	if prefetchEnd > endSeg {
-		sr.fetcher.QueuePrefetchRange(endSeg+1, prefetchEnd)
+		sr.fetcher.QueuePrefetchRange(ctx, endSeg+1, prefetchEnd)
 	}
 
 	// Ensure all required segments are available (may block for downloads)
@@ -237,6 +245,7 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, p []byte, off int64)
 // progressive performance degradation on large files.
 func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int64, startSeg, endSeg int) (int, error) {
 	totalRead := 0
+	filledThrough := off
 
 	for segIdx := startSeg; segIdx <= endSeg; segIdx++ {
 		// Wait for segment to be ready
@@ -254,10 +263,22 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 		if readStart >= readEnd {
 			continue
 		}
+		if readStart < filledThrough {
+			return totalRead, fmt.Errorf(
+				"segment %d starts at %d behind delivered offset %d",
+				segIdx, readStart, filledThrough,
+			)
+		}
 
 		outOffset := readStart - off
 		segDataOffset := readStart - segStart
 		copyLen := readEnd - readStart
+		if outOffset < 0 || copyLen <= 0 || outOffset+copyLen > int64(len(p)) {
+			return totalRead, fmt.Errorf(
+				"segment %d resolved invalid output range %d-%d for %d-byte read",
+				segIdx, outOffset, outOffset+copyLen, len(p),
+			)
+		}
 
 		// Read only the needed slice directly into the output buffer.
 		// No intermediate scratch buffer — zero extra allocation, zero amplification.
@@ -278,8 +299,12 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 				return totalRead, fmt.Errorf("segment %d still missing after re-fetch", segIdx)
 			}
 		}
+		if int64(n) != copyLen {
+			return totalRead, fmt.Errorf("segment %d returned %d bytes, want %d", segIdx, n, copyLen)
+		}
 
 		totalRead += n
+		filledThrough = readEnd
 	}
 
 	return totalRead, nil
@@ -408,7 +433,7 @@ func (sr *StreamingReader) Prefetch(ctx context.Context, off, length int64) {
 	}
 
 	startSeg, endSeg := sr.cache.SegmentsForRange(off, length)
-	sr.fetcher.QueuePrefetchRange(startSeg, endSeg)
+	sr.fetcher.QueuePrefetchRange(ctx, startSeg, endSeg)
 }
 
 // Read implements io.Reader using ReadAt with tracked position.

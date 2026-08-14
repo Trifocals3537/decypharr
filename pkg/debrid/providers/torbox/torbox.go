@@ -340,7 +340,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
-	data := res.Data
+	data := res.torrent(torrentId)
 	if !res.Success || data == nil {
 		return nil, fmt.Errorf("error getting torrent")
 	}
@@ -478,7 +478,7 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
-	data := res.Data
+	data := res.torrent(t.Id)
 	if !res.Success || data == nil {
 		return fmt.Errorf("error updating torrent")
 	}
@@ -680,7 +680,10 @@ func (tb *Torbox) getTorrentsBounded(maxPages, maxItems int) ([]*types.Torrent, 
 func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 	var res TorrentsListResponse
 
-	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{"offset": fmt.Sprintf("%d", offset)}, &res)
+	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{
+		"bypass_cache": "true",
+		"offset":       strconv.Itoa(offset),
+	}, &res)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	json "github.com/bytedance/sonic"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
@@ -63,6 +64,9 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 
 	t.Run("complete pages", func(t *testing.T) {
 		client, closeServer := newClient(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("bypass_cache"); got != "true" {
+				t.Errorf("bypass_cache = %q, want true", got)
+			}
 			offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 			switch offset {
 			case 0:
@@ -137,6 +141,79 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 			t.Fatalf("torrents = %#v, error = %v", torrents, err)
 		}
 	})
+}
+
+func TestInfoResponseAcceptsObjectAndArrayShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		id   string
+		want string
+	}{
+		{
+			name: "documented object",
+			body: `{"success":true,"data":{"id":2,"name":"wanted"}}`,
+			id:   "2",
+			want: "wanted",
+		},
+		{
+			name: "relay array",
+			body: `{"success":true,"data":[{"id":1,"name":"other"},{"id":2,"name":"wanted"}]}`,
+			id:   "2",
+			want: "wanted",
+		},
+		{
+			name: "array does not guess",
+			body: `{"success":true,"data":[{"id":1,"name":"other"}]}`,
+			id:   "2",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var response InfoResponse
+			if err := json.Unmarshal([]byte(test.body), &response); err != nil {
+				t.Fatal(err)
+			}
+			item := response.torrent(test.id)
+			if test.want == "" {
+				if item != nil {
+					t.Fatalf("torrent = %#v, want nil", item)
+				}
+				return
+			}
+			if item == nil || item.Name != test.want {
+				t.Fatalf("torrent = %#v, want name %q", item, test.want)
+			}
+		})
+	}
+}
+
+func TestGetTorrentSelectsRequestedItemFromArrayResponse(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"success":true,
+			"data":[
+				{"id":1,"name":"other","size":1,"download_state":"completed","download_finished":true,"files":[]},
+				{"id":2,"name":"wanted","size":2,"download_state":"completed","download_finished":true,"files":[]}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := &Torbox{
+		Host:   server.URL,
+		client: request.New(request.WithMaxRetries(0)),
+		config: config.Debrid{Name: "torbox"},
+	}
+	torrent, err := client.GetTorrent("2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if torrent.Id != "2" || torrent.Name != "wanted" {
+		t.Fatalf("torrent = %#v, want requested ID 2", torrent)
+	}
 }
 
 func writeTorboxTorrentPage(t *testing.T, w http.ResponseWriter, ids ...int) {

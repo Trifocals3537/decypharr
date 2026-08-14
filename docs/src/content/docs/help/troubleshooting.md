@@ -96,7 +96,40 @@ sudo usermod -a -G fuse $USER
 
 ### "Transport endpoint is not connected"
 
-Mount crashed. Unmount and restart:
+First determine whether the Decypharr mount itself failed or only a Docker
+consumer retained an old private bind:
+
+```bash
+# Host view
+stat /mnt/decypharr
+
+# Media-container view
+docker exec jellyfin stat /mnt/decypharr
+docker inspect jellyfin --format '{{range .Mounts}}{{.Destination}} {{.Propagation}}{{println}}{{end}}'
+```
+
+If the host succeeds but the container reports `Transport endpoint is not
+connected`, restart the media container so it attaches to the current mount,
+then configure its bind as read-only `rslave` to prevent recurrence:
+
+```bash
+docker restart jellyfin
+```
+
+```yaml
+services:
+  jellyfin:
+    volumes:
+      - type: bind
+        source: /mnt/decypharr
+        target: /mnt/decypharr
+        read_only: true
+        bind:
+          propagation: rslave
+```
+
+If the host check also fails, unmount the disconnected FUSE mount and restart
+Decypharr:
 
 ```bash
 # Force unmount

@@ -67,6 +67,9 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 			if got := r.URL.Query().Get("bypass_cache"); got != "true" {
 				t.Errorf("bypass_cache = %q, want true", got)
 			}
+			if got := r.URL.Query().Get("limit"); got != "1" {
+				t.Errorf("limit = %q, want 1", got)
+			}
 			offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 			switch offset {
 			case 0:
@@ -79,7 +82,7 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 		})
 		defer closeServer()
 
-		torrents, err := client.getTorrentsBounded(4, 4)
+		torrents, err := client.getTorrentsBounded(4, 4, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +101,7 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 		})
 		defer closeServer()
 
-		torrents, err := client.getTorrentsBounded(4, 4)
+		torrents, err := client.getTorrentsBounded(4, 4, 1)
 		if err == nil || len(torrents) != 0 || strings.Contains(err.Error(), "do-not-expose") {
 			t.Fatalf("torrents = %#v, error = %v", torrents, err)
 		}
@@ -110,7 +113,7 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 		})
 		defer closeServer()
 
-		torrents, err := client.getTorrentsBounded(4, 4)
+		torrents, err := client.getTorrentsBounded(4, 4, 1)
 		if err == nil || len(torrents) != 0 || !strings.Contains(err.Error(), "repeated torrent ID") {
 			t.Fatalf("torrents = %#v, error = %v", torrents, err)
 		}
@@ -123,7 +126,7 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 		})
 		defer closeServer()
 
-		torrents, err := client.getTorrentsBounded(2, 10)
+		torrents, err := client.getTorrentsBounded(2, 10, 1)
 		if err == nil || len(torrents) != 0 || !strings.Contains(err.Error(), "2 non-empty pages") {
 			t.Fatalf("torrents = %#v, error = %v", torrents, err)
 		}
@@ -136,9 +139,39 @@ func TestGetTorrentsReturnsOnlyCompleteBoundedSnapshots(t *testing.T) {
 		})
 		defer closeServer()
 
-		torrents, err := client.getTorrentsBounded(4, 1)
+		torrents, err := client.getTorrentsBounded(4, 1, 1)
 		if err == nil || len(torrents) != 0 || !strings.Contains(err.Error(), "exceeds 1 items") {
 			t.Fatalf("torrents = %#v, error = %v", torrents, err)
+		}
+	})
+
+	t.Run("short page is terminal", func(t *testing.T) {
+		calls := 0
+		client, closeServer := newClient(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if got := r.URL.Query().Get("offset"); got != "0" {
+				t.Errorf("offset = %q, want 0", got)
+			}
+			if got := r.URL.Query().Get("limit"); got != "1000" {
+				t.Errorf("limit = %q, want 1000", got)
+			}
+			ids := make([]int, 267)
+			for i := range ids {
+				ids[i] = i + 1
+			}
+			writeTorboxTorrentPage(t, w, ids...)
+		})
+		defer closeServer()
+
+		torrents, err := client.getTorrentsBounded(4, 1_000, 1_000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(torrents) != 267 {
+			t.Fatalf("torrent count = %d, want 267", len(torrents))
+		}
+		if calls != 1 {
+			t.Fatalf("request count = %d, want 1", calls)
 		}
 	})
 }

@@ -247,6 +247,45 @@ docker compose up -d
 
 Access at `http://localhost:8282`
 
+### Media server containers
+
+Docker bind mounts default to `rprivate`. That is unsafe for a long-running
+Plex, Jellyfin, or Emby container consuming a FUSE mount that Decypharr may
+replace during an update or restart: the host sees the new mount, but the media
+container can retain the disconnected old one.
+
+Use a read-only bind with `rslave` propagation for each media consumer. This
+propagates mount changes from the host into the consumer without propagating
+consumer-created mounts back to the host:
+
+```yaml
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    volumes:
+      - type: bind
+        source: /mnt/decypharr
+        target: /mnt/decypharr
+        read_only: true
+        bind:
+          propagation: rslave
+```
+
+The source path must be a bind mount on a Linux host whose parent supports
+mount propagation. Keep the Decypharr side `rshared`, as shown above. After
+changing propagation, recreate the media container once and verify the result:
+
+```bash
+docker compose up -d --force-recreate jellyfin
+docker inspect jellyfin --format '{{range .Mounts}}{{.Destination}} {{.Propagation}}{{println}}{{end}}'
+docker exec jellyfin stat /mnt/decypharr
+```
+
+If a managed host does not let you change the media container's bind
+propagation, restart that media-server application after every Decypharr
+unmount/remount. Restarting playback alone cannot replace the container's stale
+mount reference.
+
 ### Docker Run
 
 ```bash

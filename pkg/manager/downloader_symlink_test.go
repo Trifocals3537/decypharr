@@ -48,3 +48,52 @@ func TestCreateTorrentSymlinksKeepsExistingDestinationCompatibility(t *testing.T
 		t.Fatalf("created paths = %v, want [%s]", paths, existing)
 	}
 }
+
+func TestCreateUsenetSymlinksSkipsMatchingDirectoryName(t *testing.T) {
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	entry := normalNZBEntry(downloadRoot)
+	fileName := "Show S01E01.mkv"
+
+	nestedDirectory := filepath.Join(mountPath, fileName)
+	if err := os.Mkdir(nestedDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantTarget := filepath.Join(nestedDirectory, fileName)
+	if err := os.WriteFile(wantTarget, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	symlinkDir, _, err := claimUsenetEntryDirectory(downloadRoot, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	paths, err := downloader.createSymlinksWhenMountFilesAppear(
+		context.Background(),
+		entry,
+		[]*storage.File{{Name: fileName}},
+		mountPath,
+		symlinkDir,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("created %d symlinks, want 1", len(paths))
+	}
+	gotTarget, err := os.Readlink(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget != wantTarget {
+		t.Fatalf("symlink target = %q, want nested file %q", gotTarget, wantTarget)
+	}
+	info, err := os.Stat(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsDir() {
+		t.Fatal("symlink target is a directory, want a regular file")
+	}
+}

@@ -6,14 +6,13 @@ import (
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 // handleTautulli handles webhooks from Tautulli. When the payload includes a
 // tvdb/tmdb id (or a generic media_id), the repair system runs a targeted
 // recheck against that specific media — the v2 equivalent of v1's
-// "media-id-scoped repair job". When no media id is supplied the webhook
-// falls back to a full manual sweep.
+// "media-id-scoped repair job". Untargeted payloads are rejected: a playback
+// notification must never be interpreted as a request to sweep the library.
 func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -47,20 +46,15 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svc := s.manager.Repair()
-	if svc == nil {
-		http.Error(w, "Repair service not available", http.StatusServiceUnavailable)
+	mediaID := strings.TrimSpace(cmp.Or(payload.MediaID, payload.TmdbID, payload.TvdbID))
+	if mediaID == "" {
+		http.Error(w, "A media ID is required", http.StatusBadRequest)
 		return
 	}
 
-	mediaID := strings.TrimSpace(cmp.Or(payload.MediaID, payload.TmdbID, payload.TvdbID))
-	if mediaID == "" {
-		// No targeting → fall back to a full sweep.
-		if _, err := svc.RunNow(manager.RepairRunOptions{}); err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
+	svc := s.manager.Repair()
+	if svc == nil {
+		http.Error(w, "Repair service not available", http.StatusServiceUnavailable)
 		return
 	}
 

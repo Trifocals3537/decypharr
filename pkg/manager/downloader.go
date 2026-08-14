@@ -338,6 +338,22 @@ func (d *Downloader) createSymlinksWhenMountFilesAppear(ctx context.Context, ent
 					entryName := item.Name()
 					fullPath := filepath.Join(current.path, entryName)
 
+					// A directory can legitimately have the same basename as a
+					// requested media file. Recurse into it before matching names so
+					// the visible output never becomes a symlink to a directory.
+					if item.IsDir() {
+						pending = append(pending, pendingDirectory{
+							path:  fullPath,
+							depth: current.depth + 1,
+						})
+						continue
+					}
+					// Do not turn device nodes, sockets, or source symlinks into
+					// managed media files. A zero type is the regular-file case.
+					if !item.Type().IsRegular() {
+						continue
+					}
+
 					if file, exists := remainingFiles[entryName]; exists {
 						fileSymlinkPath, pathErr := safeUsenetFilePath(d.dest, entry, file.Name)
 						if pathErr != nil {
@@ -357,14 +373,6 @@ func (d *Downloader) createSymlinksWhenMountFilesAppear(ctx context.Context, ent
 						filePaths = append(filePaths, fileSymlinkPath)
 						delete(remainingFiles, entryName)
 						d.logger.Info().Msgf("File is ready: %s/%s", entry.GetFolder(), file.Name)
-						continue
-					}
-
-					if item.Type()&os.ModeSymlink == 0 && item.IsDir() {
-						pending = append(pending, pendingDirectory{
-							path:  fullPath,
-							depth: current.depth + 1,
-						})
 					}
 				}
 				if errors.Is(readErr, io.EOF) {
@@ -1125,8 +1133,6 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 		return false, nil
 	}
 
-	d.logger.Info().Msgf("Multi-season torrent detected with seasons: %v", getSortedSeasons(seasonsFound))
-
 	// Group files by season
 	seasonGroups := groupFilesBySeason(files, seasonsFound)
 
@@ -1147,6 +1153,14 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 			Name:         seasonName,
 		})
 	}
+
+	// A name such as "Complete Series" is only a hint. Do not split the entry
+	// unless its files actually produced multiple populated season groups.
+	if len(seasons) <= 1 {
+		return false, nil
+	}
+
+	d.logger.Info().Msgf("Multi-season torrent detected with seasons: %v", getSortedSeasons(seasonsFound))
 
 	return true, seasons
 }

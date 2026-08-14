@@ -133,6 +133,7 @@ Trigger a sweep now. Optional JSON body fields:
 | `ignore_last_checked` | boolean | Probe entries even when their last health check is still fresh.    |
 | `auto_repair`         | boolean | Override the configured auto-repair setting for this run.          |
 | `unrestrict_link`     | boolean | For torrent entries, probe by generating an unrestricted link instead of calling the provider check endpoint. |
+| `verify_content`      | boolean | Manually add a bounded NZB media-head check for supported containers. With this enabled, omitted `auto_repair` defaults to `false` and omitted `protocol` to `nzb`; unsupported formats remain availability-only. |
 | `protocol`            | string  | `all`, `torrent`, or `nzb`. Selects which protocols this run probes. |
 
 ```bash
@@ -144,6 +145,20 @@ curl -X POST \
 ```
 
 Returns `409 Conflict` when a sweep is already running.
+
+Run a deeper, detect-only NZB check and include entries whose health is still
+fresh:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"verify_content":true,"ignore_last_checked":true,"auto_repair":false,"protocol":"nzb"}' \
+  http://localhost:8282/api/repair/run
+```
+
+`verify_content` is rejected with `protocol: "torrent"`. It does not affect
+imports, scheduled sweeps, or single-entry UI rechecks.
 
 ### POST /api/repair/stop
 

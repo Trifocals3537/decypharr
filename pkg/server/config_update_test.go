@@ -64,6 +64,26 @@ func TestDecodeConfigPatchPreservesOmittedSections(t *testing.T) {
 	}
 }
 
+func TestDecodeConfigPatchPreservesOmittedNestedUsenetFields(t *testing.T) {
+	current := representativeConfig()
+	current.Usenet.ConnIdleTimeout = "5m"
+
+	updated, err := decodeConfigUpdate(
+		http.MethodPatch,
+		strings.NewReader(`{"usenet":{"max_connections":6,"read_ahead":"32MB"}}`),
+		current,
+	)
+	if err != nil {
+		t.Fatalf("decode nested Usenet PATCH: %v", err)
+	}
+	if updated.Usenet.MaxConnections != 6 || updated.Usenet.ReadAhead != "32MB" {
+		t.Fatalf("updated Usenet fields were not applied: %#v", updated.Usenet)
+	}
+	if updated.Usenet.ConnIdleTimeout != "5m" {
+		t.Fatalf("connection idle timeout = %q, want preserved 5m", updated.Usenet.ConnIdleTimeout)
+	}
+}
+
 func TestDecodeConfigPatchNullRemovesField(t *testing.T) {
 	current := representativeConfig()
 	current.AppURL = "https://example.test"

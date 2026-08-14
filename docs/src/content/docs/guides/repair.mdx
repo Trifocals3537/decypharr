@@ -112,6 +112,42 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 - **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers so repair can call `DeleteFiles` + `SearchMissing` directly.
 - **`managed`** — walks managed entries directly. Used when you don't have an Arr in front, or for entries imported outside the Arr flow. NZB-only managed brokens have no Arr re-acquire path; they stay `broken` with `failure_reason=usenet_segment_missing` for you to react to manually.
 
+### Optional NZB content verification
+
+The normal NZB probe checks whether sampled articles are available. For a
+manual, deeper check, call `POST /api/repair/run` with
+`"verify_content": true`. After the availability probe succeeds, Decypharr
+reads up to 512 logical bytes from the start of supported media files and
+checks for a recognized container signature.
+
+This mode is deliberately conservative:
+
+- It runs only when explicitly requested through the repair API. Imports,
+  scheduled sweeps, and single-entry UI rechecks remain availability-only.
+- Deep reads are serialized globally, use one NNTP connection, and disable
+  read-ahead so they do not fan out into streaming-sized work. The bounded
+  read normally fits within one article.
+- Strong head signatures are checked for common Matroska/WebM, ISO base media
+  (MP4/MOV), AVI/WAV, Ogg, FLV, ASF, MPEG, transport-stream, and audio
+  containers. Ambiguous, text-based, and tail-signature formats remain
+  availability-only instead of being rejected.
+- A recognized media container is accepted even if its filename extension is
+  mislabeled. Cancellation and transient read or decoder errors are
+  inconclusive; only a completed non-matching read is marked
+  `usenet_corrupt_content`.
+
+When `verify_content` is enabled and the request omits `protocol`, the run is
+narrowed to `nzb`. When it omits `auto_repair`, the run defaults to detect-only
+even if scheduled repair is configured to repair automatically. Set
+`ignore_last_checked: true` if you also want to recheck entries whose health is
+still fresh.
+
+:::caution
+Setting `auto_repair: true` explicitly allows the usual Arr delete and
+re-search flow for files this deeper check marks broken. Run detect-only first
+and review the results.
+:::
+
 ## Workflow
 
 1. The cron tick (or a manual **Run Now**) opens a new run.
@@ -140,7 +176,7 @@ A failure to persist a single entry's health update is logged but never aborts t
 | `GET`    | `/api/repair/config`                  | Read current config.                                                     |
 | `PUT`    | `/api/repair/config`                  | Update config (validates cron, workers, source).                         |
 | `GET`    | `/api/repair/status`                  | Active run summary, last completed run, and counts of entries by status. |
-| `POST`   | `/api/repair/run`                     | Trigger a sweep now. Body can include `ignore_last_checked`, `auto_repair`, `unrestrict_link`, and `protocol`. |
+| `POST`   | `/api/repair/run`                     | Trigger a sweep now. Body can include `ignore_last_checked`, `auto_repair`, `unrestrict_link`, `verify_content`, and `protocol`. |
 | `POST`   | `/api/repair/stop`                    | Cancel the active run.                                                   |
 | `GET`    | `/api/repair/runs`                    | Run history.                                                             |
 | `GET`    | `/api/repair/runs/{id}`               | Run detail.                                                              |
@@ -159,6 +195,16 @@ curl -X POST http://localhost:8282/api/repair/run \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"protocol":"all","unrestrict_link":true}'
+```
+
+Run a deeper, detect-only NZB content check (including freshly checked
+entries):
+
+```bash
+curl -X POST http://localhost:8282/api/repair/run \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"verify_content":true,"ignore_last_checked":true,"auto_repair":false,"protocol":"nzb"}'
 ```
 
 Stop the active sweep:

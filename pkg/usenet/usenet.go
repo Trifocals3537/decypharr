@@ -223,6 +223,7 @@ type Usenet struct {
 	processingMaxConnections int         // Connections allocated per file for parsing and NZB downloads
 	prefetchSize             int64       // Streaming prefetch size in bytes
 	failedFiles              *xsync.Map[string, error]
+	contentVerifySlots       chan struct{} // Deep repair probes are serialized to protect playback.
 
 	fs *xsync.Map[string, *fsEntry]
 
@@ -305,6 +306,7 @@ func New() (*Usenet, error) {
 		prefetchSize:             prefetchSize,
 		fs:                       xsync.NewMap[string, *fsEntry](),
 		failedFiles:              xsync.NewMap[string, error](),
+		contentVerifySlots:       make(chan struct{}, 1),
 	}
 
 	// Start background cleanup for idle sessions
@@ -319,6 +321,14 @@ func initStreamsDir(streamsDir string) error {
 }
 
 func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
+	return u.createEntryWithReadLimits(file, u.maxConnections, u.prefetchSize)
+}
+
+// createEntryWithReadLimits builds an isolated reader with explicit
+// concurrency and read-ahead limits. Deep verification uses one foreground
+// connection and no prefetch so a 512-byte probe cannot fan out into a full
+// streaming window.
+func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent int, prefetchSize int64) (*fsEntry, error) {
 	volumes := GetFileVolumes(file)
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes available for file %s", file.Name)
@@ -326,7 +336,10 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 
 	fsCtx := context.Background()
 
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger)
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	usenetFS, err := fs.NewFS(fsCtx, u.nntp, maxConcurrent, prefetchSize, volumes, u.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}

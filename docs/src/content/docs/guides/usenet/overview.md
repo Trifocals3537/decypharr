@@ -172,6 +172,11 @@ Use `availability_sample_percent` for repair checks and
 - `10`: Check 10% (fast but may miss issues)
 - `1`: Quick import check (default)
 
+Availability checks do not inspect decoded media bytes. A manual repair run
+can optionally add a conservative, bounded content-signature check for common
+media containers. It is never run automatically during import or scheduled
+repair; see [Health Checker & Repair](../../repair/#optional-nzb-content-verification).
+
 ## Disk Buffer
 
 ```json

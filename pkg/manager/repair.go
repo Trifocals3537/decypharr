@@ -40,7 +40,11 @@ type RepairRunOptions struct {
 	IgnoreLastChecked bool
 	AutoRepair        *bool
 	UnrestrictLink    bool
-	ProtocolScope     string
+	// VerifyContent performs an extension-aware head check after an NZB's
+	// normal availability probe. It is a one-run option and never enables
+	// scheduled or import-time rejection.
+	VerifyContent bool
+	ProtocolScope string
 }
 
 type ClearRepairStateResult struct {
@@ -519,6 +523,9 @@ func (r *Repair) runSweep(trigger storage.RepairRunTrigger, opts RepairRunOption
 	}
 	if opts.UnrestrictLink {
 		sourceParts = append(sourceParts, "unrestrict-link")
+	}
+	if opts.VerifyContent {
+		sourceParts = append(sourceParts, "verify-content")
 	}
 	if scope := normalizeRepairProtocolScope(opts.ProtocolScope); scope != "" {
 		sourceParts = append(sourceParts, "protocol-"+scope)

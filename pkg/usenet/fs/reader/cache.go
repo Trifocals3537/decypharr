@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -867,13 +868,11 @@ func NewSegmentCache(
 // computeOffsets calculates cumulative byte offsets for segment lookup.
 func computeOffsets(segments []SegmentMeta) []int64 {
 	offsets := make([]int64, len(segments)+1)
-	if len(segments) > 0 && segments[0].EndOffset > 0 {
+	if offsetsAreContiguous(segments) {
 		for i, seg := range segments {
 			offsets[i] = seg.StartOffset
 		}
-		if len(segments) > 0 {
-			offsets[len(segments)] = segments[len(segments)-1].EndOffset + 1
-		}
+		offsets[len(segments)] = segments[len(segments)-1].EndOffset + 1
 	} else {
 		cumulative := int64(0)
 		for i, seg := range segments {
@@ -887,6 +886,29 @@ func computeOffsets(segments []SegmentMeta) []int64 {
 		offsets[len(segments)] = cumulative
 	}
 	return offsets
+}
+
+// offsetsAreContiguous verifies the stored layout before binary-search and
+// read code trusts it. Current parsers produce dense ascending output ranges,
+// but metadata written by older versions can contain zero-filled, overlapping,
+// out-of-order, or gapped slots. Falling back to cumulative sizes keeps every
+// reader and cache operation on one self-consistent layout.
+func offsetsAreContiguous(segments []SegmentMeta) bool {
+	if len(segments) == 0 || segments[0].StartOffset != 0 {
+		return false
+	}
+	for i, segment := range segments {
+		if segment.StartOffset < 0 || segment.EndOffset < segment.StartOffset || segment.EndOffset == math.MaxInt64 {
+			return false
+		}
+		if segment.Bytes > 0 && segment.EndOffset-segment.StartOffset+1 != segment.Bytes {
+			return false
+		}
+		if i > 0 && segment.StartOffset != segments[i-1].EndOffset+1 {
+			return false
+		}
+	}
+	return true
 }
 
 // Get returns segment data, loading via the buffer.

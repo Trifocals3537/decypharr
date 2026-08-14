@@ -237,6 +237,7 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, p []byte, off int64)
 // progressive performance degradation on large files.
 func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int64, startSeg, endSeg int) (int, error) {
 	totalRead := 0
+	filledThrough := off
 
 	for segIdx := startSeg; segIdx <= endSeg; segIdx++ {
 		// Wait for segment to be ready
@@ -254,10 +255,22 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 		if readStart >= readEnd {
 			continue
 		}
+		if readStart < filledThrough {
+			return totalRead, fmt.Errorf(
+				"segment %d starts at %d behind delivered offset %d",
+				segIdx, readStart, filledThrough,
+			)
+		}
 
 		outOffset := readStart - off
 		segDataOffset := readStart - segStart
 		copyLen := readEnd - readStart
+		if outOffset < 0 || copyLen <= 0 || outOffset+copyLen > int64(len(p)) {
+			return totalRead, fmt.Errorf(
+				"segment %d resolved invalid output range %d-%d for %d-byte read",
+				segIdx, outOffset, outOffset+copyLen, len(p),
+			)
+		}
 
 		// Read only the needed slice directly into the output buffer.
 		// No intermediate scratch buffer — zero extra allocation, zero amplification.
@@ -278,8 +291,12 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 				return totalRead, fmt.Errorf("segment %d still missing after re-fetch", segIdx)
 			}
 		}
+		if int64(n) != copyLen {
+			return totalRead, fmt.Errorf("segment %d returned %d bytes, want %d", segIdx, n, copyLen)
+		}
 
 		totalRead += n
+		filledThrough = readEnd
 	}
 
 	return totalRead, nil

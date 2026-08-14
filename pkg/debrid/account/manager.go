@@ -223,6 +223,20 @@ func (m *Manager) DeleteDownloadLink(downloadLink types.DownloadLink, deleter Li
 	return account.DeleteLink(downloadLink, deleter)
 }
 
+// InvalidateDownloadLink removes only the locally cached URL. Provider-side
+// deletion is intentionally reserved for DeleteDownloadLink.
+func (m *Manager) InvalidateDownloadLink(downloadLink types.DownloadLink) error {
+	if downloadLink.Link == "" || downloadLink.Token == "" {
+		return fmt.Errorf("invalid download link")
+	}
+	account, err := m.GetAccount(downloadLink.Token)
+	if err != nil || account == nil {
+		return fmt.Errorf("account not found for download link")
+	}
+	account.InvalidateLink(downloadLink)
+	return nil
+}
+
 func (m *Manager) Stats() []map[string]any {
 	stats := make([]map[string]any, 0)
 

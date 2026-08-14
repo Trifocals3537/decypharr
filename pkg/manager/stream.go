@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -99,6 +101,14 @@ type StreamError struct {
 
 func (e StreamError) Error() string {
 	return e.Err.Error()
+}
+
+func (e StreamError) Unwrap() error {
+	return e.Err
+}
+
+func (e StreamError) IsRetryable() bool {
+	return e.Retryable
 }
 
 // StreamMetadata describes the headers/status for a streaming response before data flows.
@@ -205,14 +215,57 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	buf := *bufPtr
 	defer streamBufPool.Put(bufPtr)
 
-	resp, reqErr := m.doRequest(ctx, downloadLink.DownloadLink, start, end)
-	if reqErr != nil {
-		// Network/connection error - retriable
-		return reqErr
-	}
+	statusRetries := 0
+	linkRefreshes := 0
+	remainingWait := config.DefaultRetryDelayMax
+	for {
+		resp, reqErr := m.doRequest(ctx, downloadLink.DownloadLink, start, end)
+		if reqErr != nil {
+			// Connection retries happen inside doRequest and never receive body
+			// bytes, so returning here cannot replay caller-visible data.
+			return reqErr
+		}
 
-	// Got response - check status
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			linkErr := link.ClassifyHTTPStatus(resp.StatusCode, resp.Header)
+			resp.Body.Close()
+
+			if linkErr.ShouldRefetch() {
+				if linkRefreshes >= maxLinkRefreshesPerStream {
+					return StreamError{
+						Err:       fmt.Errorf("replacement download link was also rejected: %w", linkErr),
+						Retryable: false,
+						LinkError: true,
+					}
+				}
+				downloadLink, err = m.linkService.Refresh(ctx, torrent, downloadLink)
+				if err != nil {
+					return fmt.Errorf("failed to refresh rejected download link: %w", err)
+				}
+				linkRefreshes++
+				continue
+			}
+
+			if (linkErr.ShouldRetry() || linkErr.ShouldBackoff()) && statusRetries < m.streamStatusRetries() {
+				delay := streamRetryDelay(linkErr, statusRetries, remainingWait)
+				if delay <= 0 {
+					return StreamError{Err: linkErr, Retryable: true}
+				}
+				if waitErr := m.waitForStreamRetry(ctx, delay); waitErr != nil {
+					return retry.Unrecoverable(waitErr)
+				}
+				remainingWait -= delay
+				statusRetries++
+				continue
+			}
+
+			return StreamError{
+				Err:       linkErr,
+				Retryable: linkErr.IsRetryable(),
+				LinkError: false,
+			}
+		}
+
 		var header http.Header
 		if onReady != nil {
 			header = resp.Header.Clone()
@@ -272,13 +325,58 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		}
 		return nil
 	}
+}
 
-	resp.Body.Close()
-	return retry.Unrecoverable(StreamError{
-		Err:       fmt.Errorf("unexpected HTTP status: %d", resp.StatusCode),
-		Retryable: false,
-		LinkError: false,
-	})
+const maxLinkRefreshesPerStream = 1
+
+func (m *Manager) streamStatusRetries() int {
+	if m.config == nil || m.config.Retries < 0 {
+		return 0
+	}
+	return m.config.Retries
+}
+
+func streamRetryDelay(linkErr *link.Error, attempt int, remaining time.Duration) time.Duration {
+	if remaining <= 0 {
+		return 0
+	}
+	delay := config.DefaultRetryDelay
+	if linkErr != nil && linkErr.ShouldBackoff() && linkErr.RetryAfter > 0 {
+		delay = linkErr.RetryAfter
+	} else {
+		for range attempt {
+			if delay >= config.DefaultRetryDelayMax/2 {
+				delay = config.DefaultRetryDelayMax
+				break
+			}
+			delay *= 2
+		}
+	}
+	if delay > config.DefaultRetryDelayMax {
+		delay = config.DefaultRetryDelayMax
+	}
+	if delay > remaining {
+		delay = remaining
+	}
+	return delay
+}
+
+func (m *Manager) waitForStreamRetry(ctx context.Context, delay time.Duration) error {
+	if m.streamWait != nil {
+		return m.streamWait(ctx, delay)
+	}
+	return waitForStreamRetry(ctx, delay)
+}
+
+func waitForStreamRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // streamUsenet handles streaming for NZB files via usenet

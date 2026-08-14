@@ -42,6 +42,7 @@ type Manager struct {
 	ready        chan struct{}
 	readyOnce    sync.Once
 	streamClient *http.Client
+	streamWait   func(context.Context, time.Duration) error
 
 	// Migration jobs tracking
 	migrationJobs   *xsync.Map[string, *storage.SwitcherJob]
@@ -56,7 +57,7 @@ type Manager struct {
 
 	// downloading
 	refreshSG   singleflight.Group
-	linkService *link.Service
+	linkService downloadLinkService
 
 	// repair
 	fixer  *Fixer
@@ -98,6 +99,12 @@ type Manager struct {
 
 	// Notifications service
 	Notifications *notifications.Service
+}
+
+type downloadLinkService interface {
+	GetLink(context.Context, *storage.Entry, string) (debridTypes.DownloadLink, error)
+	Refresh(context.Context, *storage.Entry, debridTypes.DownloadLink) (debridTypes.DownloadLink, error)
+	Clear()
 }
 
 func newStreamHTTPClient() *http.Client {
@@ -160,6 +167,7 @@ func New() *Manager {
 		queue:                  newQueue(strg, cfg.RemoveStalledAfter, entryLifecycle),
 		ready:                  make(chan struct{}),
 		streamClient:           newStreamHTTPClient(),
+		streamWait:             waitForStreamRetry,
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),

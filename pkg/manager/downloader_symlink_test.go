@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -63,9 +64,16 @@ func TestCreateUsenetSymlinksSkipsMatchingDirectoryName(t *testing.T) {
 	if err := os.WriteFile(wantTarget, []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	probeLink := filepath.Join(mountPath, "symlink-capability-probe")
-	if err := os.Symlink(wantTarget, probeLink); err != nil {
-		t.Skipf("symlink creation unavailable: %v", err)
+	// Exercise the same pinned-root operation used by the downloader. Some
+	// Windows environments permit os.Symlink but cannot follow an outside-root
+	// target created through os.Root.Symlink.
+	probeLink := filepath.Join(downloadRoot, "symlink-capability-probe")
+	if err := safepath.Symlink(downloadRoot, wantTarget, probeLink); err != nil {
+		t.Skipf("managed symlink creation unavailable: %v", err)
+	}
+	if _, err := os.Stat(probeLink); err != nil {
+		_ = os.Remove(probeLink)
+		t.Skipf("managed symlink traversal unavailable: %v", err)
 	}
 	if err := os.Remove(probeLink); err != nil {
 		t.Fatalf("remove symlink capability probe: %v", err)

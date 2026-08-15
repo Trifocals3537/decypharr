@@ -17,6 +17,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -295,22 +296,25 @@ func (s *Storage) SyncFromConfig(arrs []config.Arr) {
 	s.arrs = newMaps
 }
 
-func (s *Storage) Monitor() {
-	wg := sync.WaitGroup{}
-	wg.Add(s.arrs.Size())
+func (s *Storage) Monitor(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var group errgroup.Group
 	s.arrs.Range(func(name string, arr *Arr) bool {
-		_, _, _ = s.sg.Do(fmt.Sprintf("cleanup_%s", arr.Name), func() (any, error) {
-			go func() {
-				defer wg.Done()
-				if err := arr.CleanupQueue(); err != nil {
-					s.logger.Error().Err(err).Msgf("Failed to cleanup arr %s", arr.Name)
-				}
-			}()
-			return nil, nil
+		if ctx.Err() != nil {
+			return false
+		}
+		group.Go(func() error {
+			_, err, _ := s.sg.Do(fmt.Sprintf("cleanup_%s", name), func() (any, error) {
+				return nil, arr.CleanupQueueCtx(ctx)
+			})
+			return err
 		})
 		return true
 	})
-	wg.Wait()
+	return group.Wait()
 }
 
 func (a *Arr) Refresh() error {

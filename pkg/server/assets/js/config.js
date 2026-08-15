@@ -270,13 +270,12 @@ class ConfigManager {
         if (!mountConfig) return;
 
         // Handle mount type radio buttons
-        if (mountConfig.type) {
-            const typeRadio = document.querySelector(`input[name="mount.type"][value="${mountConfig.type}"]`);
-            if (typeRadio) {
-                typeRadio.checked = true;
-                // Trigger change event to switch to the correct tab
-                typeRadio.dispatchEvent(new Event('change'));
-            }
+        const mountType = mountConfig.type || 'none';
+        const typeRadio = document.querySelector(`input[name="mount.type"][value="${mountType}"]`);
+        if (typeRadio) {
+            typeRadio.checked = true;
+            // Trigger change event to switch to the correct tab
+            typeRadio.dispatchEvent(new Event('change'));
         }
 
         // Handle mount path
@@ -1166,11 +1165,11 @@ class ConfigManager {
         });
 
         if (config.mount.type === "") {
-            errors.push('Mount type is required when ');
+            errors.push('Mount type is required');
         }
 
-        if (config.mount.mount_path === "") {
-            errors.push('Mount path is required when Rclone is enabled');
+        if (config.mount.type !== 'none' && config.mount.mount_path === "") {
+            errors.push('Mount path is required when mounting is enabled');
         }
 
         if (config.repair?.enabled && !config.repair.schedule) {

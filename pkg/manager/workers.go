@@ -216,8 +216,9 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 	} else {
 		// Schedule the job
 		if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
-			// Reset invalid download links map at midnight CET
-			m.arr.Monitor()
+			if err := m.arr.Monitor(ctx); err != nil && ctx.Err() == nil {
+				m.logger.Error().Err(err).Msg("Arr queue monitoring failed")
+			}
 		}), gocron.WithContext(ctx)); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to create arr monitoring job")
 		} else {

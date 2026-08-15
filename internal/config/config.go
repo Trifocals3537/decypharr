@@ -889,6 +889,24 @@ func clearHotFields(c *Config) {
 	// a restart. Everything else in Usenet stays restart-required.
 	c.Usenet.AvailabilitySamplePercent = 0
 	c.Usenet.ImportAvailabilitySamplePercent = 0
+
+	// Settings for an inactive mount backend do not affect the running
+	// process. The settings form preserves all backend sections so users can
+	// switch later, but edits/defaults in those dormant sections must not turn
+	// an otherwise live or no-op update into a disruptive restart.
+	switch c.Mount.Type {
+	case MountTypeDFS:
+		c.Mount.Rclone = Rclone{}
+		c.Mount.ExternalRclone = ExternalRclone{}
+	case MountTypeRclone:
+		c.Mount.DFS = DFS{}
+		c.Mount.ExternalRclone = ExternalRclone{}
+	case MountTypeExternalRclone:
+		c.Mount.DFS = DFS{}
+		c.Mount.Rclone = Rclone{}
+	case MountTypeNone, "":
+		c.Mount = Mount{Type: MountTypeNone}
+	}
 }
 
 // RequiresRestart reports whether applying n on top of c needs a full service

@@ -1049,12 +1049,14 @@ func (sc *SegmentCache) Put(segIdx int, data []byte) error {
 }
 
 // segmentWriter is the contract doFetch uses to stream a segment body into
-// the cache. Exactly one of Finalize/Discard is called per writer.
+// the cache. A failed Finalize is followed by Discard.
 type segmentWriter interface {
 	Write(p []byte) (int, error)
-	Finalize()
+	Finalize() error
 	Discard()
 }
+
+var errIncompleteSegment = errors.New("incomplete segment")
 
 // StreamWriter returns a buffer-backed writer for the segment. The writer
 // skips the yEnc dataStart header and caps writes at the segment's max
@@ -1117,10 +1119,13 @@ func (w *bufferStreamWriter) Write(p []byte) (int, error) {
 	writeLen := min(int64(len(p)), remaining)
 
 	n, err := w.buf.WriteAt(p[:writeLen], w.offset+w.written)
+	w.written += int64(n)
 	if err != nil {
 		return consumed + n, err
 	}
-	w.written += int64(n)
+	if int64(n) != writeLen {
+		return consumed + n, io.ErrShortWrite
+	}
 	return consumed + len(p), nil
 }
 
@@ -1129,11 +1134,24 @@ func (w *bufferStreamWriter) Write(p []byte) (int, error) {
 // to release on a failed/partial write.
 func (w *bufferStreamWriter) Discard() {}
 
-// Finalize commits the segment to the cache: state to OnDisk, length
-// recorded, waiters woken.
-func (w *bufferStreamWriter) Finalize() {
-	if w.cache == nil || w.segIdx < 0 || w.written <= 0 {
-		return
+// Finalize commits only a complete segment to the cache. Publishing a short
+// write as OnDisk would make later readers consume stale/zero-filled bytes
+// without another chance to fail over to a provider that has a complete copy.
+func (w *bufferStreamWriter) Finalize() error {
+	if w.cache == nil || w.segIdx < 0 {
+		return fmt.Errorf("%w: invalid cache writer", errIncompleteSegment)
+	}
+	if w.maxBytes <= 0 {
+		return fmt.Errorf("%w: invalid expected size %d", errIncompleteSegment, w.maxBytes)
+	}
+	if w.written != w.maxBytes {
+		return fmt.Errorf(
+			"%w: decoded %d of %d bytes after offset %d",
+			errIncompleteSegment,
+			w.written,
+			w.maxBytes,
+			w.dataStart,
+		)
 	}
 	w.cache.curDisk.Add(w.written)
 	w.cache.segLengths[w.segIdx].Store(w.written)
@@ -1141,6 +1159,7 @@ func (w *bufferStreamWriter) Finalize() {
 	w.cache.touchSegment(w.segIdx)
 	w.cache.wakeWaiters(w.segIdx)
 	w.cache.signalEvict()
+	return nil
 }
 
 // PinRange marks segments as in-use, preventing eviction.

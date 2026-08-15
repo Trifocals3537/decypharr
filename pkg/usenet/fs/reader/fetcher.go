@@ -237,8 +237,18 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 			}
 		}
 
-		// Commit (updates cache state to StateOnDisk).
-		writer.Finalize()
+		// Commit only if the complete expected slice reached the cache. Treat a
+		// short article as unavailable on this provider so ExecuteWithFailover
+		// can try the same message ID elsewhere instead of publishing corrupt
+		// bytes as StateOnDisk.
+		if err := writer.Finalize(); err != nil {
+			writer.Discard()
+			return &nntp.Error{
+				Type:    nntp.ErrorTypeArticleNotFound,
+				Message: "article returned incomplete decoded data",
+				Err:     err,
+			}
+		}
 
 		return nil
 	})

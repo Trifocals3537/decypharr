@@ -380,6 +380,12 @@ func (c *Config) Validate() error {
 	if err := validateDebrids(c.Debrids); err != nil {
 		return err
 	}
+	if err := validateMountNamespace(c.Debrids, c.CustomFolders); err != nil {
+		return err
+	}
+	if err := validateArrDebridSelections(c.Arrs, c.Debrids); err != nil {
+		return err
+	}
 
 	if err := validateUsenet(c.Usenet.Providers); err != nil {
 		return err
@@ -625,6 +631,7 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 	for i, debrid := range c.Debrids {
 		c.Debrids[i] = c.updateDebrid(debrid)
 	}
+	normalizeArrDebridSelections(c.Arrs, c.Debrids)
 
 	// Set usenet defaults
 	c.updateUsenetConfig(configRoot)

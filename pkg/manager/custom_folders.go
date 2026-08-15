@@ -72,6 +72,7 @@ func (m *Manager) initCustomFolders() {
 		}
 		customFolders = append(customFolders, name)
 	}
+	slices.Sort(customFolders)
 	m.customFolders = &CustomFolders{
 		filters: dirFilters,
 		folders: customFolders,

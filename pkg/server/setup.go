@@ -182,15 +182,7 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 2: Handle Debrid Provider (optional)
 	if hasDebrid {
-		validProviders := map[string]bool{
-			"realdebrid": true,
-			"alldebrid":  true,
-			"debridlink": true,
-			"torbox":     true,
-			"premiumize": true,
-		}
-
-		if !validProviders[req.Debrid.Provider] {
+		if !config.IsSupportedDebridProvider(req.Debrid.Provider) {
 			s.sendSetupError(w, "Invalid debrid provider", nil)
 			return
 		}

@@ -7,17 +7,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 )
 
 const (
-	EntryAllFolder     string = "__all__"
-	EntryBadFolder     string = "__bad__"
-	EntryTorrentFolder string = "torrents"
-	EntryNZBFolder     string = "nzbs"
+	EntryAllFolder     string = config.MountAllFolderName
+	EntryBadFolder     string = config.MountBadFolderName
+	EntryTorrentFolder string = config.MountTorrentFolderName
+	EntryNZBFolder     string = config.MountNZBFolderName
 )
 
 // FileInfo implements os.FileInfo
@@ -93,16 +93,17 @@ func (m *Manager) GetEntries() []FileInfo {
 		})
 	}
 
-	// Per-provider folders (one per configured debrid client)
-	m.clients.Range(func(name string, _ debrid.Client) bool {
+	// Per-provider folders follow configuration order rather than the
+	// intentionally undefined iteration order of the concurrent client map.
+	for _, client := range m.FilterDebrid(nil) {
+		name := client.Config().Name
 		subDirs = append(subDirs, FileInfo{
 			name:    name,
 			isDir:   true,
 			modTime: now,
 			size:    0,
 		})
-		return true
-	})
+	}
 
 	// AddOrUpdate custom folders
 	if m.customFolders != nil {

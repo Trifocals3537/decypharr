@@ -74,6 +74,48 @@ func TestFilterDebridUsesConfigurationOrder(t *testing.T) {
 	}
 }
 
+func TestGetEntriesUsesDeterministicNamespaceOrder(t *testing.T) {
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store("second", &routingTestClient{cfg: config.Debrid{Name: "second"}})
+	clients.Store("first", &routingTestClient{cfg: config.Debrid{Name: "first"}})
+	manager := &Manager{
+		clients: clients,
+		config: &config.Config{Debrids: []config.Debrid{
+			{Name: "first"},
+			{Name: "second"},
+		}},
+	}
+
+	entries := manager.GetEntries()
+	got := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+	}
+	want := []string{
+		EntryAllFolder,
+		EntryBadFolder,
+		EntryTorrentFolder,
+		EntryNZBFolder,
+		"first",
+		"second",
+		"version.txt",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mount namespace order = %v, want %v", got, want)
+	}
+}
+
+func TestCustomFoldersUseDeterministicOrder(t *testing.T) {
+	manager := &Manager{config: &config.Config{CustomFolders: map[string]config.CustomFolders{
+		"zeta":  {},
+		"alpha": {},
+	}}}
+	manager.initCustomFolders()
+	if got, want := manager.GetCustomFolders(), []string{"alpha", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("custom folder order = %v, want %v", got, want)
+	}
+}
+
 func TestSendToDebridFallsBackInOrderWithFreshCandidate(t *testing.T) {
 	root := t.TempDir()
 	var attempts []string

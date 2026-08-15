@@ -125,3 +125,6 @@ Restart Decypharr after changing the file manually.
 - An empty virtual folder usually means no current item matches the filters.
 - A virtual folder with no filters will show all items.
 - Filter text is case-sensitive, so `2160p` and `2160P` are different.
+- Folder names and Debrid instance names share one portable, case-insensitive
+  mount namespace. They must be unique and cannot use `__all__`, `__bad__`,
+  `torrents`, `nzbs`, `version.txt`, or `usenet`.

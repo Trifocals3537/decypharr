@@ -1691,6 +1691,8 @@
 
             const data = await response.json();
             tokenDisplay.value = data.token;
+			tokenDisplay.dataset.tokenAvailable = 'true';
+			document.getElementById('copy-token-btn').disabled = false;
             window.decypharrUtils.createToast(data.message || 'Token refreshed successfully', 'success');
 
         } catch (error) {
@@ -1705,7 +1707,7 @@
         const tokenDisplay = document.getElementById('api-token-display');
         const token = tokenDisplay.value;
 
-        if (!token || token === 'No token generated') {
+		if (!token || tokenDisplay.dataset.tokenAvailable !== 'true') {
             window.decypharrUtils.createToast('No token to copy. Please refresh the token first.', 'warning');
             return;
         }

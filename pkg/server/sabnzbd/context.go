@@ -61,7 +61,13 @@ func (s *SABnzbd) categoryContext(next http.Handler) http.Handler {
 
 		category := r.URL.Query().Get("category")
 		if category == "" {
+			category = r.URL.Query().Get("cat")
+		}
+		if category == "" {
 			category = r.FormValue("category")
+		}
+		if category == "" {
+			category = r.FormValue("cat")
 		}
 
 		ctx := context.WithValue(r.Context(), categoryKey, strings.TrimSpace(category))
@@ -99,9 +105,14 @@ func (s *SABnzbd) modeContext(next http.Handler) http.Handler {
 			category = r.Form.Get("cat")
 		}
 
-		// Create a default Arr instance for the category
-		downloadUncached := false
-		a := arr.New(category, "", "", false, &downloadUncached, "", "auto")
+		// Keep the Arr admitted by authContext. Replacing it here used to
+		// discard configured provider selection and download policy after
+		// authentication had already succeeded.
+		a := getArrFromContext(r.Context())
+		if a == nil {
+			downloadUncached := false
+			a = arr.New(category, "", "", false, &downloadUncached, "", "auto")
+		}
 
 		ctx := context.WithValue(r.Context(), modeKey, strings.TrimSpace(mode))
 		ctx = context.WithValue(ctx, arrKey, a)
@@ -130,40 +141,12 @@ func (s *SABnzbd) authContext(next http.Handler) http.Handler {
 
 func (s *SABnzbd) authenticate(category, username, password string) (*arr.Arr, error) {
 	cfg := config.Get()
-	a := s.manager.Arr().Get(category)
-	if a == nil {
-		// Arr is not yet in runtime storage — look for a matching config entry
-		// so we inherit its download_uncached setting. If no config match,
-		// leave nil so SendToDebrid falls back to the debrid provider's setting.
-		var downloadUncached *bool
-		for _, cfgArr := range config.Get().Arrs {
-			if cfgArr.Name == category {
-				downloadUncached = cfgArr.DownloadUncached
-				break
-			}
-		}
-		a = arr.New(category, username, password, false, downloadUncached, "", "auto")
+	arrStorage := s.manager.Arr()
+	if matched := arrStorage.MatchCredentials(category, username, password); matched != nil {
+		return matched, nil
 	}
-	arrValidated := false // This is a flag to indicate if arr validation was successful
-	if (username == "" || password == "") && cfg.UseAuth {
-		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
+	if cfg.UseAuth && !config.VerifyAuth(username, password) {
+		return nil, fmt.Errorf("unauthorized: invalid credentials")
 	}
-	if a.Source == "auto" {
-		a.Host = username
-		a.Token = password
-	}
-	if err := a.Validate(); err == nil {
-		arrValidated = true
-	}
-
-	if !arrValidated && cfg.UseAuth {
-		// If arr validation failed, try to use user auth validation
-		if !config.VerifyAuth(username, password) {
-			return nil, fmt.Errorf("unauthorized: invalid credentials")
-		}
-	}
-	if username != "" && password != "" {
-		s.manager.Arr().AddOrUpdate(a)
-	}
-	return a, nil
+	return arrStorage.GetOrCreate(category), nil
 }

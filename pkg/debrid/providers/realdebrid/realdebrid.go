@@ -338,8 +338,6 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 		<-r.rarSemaphore
 	}()
 
-	files := make(map[string]types.File)
-
 	if !r.config.UnpackRar {
 		r.logger.Debug().Msgf("RAR file detected, but unpacking is disabled: %s. Falling back to single file representation.", t.Name)
 		return r.handleRarFallback(t, data), nil
@@ -409,7 +407,7 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 			len(selectedFiles),
 		)
 	}
-	files, err = types.FilesByLogicalName(matchedFiles)
+	files, err := types.FilesByLogicalName(matchedFiles)
 	if err != nil {
 		return nil, err
 	}

@@ -98,6 +98,7 @@ func TestWithTransportClearsTLSBypassHooks(t *testing.T) {
 		}
 		return tlsConnection, nil
 	}
+	//lint:ignore SA1019 The test verifies that both legacy and context-aware TLS bypass hooks are removed.
 	callerTransport.DialTLS = func(network, address string) (net.Conn, error) {
 		return nil, net.ErrClosed
 	}
@@ -119,6 +120,7 @@ func TestWithTransportClearsTLSBypassHooks(t *testing.T) {
 		t.Fatal("custom DialTLSContext hook was invoked")
 	}
 	securedTransport := client.httpClient.Transport.(*http.Transport)
+	//lint:ignore SA1019 The legacy hook is part of the security invariant under test.
 	if securedTransport.DialTLS != nil || securedTransport.DialTLSContext != nil {
 		t.Fatal("secured transport retained a custom TLS dial hook")
 	}

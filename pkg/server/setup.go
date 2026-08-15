@@ -49,7 +49,10 @@ func (s *Server) SetupHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 
 	if err := cfg.SetupComplete(); err == nil {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
+		return
+	}
+	if !s.requireSetupAccess(w, r) {
 		return
 	}
 	data := map[string]any{
@@ -117,6 +120,12 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	// Prevent re-running setup once it has already been completed
 	if err := cfg.SetupComplete(); err == nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !s.requireSetupAccess(w, r) {
+		return
+	}
+	if !s.requireBrowserMutation(w, r) {
 		return
 	}
 

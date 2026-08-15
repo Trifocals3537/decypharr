@@ -216,31 +216,3 @@ func (s *Storage) GetMigrationStatus() (*SystemMigrationStatus, error) {
 	}
 	return ProtoToSystemMigrationStatus(&pb), nil
 }
-
-func (s *Storage) copyFrom(other *Storage) error {
-	pairs := []struct {
-		name string
-		from *hybrid.Store
-		to   *hybrid.Store
-	}{
-		{"entries", other.entries, s.entries},
-		{"queue", other.queue, s.queue},
-		{"items", other.entryItems, s.entryItems},
-		{"repair_state", other.repairState, s.repairState},
-		{"repair_runs", other.repairRuns, s.repairRuns},
-		{"entry_tombstones", other.entryTombstones, s.entryTombstones},
-		{"queue_tombstones", other.queueTombstones, s.queueTombstones},
-	}
-
-	for _, p := range pairs {
-		if p.from == nil || p.to == nil {
-			continue
-		}
-		if err := p.from.ForEach(func(key string, value []byte) error {
-			return p.to.Put(key, value, nil)
-		}); err != nil {
-			return fmt.Errorf("failed to copy %s: %w", p.name, err)
-		}
-	}
-	return nil
-}

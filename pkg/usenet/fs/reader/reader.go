@@ -13,21 +13,28 @@ import (
 	"github.com/sirrobot01/decypharr/internal/nntp"
 )
 
-var decryptionBufPool = sync.Pool{}
-
-func acquireDecryptionBuffer(size int) []byte {
-	v := decryptionBufPool.Get()
-	if v == nil {
-		return make([]byte, size)
-	}
-	buf := v.([]byte)
-	if cap(buf) < size {
-		return make([]byte, size)
-	}
-	return buf[:size]
+type decryptionBuffer struct {
+	data []byte
 }
 
-func releaseDecryptionBuffer(buf []byte) {
+var decryptionBufPool = sync.Pool{
+	New: func() any { return &decryptionBuffer{} },
+}
+
+func acquireDecryptionBuffer(size int) *decryptionBuffer {
+	buf := decryptionBufPool.Get().(*decryptionBuffer)
+	if cap(buf.data) < size {
+		buf.data = make([]byte, size)
+	} else {
+		buf.data = buf.data[:size]
+	}
+	return buf
+}
+
+func releaseDecryptionBuffer(buf *decryptionBuffer) {
+	if buf == nil {
+		return
+	}
 	decryptionBufPool.Put(buf)
 }
 
@@ -325,8 +332,9 @@ func (sr *StreamingReader) readAtEncrypted(ctx context.Context, p []byte, off in
 	}
 
 	bufLen := alignedEnd - alignedStart
-	buf := acquireDecryptionBuffer(int(bufLen))
-	defer releaseDecryptionBuffer(buf)
+	pooled := acquireDecryptionBuffer(int(bufLen))
+	defer releaseDecryptionBuffer(pooled)
+	buf := pooled.data
 
 	// Read aligned data
 	n, err := sr.readAtPlain(ctx, buf, alignedStart)

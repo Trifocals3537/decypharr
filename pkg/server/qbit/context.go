@@ -2,7 +2,6 @@ package qbit
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -124,7 +123,7 @@ func (q *QBit) categoryContext(next http.Handler) http.Handler {
 func (q *QBit) authContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
-		username, password, err := getUsernameAndPassword(r)
+		username, password, err := q.getUsernameAndPassword(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
@@ -140,7 +139,7 @@ func (q *QBit) authContext(next http.Handler) http.Handler {
 	})
 }
 
-func getUsernameAndPassword(r *http.Request) (string, string, error) {
+func (q *QBit) getUsernameAndPassword(r *http.Request) (string, string, error) {
 	// Try to get from authorization header
 	username, password, err := decodeAuthHeader(r.Header.Get("Authorization"))
 	if err == nil && username != "" {
@@ -153,94 +152,28 @@ func getUsernameAndPassword(r *http.Request) (string, string, error) {
 		sid, err = r.Cookie("SID")
 	}
 	if err == nil {
-		username, password, err = extractFromSID(sid.Value)
-		if err != nil {
-			return "", "", err
+		if q.sessions == nil {
+			return "", "", fmt.Errorf("invalid or expired SID")
 		}
+		username, password, ok := q.sessions.credentials(sid.Value)
+		if !ok {
+			return "", "", fmt.Errorf("invalid or expired SID")
+		}
+		return username, password, nil
 	}
-	return username, password, nil
+	return "", "", nil
 }
 
 func (q *QBit) authenticate(category, username, password string) (*arr.Arr, error) {
 	cfg := config.Get()
-	a := q.manager.Arr().Get(category)
-	if a == nil {
-		// Arr is not yet in runtime storage — look for a matching config entry
-		// so we inherit its download_uncached setting. If no config match,
-		// leave nil so SendToDebrid falls back to the debrid provider's setting.
-		var downloadUncached *bool
-		for _, cfgArr := range config.Get().Arrs {
-			if cfgArr.Name == category {
-				downloadUncached = cfgArr.DownloadUncached
-				break
-			}
-		}
-		a = arr.New(category, username, password, false, downloadUncached, "", "auto")
+	arrStorage := q.manager.Arr()
+	if matched := arrStorage.MatchCredentials(category, username, password); matched != nil {
+		return matched, nil
 	}
-	arrValidated := false // This is a flag to indicate if arr validation was successful
-	if (username == "" || password == "") && cfg.UseAuth {
-		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
+	if cfg.UseAuth && !config.VerifyAuth(username, password) {
+		return nil, fmt.Errorf("unauthorized: invalid credentials")
 	}
-	if a.Source == "auto" {
-		a.Host = username
-		a.Token = password
-	}
-	if err := a.Validate(); err == nil {
-		arrValidated = true
-	}
-
-	if !arrValidated && cfg.UseAuth {
-		// If arr validation failed, try to use user auth validation
-		if !config.VerifyAuth(username, password) {
-			return nil, fmt.Errorf("unauthorized: invalid credentials")
-		}
-	}
-
-	if username != "" && password != "" {
-		// Then add or update arr in manager
-		q.manager.Arr().AddOrUpdate(a)
-	}
-	return a, nil
-}
-
-func createSID(username, password string) string {
-	// Create a verification hash
-	cfg := config.Get()
-	combined := fmt.Sprintf("%s|%s", username, password)
-	hash := sha256.Sum256([]byte(combined + cfg.SecretKey()))
-	hashStr := fmt.Sprintf("%x", hash)[:16] // First 16 chars
-	// Base64 encode
-	return base64.URLEncoding.EncodeToString(fmt.Appendf(nil, "%s|%s", combined, hashStr))
-}
-
-func extractFromSID(sid string) (string, string, error) {
-	// Decode base64
-	decoded, err := base64.URLEncoding.DecodeString(sid)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid SID format")
-	}
-
-	// Split into parts: username:password:hash
-	parts := strings.Split(string(decoded), "|")
-	if len(parts) != 3 {
-		return "", "", fmt.Errorf("invalid SID structure")
-	}
-
-	username := parts[0]
-	password := parts[1]
-	providedHash := parts[2]
-
-	// Verify hash
-	cfg := config.Get()
-	combined := fmt.Sprintf("%s|%s", username, password)
-	expectedHash := sha256.Sum256([]byte(combined + cfg.SecretKey()))
-	expectedHashStr := fmt.Sprintf("%x", expectedHash)[:16]
-
-	if providedHash != expectedHashStr {
-		return "", "", fmt.Errorf("invalid SID signature")
-	}
-
-	return username, password, nil
+	return arrStorage.GetOrCreate(category), nil
 }
 
 func hashesContext(next http.Handler) http.Handler {

@@ -36,7 +36,11 @@ curl http://localhost:8282/version
 
 ### GET /api/config
 
-Get current configuration.
+Get the editable configuration without returning stored credentials. Configured
+provider keys, Arr tokens, Usenet and rclone passwords, proxy values, webhook
+URLs, and callback URLs are represented by the reserved
+`__DECYPHARR_REDACTED__` placeholder. The control-plane API token is never
+returned; `api_token_configured` reports whether one exists.
 
 ```bash
 curl -H "Authorization: Bearer TOKEN" \
@@ -48,6 +52,12 @@ curl -H "Authorization: Bearer TOKEN" \
 Update only the supplied configuration fields. Omitted fields are preserved.
 The request uses [JSON Merge Patch](https://www.rfc-editor.org/rfc/rfc7396)
 semantics, so setting a field to `null` removes it.
+
+When updating an existing provider entry, send the redaction placeholder back
+unchanged to preserve that entry's stored secret, send a new value to replace
+it, or send an empty string to request an empty value (normal configuration
+validation still applies). A placeholder whose provider identity no longer
+matches an existing entry is rejected instead of being persisted.
 
 ```bash
 curl -X PATCH \
@@ -260,7 +270,8 @@ curl -X POST \
 
 ```json
 {
-  "api_token": "NEW_TOKEN"
+	"token": "NEW_TOKEN",
+	"message": "API token refreshed successfully"
 }
 ```
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
@@ -20,25 +21,41 @@ func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	a, err := q.authenticate(getCategory(ctx), username, password)
+	_, err := q.authenticate(getCategory(ctx), username, password)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	if cfg.UseAuth {
-		http.SetCookie(w, newSIDCookie(createSID(a.Host, a.Token)))
+		token, err := q.sessions.create(username, password)
+		if err != nil {
+			http.Error(w, "failed to create session", http.StatusInternalServerError)
+			return
+		}
+		http.SetCookie(w, newSIDCookie(token, qbitCookieSecure(r)))
 	}
 	_, _ = w.Write([]byte("Ok."))
 }
 
-func newSIDCookie(value string) *http.Cookie {
+func newSIDCookie(value string, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     "SID",
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		MaxAge:   int(qbitSessionTTL / time.Second),
+		Expires:  time.Now().Add(qbitSessionTTL),
 	}
+}
+
+func qbitCookieSecure(r *http.Request) bool {
+	// Compatibility clients commonly use the private HTTP listener even when
+	// the browser UI is exposed through an HTTPS reverse proxy. AppURL does not
+	// describe this request's transport and must not make that private-client
+	// cookie unusable.
+	return r != nil && r.TLS != nil
 }
 
 func (q *QBit) handleVersion(w http.ResponseWriter, r *http.Request) {

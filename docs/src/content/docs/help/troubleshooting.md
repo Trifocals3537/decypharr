@@ -45,13 +45,15 @@ chmod +x decypharr
 
 ### API token not working
 
-1. Regenerate token:
+1. While logged in, regenerate the token from **Settings** → **Auth**, or use
+   the old token once to rotate it:
    ```bash
    curl -X POST -H "Authorization: Bearer OLD_TOKEN" \
      http://localhost:8282/api/refresh-token
    ```
-2. Check token in `/config/config.json` (`api_token` field)
-3. Ensure Authorization header format: `Bearer YOUR_TOKEN`
+2. Save the returned `token` value; configuration reads intentionally do not
+   reveal it.
+3. Ensure the Authorization header format is `Bearer YOUR_TOKEN`.
 
 ## Mount Issues
 

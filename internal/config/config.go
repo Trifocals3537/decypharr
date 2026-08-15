@@ -179,10 +179,11 @@ type CustomFolders struct {
 }
 
 type Auth struct {
-	Username      string `json:"username,omitempty"`
-	Password      string `json:"password,omitempty"`
-	APIToken      string `json:"api_token,omitempty"`
-	SessionSecret string `json:"session_secret,omitempty"`
+	Username       string `json:"username,omitempty"`
+	Password       string `json:"password,omitempty"`
+	APIToken       string `json:"api_token,omitempty"`
+	SessionSecret  string `json:"session_secret,omitempty"`
+	SessionVersion uint64 `json:"session_version,omitempty"`
 }
 
 // RepairSource selects where the health checker enumerates entries from.

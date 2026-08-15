@@ -150,7 +150,7 @@ cache miss.
 | Field                             | Type   | Description                                                                    | Default                         |
 |-----------------------------------|--------|--------------------------------------------------------------------------------|---------------------------------|
 | `provider`                        | string | Provider type: `realdebrid`, `alldebrid`, `debridlink`, `torbox`, `premiumize` | **Required**                    |
-| `name`                            | string | Display name                                                                   | Provider type                   |
+| `name`                            | string | Unique provider instance key and mount-folder name                             | Provider type                   |
 | `api_key`                         | string | API key from provider dashboard                                                | **Required**                    |
 | `download_api_keys`               | array  | Additional keys for download rotation                                          | `[api_key]`                     |
 | `download_uncached`               | bool   | Download torrents not in provider cache                                        | `false`                         |
@@ -425,7 +425,7 @@ See the [Health Checker & Repair guide](/guides/repair/) for the full model, API
 | `token`             | Arr API key                      | Required    |
 | `skip_repair`       | Skip repair for this Arr         | `false`     |
 | `download_uncached` | Download uncached torrents       | `false`     |
-| `selected_debrid`   | Force specific Debrid provider   | `""` (auto) |
+| `selected_debrid`   | Exact `name` of a Debrid instance | `""` (auto) |
 | `source`            | Config source (`auto`, `config`) | `config`    |
 
 ## Queue Cleanup

@@ -117,7 +117,11 @@ response when the bound is reached. Values above `4096` are clamped.
 
 ## Debrid Providers
 
-Array of Debrid services:
+Array of Debrid services. When an Arr does not set `selected_debrid`, providers
+are tried in this array order. This makes cache-only preference predictable: for
+example, place TorBox with `download_uncached: false` before a fallback provider
+to use TorBox when it has the hash and continue to the fallback on a definite
+cache miss.
 
 ```json
 {

@@ -1,6 +1,10 @@
 package customerror
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"net/http"
+)
 
 var HosterUnavailableError = (&Error{
 	statusCode: 503,
@@ -37,3 +41,16 @@ var TooManyActiveDownloadsError = (&Error{
 	err:        errors.New("too many active downloads"),
 	Code:       "too_many_active_downloads",
 }).Retryable() // slot exhaustion is transient — retry after backoff
+
+// NewTorrentNotCachedError returns a fresh error because retry and permanence
+// are mutable flags on Error. A cache miss is transient: another provider may
+// already have the torrent, or this provider may cache it later.
+func NewTorrentNotCachedError(name string) *Error {
+	return NewError(
+		fmt.Errorf("torrent %q is not cached", name),
+		http.StatusConflict,
+		"torrent_not_cached",
+		false,
+		false,
+	).Retryable()
+}

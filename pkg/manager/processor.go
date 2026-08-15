@@ -466,15 +466,6 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 	if err := m.validateTorrentImportRequest(importRequest); err != nil {
 		return nil, err
 	}
-	debridTorrent := &debridTypes.Torrent{
-		InfoHash: importRequest.Magnet.InfoHash,
-		Magnet:   importRequest.Magnet,
-		Name:     importRequest.Magnet.Name,
-		Arr:      importRequest.Arr,
-		Size:     importRequest.Magnet.Size,
-		Files:    make(map[string]debridTypes.File),
-	}
-
 	clients := m.FilterDebrid(func(c common.Client) bool {
 		if importRequest.SelectedDebrid != "" && c.Config().Name != importRequest.SelectedDebrid {
 			return false
@@ -489,17 +480,37 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 	errs := make([]error, 0, len(clients))
 
 	for _, db := range clients {
+		providerConfig := db.Config()
+		providerName := providerConfig.Name
+		if providerName == "" {
+			providerName = providerConfig.Provider
+		}
+		if providerName == "" {
+			providerName = "unnamed provider"
+		}
 		overrideDownloadUncached := false
 
 		if importRequest.DownloadUncached != nil {
 			overrideDownloadUncached = *importRequest.DownloadUncached
 		} else {
-			overrideDownloadUncached = db.Config().DownloadUncached
+			overrideDownloadUncached = providerConfig.DownloadUncached
 		}
-		debridTorrent.DownloadUncached = overrideDownloadUncached
+		// Providers are allowed to populate the torrent in place. Construct each
+		// fallback candidate from source fields so an earlier failed provider
+		// cannot leak state into the next attempt. Do not copy Torrent: it owns
+		// synchronization state used by its file map.
+		debridTorrent := &debridTypes.Torrent{
+			InfoHash:         importRequest.Magnet.InfoHash,
+			Magnet:           importRequest.Magnet,
+			Name:             importRequest.Magnet.Name,
+			Arr:              importRequest.Arr,
+			Size:             importRequest.Magnet.Size,
+			Files:            make(map[string]debridTypes.File),
+			DownloadUncached: overrideDownloadUncached,
+		}
 		_logger := db.Logger()
 		_logger.Info().
-			Str("Provider", db.Config().Name).
+			Str("Provider", providerName).
 			Str("Arr", importRequest.Arr.Name).
 			Str("Hash", debridTorrent.InfoHash).
 			Str("Name", debridTorrent.Name).
@@ -508,11 +519,14 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 
 		dbt, err := db.SubmitMagnet(debridTorrent)
 		if err != nil || dbt == nil || dbt.Id == "" {
-			errs = append(errs, err)
+			if err == nil {
+				err = fmt.Errorf("provider returned an incomplete submission response")
+			}
+			errs = append(errs, fmt.Errorf("%s submission: %w", providerName, err))
 			continue
 		}
 		dbt.Arr = importRequest.Arr
-		_logger.Info().Str("id", dbt.Id).Msgf("Entry: %s submitted to %s", dbt.Name, db.Config().Name)
+		_logger.Info().Str("id", dbt.Id).Msgf("Entry: %s submitted to %s", dbt.Name, providerName)
 
 		torrent, err := db.CheckStatus(dbt)
 		if err != nil {
@@ -521,18 +535,24 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 				rollbackID = torrent.Id
 			}
 			rollbackErr := m.deleteProviderTorrent(db, rollbackID)
-			errs = append(errs, errors.Join(err, rollbackErr))
+			errs = append(errs, errors.Join(
+				fmt.Errorf("%s status check: %w", providerName, err),
+				rollbackErr,
+			))
 			continue
 		}
 		if torrent == nil {
-			statusErr := fmt.Errorf("torrent %s returned nil after checking status", dbt.Name)
+			statusErr := fmt.Errorf("%s returned nil after checking torrent %s status", providerName, dbt.Name)
 			rollbackErr := m.deleteProviderTorrent(db, dbt.Id)
 			errs = append(errs, errors.Join(statusErr, rollbackErr))
 			continue
 		}
 		if err := validateTorrentRootName(torrent.Name, false); err != nil {
 			rollbackErr := m.deleteProviderTorrent(db, torrent.Id)
-			errs = append(errs, errors.Join(err, rollbackErr))
+			errs = append(errs, errors.Join(
+				fmt.Errorf("%s returned an unsafe torrent name: %w", providerName, err),
+				rollbackErr,
+			))
 			continue
 		}
 		return torrent, nil

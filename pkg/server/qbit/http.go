@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
@@ -210,11 +211,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 					return
 				}
-				if status == http.StatusTooManyRequests ||
-					status == http.StatusServiceUnavailable {
-					w.Header().Set("Retry-After", "5")
-				}
-				http.Error(w, err.Error(), status)
+				writeTorrentAddError(w, err, status)
 				return
 			}
 			atleastOne = true
@@ -254,11 +251,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 						http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 						return
 					}
-					if status == http.StatusTooManyRequests ||
-						status == http.StatusServiceUnavailable {
-						w.Header().Set("Retry-After", "5")
-					}
-					http.Error(w, err.Error(), status)
+					writeTorrentAddError(w, err, status)
 					return
 				}
 				atleastOne = true
@@ -287,9 +280,57 @@ func torrentAddErrorStatus(err error) (status int, idempotent bool) {
 	case errors.Is(err, manager.ErrQueueEntryDeleting),
 		errors.Is(err, storage.ErrQueuedEntryDeleting):
 		return http.StatusConflict, false
+	case onlyCustomErrorCode(err, "torrent_not_cached"):
+		return http.StatusConflict, false
 	default:
 		return http.StatusBadRequest, false
 	}
+}
+
+func writeTorrentAddError(w http.ResponseWriter, err error, status int) {
+	if onlyCustomErrorCode(err, "torrent_not_cached") {
+		w.Header().Set("X-Decypharr-Error-Code", "torrent_not_cached")
+	}
+	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "5")
+	}
+	http.Error(w, err.Error(), status)
+}
+
+// onlyCustomErrorCode follows ordinary wrappers and joined provider failures.
+// It returns true only when every terminal failure has the same typed outcome;
+// a cache miss from one provider plus an outage from another must not be
+// mislabeled as an all-provider cache miss.
+func onlyCustomErrorCode(err error, code string) bool {
+	found := false
+	var visit func(error) bool
+	visit = func(current error) bool {
+		if current == nil {
+			return true
+		}
+		if customErr, ok := current.(*customerror.Error); ok {
+			found = true
+			return customErr.Code == code
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			children := joined.Unwrap()
+			if len(children) == 0 {
+				return false
+			}
+			for _, child := range children {
+				if !visit(child) {
+					return false
+				}
+			}
+			return true
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			child := wrapped.Unwrap()
+			return child != nil && visit(child)
+		}
+		return false
+	}
+	return visit(err) && found
 }
 
 func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
@@ -54,6 +55,14 @@ func TestIdentityStreamHEADUsesStoredMetadata(t *testing.T) {
 	cfg.Strm = config.Strm{}
 
 	mgr := manager.New()
+	// The process-wide logger intentionally keeps its file open. Register its
+	// close before manager shutdown so Windows can remove the temporary config
+	// directory after every manager-owned final log line has been written.
+	t.Cleanup(func() {
+		if err := logger.Close(); err != nil {
+			t.Errorf("close logger: %v", err)
+		}
+	})
 	t.Cleanup(func() {
 		if err := mgr.Stop(); err != nil {
 			t.Errorf("stop manager: %v", err)

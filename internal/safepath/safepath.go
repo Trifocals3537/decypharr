@@ -225,6 +225,35 @@ func Remove(root, target string) error {
 	return nil
 }
 
+// Rename atomically replaces one strict descendant with another through a
+// pinned os.Root. Both paths must remain beneath the same trusted root.
+func Rename(root, oldPath, newPath string) error {
+	absoluteOld, err := ValidateUnderRoot(root, oldPath)
+	if err != nil {
+		return err
+	}
+	absoluteNew, err := ValidateUnderRoot(root, newPath)
+	if err != nil {
+		return err
+	}
+	rooted, oldRelative, err := openRootTarget(root, absoluteOld)
+	if err != nil {
+		return err
+	}
+	defer rooted.Close()
+	newRoot, newRelative, err := openRootTarget(root, absoluteNew)
+	if err != nil {
+		return err
+	}
+	if err := newRoot.Close(); err != nil {
+		return fmt.Errorf("close filesystem root: %w", err)
+	}
+	if err := rooted.Rename(oldRelative, newRelative); err != nil {
+		return fmt.Errorf("rename %q to %q: %w", absoluteOld, absoluteNew, err)
+	}
+	return nil
+}
+
 // OpenFile safely replaces a descendant file through a pinned os.Root.
 // Existing targets are unlinked first and the replacement uses O_EXCL. This
 // prevents both symlink redirection and truncation through an attacker-created

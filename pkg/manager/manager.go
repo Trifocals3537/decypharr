@@ -65,6 +65,7 @@ type Manager struct {
 	fixer  *Fixer
 	ctx    context.Context
 	cancel context.CancelFunc
+	strm   *Strm
 
 	background            sync.WaitGroup
 	backgroundMu          sync.Mutex
@@ -367,6 +368,7 @@ func (m *Manager) init() {
 
 	// Initialize fixer
 	m.fixer = NewFixer(m)
+	m.strm = NewStrm(m)
 
 	// Set mount paths
 	m.setMountPaths()
@@ -628,6 +630,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
 			m.fixNZBFileSizes(m.ctx)
 		}
+		m.strm.SweepAsync("startup")
 	})
 
 	// Start workers
@@ -839,6 +842,9 @@ func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Ent
 	if err := m.storage.AddOrUpdateDurable(entry); err != nil {
 		return err
 	}
+	if entry.IsComplete && m.strm != nil {
+		m.strm.SyncEntryAsync(entry.InfoHash)
+	}
 	if callback != nil {
 		m.startBackground("entry update callback", func() {
 			callback(entry)
@@ -914,8 +920,18 @@ func (m *Manager) deleteMainEntryWithCleanup(
 	infohash string,
 	cleanup func(*storage.Entry) error,
 ) error {
-	if err := m.storage.DeleteWithCleanup(infohash, cleanup); err != nil {
+	var deleted *storage.Entry
+	if err := m.storage.DeleteWithCleanup(infohash, func(entry *storage.Entry) error {
+		deleted = entry
+		if cleanup == nil {
+			return nil
+		}
+		return cleanup(entry)
+	}); err != nil {
 		return err
+	}
+	if deleted != nil && m.strm != nil {
+		m.strm.RemoveEntryAsync(deleted)
 	}
 	if m.entry != nil {
 		m.RefreshEntries(true)

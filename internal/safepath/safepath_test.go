@@ -211,6 +211,29 @@ func TestOpenFileDoesNotFollowOutsideSymlink(t *testing.T) {
 	assertSafePathContents(t, outsideFile, "outside")
 }
 
+func TestRenameReplacesOnlyWithinRoot(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.tmp")
+	newPath := filepath.Join(root, "new.txt")
+	if err := os.WriteFile(oldPath, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rename(root, oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(newPath)
+	if err != nil || string(data) != "new" {
+		t.Fatalf("renamed content = %q, %v", data, err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside.txt")
+	if err := Rename(root, newPath, outside); err == nil {
+		t.Fatal("Rename accepted an outside destination")
+	}
+}
+
 func TestSymlinkAllowsOutsideTargetButKeepsLinkUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	linksDir := filepath.Join(root, "category", "release")

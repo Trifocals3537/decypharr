@@ -52,6 +52,11 @@ class ConfigManager {
 
         const addRuleBtn = document.getElementById('addQueueCleanupRuleBtn');
         if (addRuleBtn) addRuleBtn.addEventListener('click', () => this.addQueueCleanupCustomRow());
+
+		const strmEnabled = document.getElementById('strm.enabled');
+		if (strmEnabled) strmEnabled.addEventListener('change', () => this.updateStrmControls());
+		const regenerateStrm = document.getElementById('strmRegenerateBtn');
+		if (regenerateStrm) regenerateStrm.addEventListener('click', () => this.regenerateStrmLibrary());
     }
 
     // Display labels for the built-in queue-cleanup catalog. IDs MUST match
@@ -137,7 +142,52 @@ class ConfigManager {
 
         // Load repair config
         this.populateRepairSettings(config.repair, config.arrs);
+
+		// Load mountless STRM-library settings.
+		this.populateStrmSettings(config.strm);
     }
+
+	populateStrmSettings(strm = {}) {
+		const enabled = document.getElementById('strm.enabled');
+		const path = document.getElementById('strm.path');
+		const delivery = document.getElementById('strm.delivery_mode');
+		const keepExtension = document.getElementById('strm.keep_media_extension');
+		if (enabled) enabled.checked = !!strm.enabled;
+		if (path) path.value = strm.path || '';
+		if (delivery) delivery.value = strm.delivery_mode || 'proxy';
+		if (keepExtension) keepExtension.checked = !!strm.keep_media_extension;
+		this.updateStrmControls();
+	}
+
+	updateStrmControls() {
+		const active = !!document.getElementById('strm.enabled')?.checked;
+		document.querySelectorAll('.strm-setting').forEach((element) => {
+			element.disabled = !active;
+		});
+	}
+
+	collectStrmConfig() {
+		return {
+			enabled: !!document.getElementById('strm.enabled')?.checked,
+			path: document.getElementById('strm.path')?.value.trim() || '',
+			delivery_mode: document.getElementById('strm.delivery_mode')?.value || 'proxy',
+			keep_media_extension: !!document.getElementById('strm.keep_media_extension')?.checked,
+		};
+	}
+
+	async regenerateStrmLibrary() {
+		const button = document.getElementById('strmRegenerateBtn');
+		if (button) button.disabled = true;
+		try {
+			const response = await window.decypharrUtils.fetcher('/api/strm/regenerate', {method: 'POST'});
+			if (!response.ok) throw new Error((await response.text()) || 'Could not start regeneration');
+			window.decypharrUtils.createToast('STRM library regeneration started.', 'success');
+		} catch (error) {
+			window.decypharrUtils.createToast(`STRM regeneration failed: ${error.message}`, 'error');
+		} finally {
+			if (button) button.disabled = !document.getElementById('strm.enabled')?.checked;
+		}
+	}
 
     populateRepairSettings(repair, arrs) {
         // Always refresh the arrs multi-select so it tracks the latest *Arrs config.
@@ -1175,6 +1225,9 @@ class ConfigManager {
         if (config.repair?.enabled && !config.repair.schedule) {
             errors.push('Repair: schedule is required when Repair is enabled');
         }
+		if (config.strm?.enabled && !config.strm.path) {
+			errors.push('STRM Library: export path is required when enabled');
+		}
         return {
             valid: errors.length === 0,
             errors
@@ -1235,7 +1288,10 @@ class ConfigManager {
             notifications: this.collectNotificationsConfig(),
 
             // Collect repair config
-            repair: this.collectRepairConfig()
+			repair: this.collectRepairConfig(),
+
+			// Mountless media library
+			strm: this.collectStrmConfig()
         };
     }
 

@@ -57,6 +57,7 @@ export default defineConfig({
                         {label: 'DFS (Custom VFS)', link: '/guides/mounting/dfs'},
                         {label: 'Rclone', link: '/guides/mounting/rclone'},
                         {label: 'WebDAV Server', link: '/guides/mounting/webdav'},
+						{label: 'STRM Library', link: '/guides/mounting/strm'},
                     ],
                 },
                 {

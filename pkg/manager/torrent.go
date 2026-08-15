@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,20 +99,10 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Build map of current remote by infohash
-	remoteTorrentsByHash := make(map[string]*types.Torrent, len(remote))
-	for _, t := range remote {
-		old, exists := remoteTorrentsByHash[t.InfoHash]
-		if !exists {
-			remoteTorrentsByHash[t.InfoHash] = t
-		}
-		if exists && t.Added.After(old.Added) {
-			remoteTorrentsByHash[t.InfoHash] = t
-		}
-	}
+	remoteIndex := indexRemoteTorrents(remote)
 
 	// Detect changes by streaming through cached entries
-	newTorrents, torrentsToUpdate, torrentsToDelete, err := m.detectTorrentChanges(provider, remoteTorrentsByHash)
+	newTorrents, torrentsToUpdate, torrentsToDelete, present, err := m.detectTorrentChanges(provider, remoteIndex)
 	if err != nil {
 		return err
 	}
@@ -144,10 +135,6 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	present := make(map[string]struct{}, len(remoteTorrentsByHash))
-	for infohash := range remoteTorrentsByHash {
-		present[infohash] = struct{}{}
-	}
 	if err := m.storage.ObserveProviderSnapshot(provider, providerSnapshot, present); err != nil {
 		return fmt.Errorf("record provider snapshot: %w", err)
 	}
@@ -158,24 +145,92 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 	return nil
 }
 
+type remoteTorrentIndex struct {
+	byHash map[string]*types.Torrent
+	byID   map[string]*types.Torrent
+}
+
+func normalizeInfoHash(infoHash string) string {
+	return strings.ToLower(strings.TrimSpace(infoHash))
+}
+
+// indexRemoteTorrents indexes both portable torrent identity (infohash) and
+// provider-local identity. Some providers omit an infohash from list results,
+// so the provider ID is needed to safely recognize an already-managed
+// placement. Empty hashes are deliberately excluded from byHash: they cannot
+// identify a new torrent on their own.
+func indexRemoteTorrents(remote []*types.Torrent) remoteTorrentIndex {
+	index := remoteTorrentIndex{
+		byHash: make(map[string]*types.Torrent, len(remote)),
+		byID:   make(map[string]*types.Torrent, len(remote)),
+	}
+	for _, torrent := range remote {
+		if torrent == nil {
+			continue
+		}
+		if infoHash := normalizeInfoHash(torrent.InfoHash); infoHash != "" {
+			if old := index.byHash[infoHash]; old == nil || torrent.Added.After(old.Added) {
+				index.byHash[infoHash] = torrent
+			}
+		}
+		if torrent.Id != "" {
+			if old := index.byID[torrent.Id]; old == nil || torrent.Added.After(old.Added) {
+				index.byID[torrent.Id] = torrent
+			}
+		}
+	}
+	return index
+}
+
+// match returns a remote record for an existing placement. Hash identity wins.
+// Provider-ID fallback is accepted only when the remote record omits its hash;
+// a different explicit hash must never be rebound to the stored entry.
+func (index remoteTorrentIndex) match(infoHash string, placement *storage.ProviderEntry) (*types.Torrent, bool) {
+	if remote, ok := index.byHash[normalizeInfoHash(infoHash)]; ok {
+		return remote, true
+	}
+	if placement == nil || placement.ID == "" {
+		return nil, false
+	}
+	remote, ok := index.byID[placement.ID]
+	if !ok || normalizeInfoHash(remote.InfoHash) != "" {
+		return nil, false
+	}
+
+	// Never mutate the provider's shared list result. The rebound hash is used
+	// only to update the already-managed entry associated with this placement.
+	rebound := remote.Copy()
+	rebound.InfoHash = infoHash
+	return rebound, true
+}
+
 // detectTorrentChanges streams through cached entries and detects what changed
-func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map[string]*types.Torrent) (
+func (m *Manager) detectTorrentChanges(provider string, remote remoteTorrentIndex) (
 	newTorrents []*types.Torrent,
 	torrentsToUpdate []*storage.Entry,
 	torrentsToDelete []*storage.Entry,
+	present map[string]struct{},
 	err error,
 ) {
 	newTorrents = make([]*types.Torrent, 0, 100)
 	torrentsToUpdate = make([]*storage.Entry, 0, 100)
 	torrentsToDelete = make([]*storage.Entry, 0, 10)
-	cachedInfoHashes := make(map[string]bool, len(remoteTorrentsByHash))
+	cachedInfoHashes := make(map[string]bool, len(remote.byHash))
+	present = make(map[string]struct{}, len(remote.byHash))
+	for infoHash := range remote.byHash {
+		present[infoHash] = struct{}{}
+	}
 
 	err = m.storage.ForEachBatch(refreshBatchSize, func(batch []*storage.Entry) error {
 		for _, entry := range batch {
-			cachedInfoHashes[entry.InfoHash] = true
+			infoHash := normalizeInfoHash(entry.InfoHash)
+			cachedInfoHashes[infoHash] = true
 
-			currentTorrent, onRemote := remoteTorrentsByHash[entry.InfoHash]
 			oldPlacement, placementOnDebrid := entry.Providers[provider]
+			currentTorrent, onRemote := remote.match(entry.InfoHash, oldPlacement)
+			if onRemote {
+				present[infoHash] = struct{}{}
+			}
 
 			if placementOnDebrid {
 				if !onRemote {
@@ -201,17 +256,17 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 
 	if err != nil {
 		m.logger.Error().Err(err).Msg("Failed to stream cached remote")
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Check for brand new torrents (not in cache at all)
-	for infohash, t := range remoteTorrentsByHash {
+	for infohash, t := range remote.byHash {
 		if !cachedInfoHashes[infohash] {
 			newTorrents = append(newTorrents, t)
 		}
 	}
 
-	return newTorrents, torrentsToUpdate, torrentsToDelete, nil
+	return newTorrents, torrentsToUpdate, torrentsToDelete, present, nil
 }
 
 // handleTorrentDeletions processes torrent deletions concurrently

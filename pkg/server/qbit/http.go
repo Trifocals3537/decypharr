@@ -91,11 +91,19 @@ func (q *QBit) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func normalizeStateFilter(raw string) string {
+	state := strings.TrimSpace(raw)
+	if strings.EqualFold(state, "all") {
+		return ""
+	}
+	return state
+}
+
 func (q *QBit) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 	//log all url params
 	ctx := r.Context()
 	category := getCategory(ctx)
-	state := strings.Trim(r.URL.Query().Get("filter"), "")
+	state := normalizeStateFilter(r.URL.Query().Get("filter"))
 	hashes := getHashes(ctx)
 
 	// Convert hashes to filter function

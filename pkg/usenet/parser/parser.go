@@ -170,6 +170,11 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 	}
 
 	nzb.ID = uuid.New().String()
+	if nzb.Name == "" {
+		// Keep every derived download path entry-scoped even when all filename
+		// and metadata candidates collapse or are not portable path components.
+		nzb.Name = nzb.ID
+	}
 	return nzb, fileGroups, nil
 }
 

@@ -478,6 +478,28 @@ http://username:password@decypharr:8282/webdav/
 WebDAV has no local cache - streaming depends on Debrid/Usenet speed. For better performance, use DFS mount instead of
 WebDAV.
 
+### Debrid streams return 429 or stall under concurrent load
+
+Decypharr automatically shares a concurrency budget across playback, seeks,
+link probes, and background downloads for each Debrid download account.
+Playback keeps a reserved slot whenever the current budget has at least two
+slots and is admitted ahead of queued bulk work. A
+`429 Too Many Requests` response temporarily reduces that account's budget,
+honors `Retry-After`, and then restores capacity gradually after healthy
+responses.
+
+Inspect the secret-free governor snapshot without enabling debug logging:
+
+```bash
+curl -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/debug/stats | jq .cdn_traffic
+```
+
+The `throttles`, `current_limit`, `waiting_interactive`, and
+`waiting_background` fields show whether provider-side CDN pressure is the
+cause. `rate_limit` and `download_rate_limit` govern provider API calls; they
+do not control CDN response bodies.
+
 ## Repair Worker Issues
 
 ### Repair jobs stuck "Processing"

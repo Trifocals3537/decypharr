@@ -16,6 +16,7 @@ import (
 	"github.com/go-co-op/gocron/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/tlsconfig"
@@ -43,6 +44,7 @@ type Manager struct {
 	readyOnce    sync.Once
 	streamClient *http.Client
 	streamWait   func(context.Context, time.Duration) error
+	cdnTraffic   *cdntraffic.Governor
 
 	// Migration jobs tracking
 	migrationJobs   *xsync.Map[string, *storage.SwitcherJob]
@@ -107,7 +109,7 @@ type downloadLinkService interface {
 	Clear()
 }
 
-func newStreamHTTPClient() *http.Client {
+func newStreamHTTPClient(governor *cdntraffic.Governor) *http.Client {
 	// Optimized transport for high-performance streaming with HTTP/2
 	// multiplexing and verified TLS.
 	dialer := &net.Dialer{
@@ -135,9 +137,13 @@ func newStreamHTTPClient() *http.Client {
 		ForceAttemptHTTP2:      true,
 	}
 
+	if governor == nil {
+		governor = cdntraffic.New(cdntraffic.Options{})
+	}
+
 	return &http.Client{
 		Timeout:   0,
-		Transport: transport,
+		Transport: cdntraffic.NewTransport(transport, governor),
 	}
 }
 
@@ -156,6 +162,7 @@ func New() *Manager {
 		usenetTimeout = 10 * time.Minute
 	}
 	entryLifecycle := newEntryLifecycle()
+	cdnGovernor := cdntraffic.New(cdntraffic.Options{})
 
 	instance := &Manager{
 		storage:                strg,
@@ -166,8 +173,9 @@ func New() *Manager {
 		arr:                    arr.NewStorage(),
 		queue:                  newQueue(strg, cfg.RemoveStalledAfter, entryLifecycle),
 		ready:                  make(chan struct{}),
-		streamClient:           newStreamHTTPClient(),
+		streamClient:           newStreamHTTPClient(cdnGovernor),
 		streamWait:             waitForStreamRetry,
+		cdnTraffic:             cdnGovernor,
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),
@@ -397,6 +405,7 @@ func (m *Manager) initLinkService() {
 		m.streamClient,
 		m.config.Retries,
 		logger.New("link"),
+		m.cdnProviderType,
 	)
 }
 

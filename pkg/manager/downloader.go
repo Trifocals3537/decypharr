@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/safepath"
+	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sourcegraph/conc/pool"
@@ -849,29 +851,28 @@ func (d *Downloader) processTorrentDownload(ctx context.Context, entry *storage.
 	// Resolve download links before spawning goroutines
 	type downloadTask struct {
 		layout torrentFileLayout
-		link   string
+		link   debridTypes.DownloadLink
 	}
+	downloadCtx := cdntraffic.WithPriority(ctx, cdntraffic.PriorityBackground)
 	var tasks []downloadTask
-	resolveLink := d.torrentLink
-	if resolveLink == nil {
-		resolveLink = func(ctx context.Context, entry *storage.Entry, fileName string) (string, error) {
-			downloadLink, err := d.manager.linkService.GetLink(ctx, entry, fileName)
-			if err != nil {
-				return "", err
-			}
-			return downloadLink.DownloadLink, nil
-		}
-	}
 	for _, layout := range layouts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		file := layout.file
-		downloadLink, err := resolveLink(ctx, entry, file.Name)
+		var downloadLink debridTypes.DownloadLink
+		var err error
+		if d.torrentLink != nil {
+			downloadLink.DownloadLink, err = d.torrentLink(downloadCtx, entry, file.Name)
+			downloadLink.Debrid = entry.ActiveProvider
+			downloadLink.Filename = file.Name
+		} else {
+			downloadLink, err = d.manager.linkService.GetLink(downloadCtx, entry, file.Name)
+		}
 		if err != nil {
 			return fmt.Errorf("resolve all torrent download links: file %q: %w", file.Name, err)
 		}
-		if strings.TrimSpace(downloadLink) == "" {
+		if strings.TrimSpace(downloadLink.DownloadLink) == "" {
 			return fmt.Errorf("resolve all torrent download links: file %q returned an empty URL", file.Name)
 		}
 		tasks = append(tasks, downloadTask{layout: layout, link: downloadLink})
@@ -890,9 +891,10 @@ func (d *Downloader) processTorrentDownload(ctx context.Context, entry *storage.
 				return err
 			}
 			defer part.Close()
-			if err := d.localDownloader(
-				ctx,
+			if err := d.localDownloaderWithLink(
+				downloadCtx,
 				task.link,
+				entry.ActiveProvider,
 				part,
 				task.layout.file.ByteRange,
 				progressCallback,
@@ -1170,9 +1172,23 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 // visible only after ownedTorrentPart.Commit performs a rooted no-overwrite
 // publish.
 func (d *Downloader) localDownloader(ctx context.Context, downloadURL string, part *ownedTorrentPart, byterange *[2]int64, progressCallback func(int64, int64)) error {
+	return d.localDownloaderWithLink(
+		ctx,
+		debridTypes.DownloadLink{DownloadLink: downloadURL},
+		"",
+		part,
+		byterange,
+		progressCallback,
+	)
+}
+
+func (d *Downloader) localDownloaderWithLink(ctx context.Context, downloadLink debridTypes.DownloadLink, fallbackProvider string, part *ownedTorrentPart, byterange *[2]int64, progressCallback func(int64, int64)) error {
 	if part == nil || part.file == nil {
 		return fmt.Errorf("rooted torrent partial file is required")
 	}
+	ctx = cdntraffic.WithPriority(ctx, cdntraffic.PriorityBackground)
+	ctx = d.manager.withCDNIdentity(ctx, downloadLink, fallbackProvider)
+	downloadURL := downloadLink.DownloadLink
 	startTime := time.Now()
 	requestedRange := "full"
 	currentSize, err := part.Size()

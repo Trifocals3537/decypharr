@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 )
@@ -13,6 +14,7 @@ type Snapshot struct {
 	Mount         MountStats        `json:"mount"`
 	Usenet        map[string]any    `json:"usenet,omitempty"`
 	ActiveStreams ActiveStreamStats `json:"active_streams"`
+	CDNTraffic    cdntraffic.Stats  `json:"cdn_traffic"`
 	Storage       StorageStats      `json:"storage"`
 	Queue         QueueStats        `json:"queue"`
 	Arrs          ArrStats          `json:"arrs"`

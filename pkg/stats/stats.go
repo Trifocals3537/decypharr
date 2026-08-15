@@ -150,6 +150,7 @@ func (c *Collector) collect() *Snapshot {
 		Count:   len(streams),
 		Streams: streams,
 	}
+	snap.CDNTraffic = c.mgr.CDNTrafficStats()
 
 	// --- Storage ---
 	torrentCount, err := c.mgr.GetTorrentsCount()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
@@ -36,6 +37,7 @@ var (
 type EntryRefresher func(infohash string) (*storage.Entry, error)
 type EntryRepairer func(ctx context.Context, entry *storage.Entry) error
 type EntrySaver func(entry *storage.Entry) error
+type ProviderTypeResolver func(provider string) string
 type cachedLinkInvalidator interface {
 	InvalidateCachedLink(types.DownloadLink) error
 }
@@ -57,6 +59,7 @@ type Service struct {
 	entryRefresher  EntryRefresher
 	repairer        EntryRepairer
 	entrySaver      EntrySaver
+	providerType    ProviderTypeResolver
 	httpClient      *http.Client
 	retries         int
 	wait            func(context.Context, time.Duration) error
@@ -73,7 +76,12 @@ func New(
 	httpClient *http.Client,
 	retries int,
 	logger zerolog.Logger,
+	providerTypes ...ProviderTypeResolver,
 ) *Service {
+	var providerType ProviderTypeResolver
+	if len(providerTypes) > 0 {
+		providerType = providerTypes[0]
+	}
 	return &Service{
 		validated:       xsync.NewMap[string, struct{}](),
 		refreshBackoffs: make(map[string]refreshBackoffState),
@@ -81,6 +89,7 @@ func New(
 		entryRefresher:  entryRefresher,
 		repairer:        entryReinsert,
 		entrySaver:      entrySaver,
+		providerType:    providerType,
 		httpClient:      httpClient,
 		retries:         retries,
 		wait:            waitWithContext,
@@ -122,6 +131,18 @@ func (s *Service) getClient(provider string) (debrid.Client, error) {
 		return nil, fmt.Errorf("client for provider %s not found", provider)
 	}
 	return c, nil
+}
+
+func (s *Service) withCDNIdentity(ctx context.Context, link *types.DownloadLink) context.Context {
+	identity := cdntraffic.Identity{}
+	if link != nil {
+		identity.Provider = link.Debrid
+		identity.AccountToken = link.Token
+	}
+	if identity.Provider != "" && s.providerType != nil {
+		identity.ProviderType = s.providerType(identity.Provider)
+	}
+	return cdntraffic.WithIdentity(ctx, identity)
 }
 
 // fetchAndValidate fetches a download link and validates it.
@@ -504,6 +525,7 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 	if link.Empty() {
 		return NewPermanentError(fmt.Errorf("download url is empty for %s||%s", link.Filename, link.Link), "empty_link")
 	}
+	ctx = s.withCDNIdentity(ctx, link)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, link.DownloadLink, nil)
 	if err != nil {

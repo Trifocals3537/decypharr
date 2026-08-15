@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Tensai75/nzbparser"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
@@ -78,15 +79,18 @@ func getGroupsList(groups map[string]struct{}) []string {
 }
 
 func determineNZBName(filename string, meta map[string]string) string {
-	// Prefer filename if it exists
-	if filename != "" {
-		filename = strings.TrimSuffix(filename, filepath.Ext(filename))
-	} else if name := meta["Name"]; name != "" {
-		filename = name
-	} else if title := meta["title"]; title != "" {
-		filename = title
+	candidates := []string{
+		strings.TrimSuffix(filename, filepath.Ext(filename)),
+		meta["Name"],
+		meta["title"],
 	}
-	return utils.RemoveInvalidChars(filename)
+	for _, candidate := range candidates {
+		cleaned := utils.RemoveInvalidChars(candidate)
+		if safepath.ValidateIdentifier(cleaned) == nil {
+			return cleaned
+		}
+	}
+	return ""
 }
 
 func determineExtension(group *FileGroup) string {

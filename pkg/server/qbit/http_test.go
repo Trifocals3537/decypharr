@@ -39,3 +39,14 @@ func TestQbitCookieSecurityFollowsActualTransport(t *testing.T) {
 		t.Fatal("TLS compatibility client did not receive a Secure cookie")
 	}
 }
+
+func TestNormalizeStateFilterTreatsAllAsUnfiltered(t *testing.T) {
+	for _, raw := range []string{"all", " ALL ", ""} {
+		if got := normalizeStateFilter(raw); got != "" {
+			t.Fatalf("normalizeStateFilter(%q) = %q, want empty", raw, got)
+		}
+	}
+	if got := normalizeStateFilter(" downloading "); got != "downloading" {
+		t.Fatalf("normalizeStateFilter() = %q, want downloading", got)
+	}
+}

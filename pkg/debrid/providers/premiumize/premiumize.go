@@ -5,8 +5,10 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -15,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -49,6 +52,7 @@ type Premiumize struct {
 	config                config.Debrid
 	profile               *types.Profile
 	profileLastFetched    time.Time
+	profileMu             sync.Mutex
 	isFileAllowed         func(string, int64) error
 }
 
@@ -122,7 +126,7 @@ func (pm *Premiumize) do(req *http.Request, out any) (*http.Response, error) {
 		return resp, fmt.Errorf("premiumize API error: Status: %d", resp.StatusCode)
 	}
 
-	if out == nil || resp.ContentLength == 0 {
+	if resp.ContentLength == 0 {
 		return resp, nil
 	}
 
@@ -133,13 +137,14 @@ func (pm *Premiumize) do(req *http.Request, out any) (*http.Response, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return resp, nil
 	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return resp, err
-	}
-
-	var envelope apiError
+	var envelope apiEnvelope
 	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Status == "error" {
-		return resp, fmt.Errorf("premiumize API error (code %s)", envelope.Code)
+		return resp, &premiumizeAPIError{Code: envelope.Code}
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			return resp, err
+		}
 	}
 
 	return resp, nil
@@ -285,6 +290,10 @@ func (pm *Premiumize) DeleteTorrent(torrentID string) error {
 	if resp != nil && resp.StatusCode == http.StatusNotFound {
 		return customerror.TorrentNotFoundError
 	}
+	var apiErr *premiumizeAPIError
+	if errors.As(err, &apiErr) && apiErr.Code == "not_found" {
+		return customerror.TorrentNotFoundError
+	}
 	return err
 }
 
@@ -425,8 +434,12 @@ func (pm *Premiumize) filesForTransfer(tr premiumizeTransfer) (map[string]types.
 }
 
 func (pm *Premiumize) itemDetails(id string) (*itemDetailsResponse, error) {
+	return pm.itemDetailsContext(context.Background(), id)
+}
+
+func (pm *Premiumize) itemDetailsContext(ctx context.Context, id string) (*itemDetailsResponse, error) {
 	var data itemDetailsResponse
-	req, err := http.NewRequest(http.MethodGet, pm.endpoint("/api/item/details?id="+url.QueryEscape(id)), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pm.endpoint("/api/item/details?id="+url.QueryEscape(id)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -608,23 +621,28 @@ func (pm *Premiumize) CheckFile(ctx context.Context, infohash, fileID string) er
 	if fileID == "" {
 		return customerror.HosterUnavailableError
 	}
-	if _, err := pm.itemDetails(fileID); err != nil {
+	if _, err := pm.itemDetailsContext(ctx, fileID); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (pm *Premiumize) GetProfile() (*types.Profile, error) {
+	pm.profileMu.Lock()
+	defer pm.profileMu.Unlock()
 	if pm.profile != nil && time.Since(pm.profileLastFetched) < profileCacheDuration {
-		return pm.profile, nil
+		cached := *pm.profile
+		return &cached, nil
 	}
 	profile, err := pm.getClientProfile(pm.client)
 	if err != nil {
 		return nil, err
 	}
-	pm.profile = profile
+	stored := *profile
+	pm.profile = &stored
 	pm.profileLastFetched = time.Now()
-	return profile, nil
+	result := stored
+	return &result, nil
 }
 
 func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, error) {
@@ -646,7 +664,7 @@ func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, 
 		return nil, err
 	}
 	if data.Status == "error" {
-		return nil, fmt.Errorf("premiumize API error (code %s)", data.Code)
+		return nil, &premiumizeAPIError{Code: data.Code}
 	}
 	expiration := time.Time{}
 	premium := int64(0)
@@ -658,10 +676,14 @@ func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, 
 			accountType = "premium"
 		}
 	}
+	customerID, err := data.customerIDInt64()
+	if err != nil {
+		return nil, err
+	}
 	return &types.Profile{
 		Name:       pm.config.Name,
-		Id:         data.customerIDInt64(),
-		Username:   strconv.FormatInt(data.customerIDInt64(), 10),
+		Id:         customerID,
+		Username:   strconv.FormatInt(customerID, 10),
 		Points:     data.BoosterPoints,
 		Premium:    premium,
 		Expiration: expiration,
@@ -775,8 +797,11 @@ func mapStatus(status string) types.TorrentStatus {
 }
 
 func normalizeProgress(progress float64) float64 {
+	if math.IsNaN(progress) || progress <= 0 {
+		return 0
+	}
 	if progress <= 1 {
 		return progress * 100
 	}
-	return progress
+	return min(progress, 100)
 }

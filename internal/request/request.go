@@ -2,6 +2,7 @@ package request
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,22 +25,31 @@ import (
 var (
 	once     sync.Once
 	instance *Client
+
+	// ErrInvalidProxy is returned before any request is sent when an explicit
+	// proxy setting cannot be parsed or uses an unsupported scheme. Explicit
+	// proxy configuration is fail-closed so credentials and traffic never fall
+	// back to the host's direct connection by accident.
+	ErrInvalidProxy = errors.New("request: invalid proxy configuration")
 )
+
+const defaultMaxConnsPerHost = 32
 
 type ClientOption func(*Client)
 
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client          *retryablehttp.Client
-	httpClient      *http.Client // underlying http client
-	rateLimiter     ratelimit.Limiter
-	headers         map[string]string
-	headersMu       sync.RWMutex
-	maxRetries      int
-	timeout         time.Duration
-	retryableStatus map[int]struct{}
-	logger          zerolog.Logger
-	proxy           string
+	client           *retryablehttp.Client
+	httpClient       *http.Client // underlying http client
+	rateLimiter      ratelimit.Limiter
+	headers          map[string]string
+	headersMu        sync.RWMutex
+	maxRetries       int
+	timeout          time.Duration
+	retryableStatus  map[int]struct{}
+	logger           zerolog.Logger
+	proxy            string
+	configurationErr error
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -120,6 +130,9 @@ func WithProxy(proxyURL string) ClientOption {
 
 // Do performs an HTTP request with retries for certain status codes
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if c.configurationErr != nil {
+		return nil, c.configurationErr
+	}
 	// Apply headers
 	c.headersMu.RLock()
 	if c.headers != nil {
@@ -243,25 +256,28 @@ func New(options ...ClientOption) *Client {
 
 	// Check if transport was set by WithTransport option
 	if client.httpClient.Transport == nil {
-		transport := &http.Transport{
+		client.httpClient.Transport = &http.Transport{
 			TLSClientConfig: tlsconfig.Verified(""),
+			Proxy:           http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 15 * time.Second,
 			}).DialContext,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
+			MaxConnsPerHost:       defaultMaxConnsPerHost,
 			IdleConnTimeout:       30 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}
-
-		// Configure proxy if needed
-		SetProxy(transport, client.proxy)
-
-		// Set the transport to the client
-		client.httpClient.Transport = transport
+	}
+	transport := client.httpClient.Transport.(*http.Transport)
+	if transport.MaxConnsPerHost <= 0 {
+		transport.MaxConnsPerHost = defaultMaxConnsPerHost
+	}
+	if client.proxy != "" {
+		client.configurationErr = setProxy(transport, client.proxy)
 	}
 
 	// Create retryablehttp client
@@ -312,33 +328,65 @@ func Default() *Client {
 	return instance
 }
 
-func SetProxy(transport *http.Transport, proxyURL string) {
-	if proxyURL != "" {
-		if strings.HasPrefix(proxyURL, "socks5://") {
-			// Handle SOCKS5 proxy
-			socksURL, err := url.Parse(proxyURL)
-			if err == nil {
-				auth := &proxy.Auth{}
-				if socksURL.User != nil {
-					auth.User = socksURL.User.Username()
-					password, _ := socksURL.User.Password()
-					auth.Password = password
-				}
+type contextDialerAdapter struct {
+	dialContext func(context.Context, string, string) (net.Conn, error)
+}
 
-				dialer, err := proxy.SOCKS5("tcp", socksURL.Host, auth, proxy.Direct)
-				if err == nil {
-					transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-						return dialer.Dial(network, addr)
-					}
-				}
-			}
-		} else {
-			_proxy, err := url.Parse(proxyURL)
-			if err == nil {
-				transport.Proxy = http.ProxyURL(_proxy)
+func (d contextDialerAdapter) Dial(network, address string) (net.Conn, error) {
+	return d.dialContext(context.Background(), network, address)
+}
+
+func (d contextDialerAdapter) DialContext(
+	ctx context.Context,
+	network, address string,
+) (net.Conn, error) {
+	return d.dialContext(ctx, network, address)
+}
+
+func setProxy(transport *http.Transport, rawURL string) error {
+	proxyURL, err := url.Parse(rawURL)
+	if err != nil || proxyURL.Host == "" {
+		return ErrInvalidProxy
+	}
+
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "http", "https":
+		transport.Proxy = http.ProxyURL(proxyURL)
+		return nil
+	case "socks5", "socks5h":
+		var auth *proxy.Auth
+		if proxyURL.User != nil {
+			password, _ := proxyURL.User.Password()
+			auth = &proxy.Auth{
+				User:     proxyURL.User.Username(),
+				Password: password,
 			}
 		}
-	} else {
-		transport.Proxy = http.ProxyFromEnvironment
+
+		forwardDialContext := transport.DialContext
+		if forwardDialContext == nil {
+			forwardDialContext = (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 15 * time.Second,
+			}).DialContext
+		}
+		dialer, err := proxy.SOCKS5(
+			"tcp",
+			proxyURL.Host,
+			auth,
+			contextDialerAdapter{dialContext: forwardDialContext},
+		)
+		if err != nil {
+			return ErrInvalidProxy
+		}
+		contextDialer, ok := dialer.(proxy.ContextDialer)
+		if !ok {
+			return ErrInvalidProxy
+		}
+		transport.Proxy = nil
+		transport.DialContext = contextDialer.DialContext
+		return nil
+	default:
+		return ErrInvalidProxy
 	}
 }

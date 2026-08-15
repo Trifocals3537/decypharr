@@ -22,6 +22,11 @@ func (m *Manager) Repair() *Repair {
 	return m.repair
 }
 
+// Strm returns the mountless-library reconciler.
+func (m *Manager) Strm() *Strm {
+	return m.strm
+}
+
 func (m *Manager) Scheduler() gocron.Scheduler {
 	return m.scheduler
 }

@@ -330,6 +330,44 @@ Mount configuration determines how files are exposed on the filesystem.
 
 Connect to an existing Rclone instance's RC API.
 
+## STRM Library
+
+The optional STRM library exposes completed debrid and Usenet entries without a
+filesystem mount. It can run with any mount setting, including `mount.type:
+"none"`.
+
+```json
+{
+  "app_url": "https://decypharr.example.net",
+  "strm": {
+    "enabled": true,
+    "path": "/srv/media-strm",
+    "delivery_mode": "proxy",
+    "keep_media_extension": false
+  }
+}
+```
+
+| Field                  | Description                                                       | Default |
+|------------------------|-------------------------------------------------------------------|---------|
+| `enabled`              | Maintain the mountless export                                     | `false` |
+| `path`                 | Dedicated directory containing generated `.strm` files            | —       |
+| `delivery_mode`        | `proxy`, or `redirect` for eligible debrid streams                | `proxy` |
+| `keep_media_extension` | Write `Movie.mkv.strm` instead of `Movie.strm`                    | `false` |
+
+`app_url` must be reachable by the media server. When it is empty,
+Decypharr writes its configured listener address and substitutes loopback for
+an unspecified listener. That fallback is appropriate only when the player
+runs on the same host.
+
+Decypharr generates and persists a 256-bit signing key when STRM is first
+configured. The key is redacted from the configuration API and is never shown
+in the Web UI. Changing it invalidates existing `.strm` URLs; use a new empty
+export directory if deliberate key rotation is required.
+
+See the [STRM Library guide](/guides/mounting/strm/) for media-server setup,
+delivery choices, and ownership safeguards.
+
 ## Health Checker
 
 ```json

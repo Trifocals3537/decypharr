@@ -217,6 +217,9 @@ func (e *EntryItem) GetActiveFiles() []*File {
 }
 
 type File struct {
+	// ID is a stable, opaque per-file identity used by long-lived stream URLs.
+	// It is assigned once by storage and retained when provider data refreshes.
+	ID        string    `msgpack:"id,omitempty" json:"id,omitempty"`
 	Name      string    `msgpack:"name" json:"name"`
 	Path      string    `msgpack:"path,omitempty" json:"path,omitempty"`
 	AddedOn   time.Time `msgpack:"added_on" json:"added_on"`
@@ -459,6 +462,19 @@ func (e *Entry) GetFile(filename string) (*File, error) {
 		return nil, fmt.Errorf("file deleted")
 	}
 	return f, nil
+}
+
+// GetFileByID resolves a non-deleted file by its stable identity.
+func (e *Entry) GetFileByID(id string) (*File, error) {
+	if id == "" {
+		return nil, fmt.Errorf("file id is required")
+	}
+	for _, file := range e.Files {
+		if file != nil && file.ID == id && !file.Deleted {
+			return file, nil
+		}
+	}
+	return nil, fmt.Errorf("file id %q not found", id)
 }
 
 // RunChecks performs integrity checks on the Entry

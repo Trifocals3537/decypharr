@@ -74,6 +74,7 @@ func redactConfigSecrets(cfg *config.Config) {
 	redactString(&cfg.Mount.ExternalRclone.RCPassword)
 	redactString(&cfg.Notifications.WebhookURL)
 	redactString(&cfg.Notifications.CallbackURL)
+	redactString(&cfg.Strm.Secret)
 	//lint:ignore SA1019 Legacy config fields must remain safe during migration.
 	redactString(&cfg.DiscordWebhook)
 	//lint:ignore SA1019 Legacy config fields must remain safe during migration.
@@ -155,6 +156,9 @@ func restoreConfigSecrets(candidate, current *config.Config) error {
 		return err
 	}
 	if err := restoreString(&candidate.Notifications.CallbackURL, current.Notifications.CallbackURL, true, "notification callback URL"); err != nil {
+		return err
+	}
+	if err := restoreString(&candidate.Strm.Secret, current.Strm.Secret, true, "STRM signing secret"); err != nil {
 		return err
 	}
 	//lint:ignore SA1019 Legacy config fields must remain safe during migration.

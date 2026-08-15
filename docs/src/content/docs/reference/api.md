@@ -346,6 +346,19 @@ List files in torrent.
 
 Download specific file.
 
+## STRM Library
+
+### POST /api/strm/regenerate
+
+Starts a complete reconciliation of the configured STRM export and returns
+`202 Accepted`. This control-plane endpoint requires the same authenticated
+session or bearer token as the rest of `/api`.
+
+Generated media URLs use `/stream/v1/{entryID}/{fileID}/{name}?s={signature}`.
+They are read-only and require a valid HMAC signature even when WebDAV or UI
+authentication is disabled. `HEAD` is answered from stored metadata without a
+provider or NNTP request; `GET` supports one HTTP byte range.
+
 ## Error Responses
 
 ```json

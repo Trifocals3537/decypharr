@@ -61,6 +61,12 @@
                         </button>
                         <button type="button"
                                 class="tab-button flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
+                                data-tab="strm">
+                            <i class="bi bi-play-btn text-lg"></i>
+                            <span class="hidden sm:inline">STRM Library</span>
+                        </button>
+                        <button type="button"
+                                class="tab-button flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="repair">
                             <i class="bi bi-heart-pulse text-lg"></i>
                             <span class="hidden sm:inline">Repair</span>
@@ -1342,6 +1348,82 @@
                                             </div>
                                         </div>
                                     </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content hidden" data-tab-content="strm">
+                    <div class="space-y-6">
+                        <div class="alert alert-info">
+                            <i class="bi bi-info-circle text-xl"></i>
+                            <div>
+                                <h3 class="font-bold">Mountless media library</h3>
+                                <div class="text-sm">Creates small, signed .strm files that Jellyfin, Plex, Emby, or
+                                    another player can scan. Playback resolves the current debrid or Usenet source at
+                                    request time, so provider links can refresh without rebuilding the media database.
+                                </div>
+                            </div>
+                        </div>
+
+                        <label class="label cursor-pointer justify-start gap-3">
+                            <input type="checkbox" class="checkbox checkbox-lg checkbox-primary"
+                                   id="strm.enabled" name="strm.enabled">
+                            <div>
+                                <span class="label-text font-medium text-lg">Enable STRM Library</span>
+                                <div class="label-text-alt">Runs alongside any mount type, including No Mount.</div>
+                            </div>
+                        </label>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            <div class="lg:col-span-2">
+                                <label class="label" for="strm.path">
+                                    <span class="font-medium">Export path</span>
+                                </label>
+                                <input type="text" class="input w-full strm-setting" name="strm.path" id="strm.path"
+                                       placeholder="/home/user/media-strm">
+                                <span class="label-text-alt opacity-70">Use a dedicated folder. Decypharr refuses to
+                                    take ownership of a non-empty, unrecognized folder and preserves foreign files.</span>
+                            </div>
+
+                            <div>
+                                <label class="label" for="strm.delivery_mode">
+                                    <span class="font-medium">Playback delivery</span>
+                                </label>
+                                <select class="select w-full strm-setting" name="strm.delivery_mode"
+                                        id="strm.delivery_mode">
+                                    <option value="proxy">Proxy through Decypharr (recommended)</option>
+                                    <option value="redirect">Redirect to provider when possible</option>
+                                </select>
+                                <span class="label-text-alt opacity-70">Proxy supports both debrid and Usenet and keeps
+                                    provider URLs private. Redirect reduces server bandwidth for debrid playback but
+                                    exposes the temporary provider URL to the player.</span>
+                            </div>
+
+                            <div>
+                                <label class="label cursor-pointer justify-start gap-3 mt-8">
+                                    <input type="checkbox" class="checkbox checkbox-primary strm-setting"
+                                           id="strm.keep_media_extension" name="strm.keep_media_extension">
+                                    <div>
+                                        <span class="font-medium">Keep media extension</span>
+                                        <div class="label-text-alt">Write Movie.mkv.strm instead of Movie.strm.</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="card bg-base-200">
+                            <div class="card-body gap-3">
+                                <h3 class="card-title text-base">Reachability</h3>
+                                <p class="text-sm opacity-80">The General tab's Application URL is written into each
+                                    .strm file. Leave it blank only when the player runs on this same host and can reach
+                                    Decypharr on loopback.</p>
+                                <div class="card-actions justify-end">
+                                    <button type="button" class="btn btn-outline btn-primary strm-setting"
+                                            id="strmRegenerateBtn">
+                                        <i class="bi bi-arrow-repeat"></i>Regenerate library
+                                    </button>
                                 </div>
                             </div>
                         </div>

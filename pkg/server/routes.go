@@ -91,6 +91,7 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Post("/config", s.handleUpdateConfig)
 			r.Put("/config", s.handleUpdateConfig)
 			r.Patch("/config", s.handleUpdateConfig)
+			r.Post("/strm/regenerate", s.handleStrmRegenerate)
 			r.Post("/mount/cache/cleanup", s.handleRunMountCacheCleanup)
 			r.Post("/mount/cache/purge", s.handlePurgeMountCache)
 			r.Post("/refresh-token", s.handleRefreshAPIToken)

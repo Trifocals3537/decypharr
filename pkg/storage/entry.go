@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -183,6 +186,18 @@ func (s *Storage) AddOrUpdate(entry *Entry) error {
 func (s *Storage) addOrUpdateMainRaw(entry *Entry) error {
 	entry.UpdatedAt = time.Now()
 
+	var previous *Entry
+	var err error
+	if s.entries.Exists(entry.InfoHash) {
+		previous, err = s.getMainRaw(entry.InfoHash)
+		if err != nil {
+			return fmt.Errorf("load current main entry before update: %w", err)
+		}
+	}
+	if err := assignFileIDs(entry, previous); err != nil {
+		return err
+	}
+
 	// Serialize
 	pb := EntryToProto(entry)
 	data, err := proto.Marshal(pb)
@@ -201,14 +216,6 @@ func (s *Storage) addOrUpdateMainRaw(entry *Entry) error {
 		AddedOn:   entry.AddedOn.Unix(),
 	}
 
-	var previous *Entry
-	if s.entries.Exists(entry.InfoHash) {
-		previous, err = s.getMainRaw(entry.InfoHash)
-		if err != nil {
-			return fmt.Errorf("load current main entry before update: %w", err)
-		}
-	}
-
 	s.entryItemsMu.Lock()
 	defer s.entryItemsMu.Unlock()
 	snapshots, err := s.mutateEntryItems(previous, entry)
@@ -224,6 +231,142 @@ func (s *Storage) addOrUpdateMainRaw(entry *Entry) error {
 	}
 	s.markEntryItemMutation(previous, entry)
 	return nil
+}
+
+const fileIDBytes = 16
+
+// NewFileID returns a collision-resistant stable file identity.
+func NewFileID() (string, error) {
+	bytes := make([]byte, fileIDBytes)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate file id: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+// assignFileIDs preserves IDs from the durable version of an entry and gives
+// only genuinely new files a fresh identity. Duplicate IDs fail closed because
+// an ambiguous identity would let one signed URL select the wrong file.
+func assignFileIDs(entry, previous *Entry) error {
+	if entry == nil {
+		return fmt.Errorf("assign file ids: entry is nil")
+	}
+	used := make(map[string]string, len(entry.Files))
+	for name, file := range entry.Files {
+		if file == nil {
+			return fmt.Errorf("assign file ids: file %q is nil", name)
+		}
+		if file.ID == "" && previous != nil {
+			file.ID = previousFileID(entry, previous, name, file)
+		}
+		if file.ID == "" {
+			for {
+				id, err := NewFileID()
+				if err != nil {
+					return err
+				}
+				if _, exists := used[id]; !exists {
+					file.ID = id
+					break
+				}
+			}
+		}
+		if other, duplicate := used[file.ID]; duplicate {
+			return fmt.Errorf("assign file ids: files %q and %q share id %q", other, name, file.ID)
+		}
+		used[file.ID] = name
+	}
+	return nil
+}
+
+// previousFileID carries identity through provider refreshes and safe renames.
+// Exact map/name matches win; otherwise only a unique provider ID, path, or
+// byte-range match is accepted. Ambiguity deliberately produces a new ID.
+func previousFileID(entry, previous *Entry, name string, file *File) string {
+	if old := previous.Files[name]; old != nil && old.ID != "" {
+		return old.ID
+	}
+	if id := uniquePreviousFileID(previous, func(_ string, old *File) bool {
+		return old.Name == file.Name
+	}); id != "" {
+		return id
+	}
+	if id := previousProviderFileID(entry, previous, name, file.Name); id != "" {
+		return id
+	}
+	if file.Path != "" {
+		pathKey := strings.ToLower(filepath.ToSlash(filepath.Clean(file.Path)))
+		if id := uniquePreviousFileID(previous, func(_ string, old *File) bool {
+			return old.Path != "" && old.Size == file.Size &&
+				strings.ToLower(filepath.ToSlash(filepath.Clean(old.Path))) == pathKey
+		}); id != "" {
+			return id
+		}
+	}
+	if file.ByteRange != nil {
+		if id := uniquePreviousFileID(previous, func(_ string, old *File) bool {
+			return old.ByteRange != nil && old.Size == file.Size && *old.ByteRange == *file.ByteRange
+		}); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func uniquePreviousFileID(previous *Entry, match func(string, *File) bool) string {
+	var found string
+	for name, old := range previous.Files {
+		if old == nil || old.ID == "" || !match(name, old) {
+			continue
+		}
+		if found != "" && found != old.ID {
+			return ""
+		}
+		found = old.ID
+	}
+	return found
+}
+
+func previousProviderFileID(entry, previous *Entry, mapName, fileName string) string {
+	var found string
+	for providerName, currentProvider := range entry.Providers {
+		if currentProvider == nil {
+			continue
+		}
+		currentFile := currentProvider.Files[mapName]
+		if currentFile == nil {
+			currentFile = currentProvider.Files[fileName]
+		}
+		if currentFile == nil || currentFile.Id == "" {
+			continue
+		}
+		previousProvider := previous.Providers[providerName]
+		if previousProvider == nil {
+			for _, candidate := range previous.Providers {
+				if candidate != nil && candidate.Provider == currentProvider.Provider {
+					previousProvider = candidate
+					break
+				}
+			}
+		}
+		if previousProvider == nil {
+			continue
+		}
+		for oldName, oldProviderFile := range previousProvider.Files {
+			if oldProviderFile == nil || oldProviderFile.Id != currentFile.Id {
+				continue
+			}
+			old := previous.Files[oldName]
+			if old == nil || old.ID == "" {
+				continue
+			}
+			if found != "" && found != old.ID {
+				return ""
+			}
+			found = old.ID
+		}
+	}
+	return found
 }
 
 // BatchAddOrUpdate adds or updates multiple entries

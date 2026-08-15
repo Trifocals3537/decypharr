@@ -136,6 +136,8 @@ func New(mgr *manager.Manager) *Server {
 	if !wd.IsDisabled() {
 		routes["/webdav"] = wd.Routes()
 	}
+	// Signed STRM URLs are independent of the WebDAV mount surface.
+	routes["/stream"] = wd.StreamRoutes()
 	routes["/sabnzbd"] = sb.Routes()
 
 	// Trim trailing slash so chi registers the URLBase root path itself

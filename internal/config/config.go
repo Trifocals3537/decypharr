@@ -244,6 +244,7 @@ type Config struct {
 	QBitTorrent QBitTorrent `json:"qbittorrent,omitzero"` // Deprecated: use Manager instead
 	Rclone      Rclone      `json:"rclone,omitzero"`      // Deprecated: use Mounts instead
 	Mount       Mount       `json:"mount,omitzero"`
+	Strm        Strm        `json:"strm,omitzero"`
 
 	AllowedExt          []string `json:"allowed_file_types,omitempty"`
 	AllowSamples        bool     `json:"allow_samples,omitempty"`
@@ -333,6 +334,7 @@ func (c *Config) loadConfig() error {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return fmt.Errorf("error parsing config JSON: %w", err)
 	}
+	hadStrmSecret := c.Strm.Secret != ""
 
 	// Set defaults for any missing values
 	if err := c.setDefaults(); err != nil {
@@ -341,6 +343,13 @@ func (c *Config) loadConfig() error {
 
 	// Apply environment variable overrides
 	c.applyEnvOverrides()
+	if !hadStrmSecret && c.Strm.Secret != "" {
+		// Persist the generated key immediately. Otherwise a restart would
+		// invalidate every signed URL already written to the STRM library.
+		if err := c.Save(); err != nil {
+			return fmt.Errorf("persist STRM signing secret: %w", err)
+		}
+	}
 
 	return nil
 }
@@ -383,6 +392,9 @@ func (c *Config) Validate() error {
 	// If either debrid or usenet is enabled, at least one must be configured
 	if len(c.Debrids) == 0 && len(c.Usenet.Providers) == 0 {
 		return errors.New("at least one debrid provider or usenet provider must be configured")
+	}
+	if err := c.Strm.Validate(c.AppURL); err != nil {
+		return err
 	}
 
 	return nil
@@ -664,6 +676,9 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 	}
 
 	c.QueueCleanup.Rules = mergeQueueCleanupRules(c.QueueCleanup.Rules)
+	if err := c.setStrmDefaults(initializeAuth); err != nil {
+		return err
+	}
 
 	// Basic defaults
 	if c.URLBase == "" {
@@ -874,6 +889,7 @@ func clearHotFields(c *Config) {
 	c.Retries = 0
 	c.SkipAutoMove = false
 	c.Repair = RepairConfig{}
+	c.Strm = Strm{}
 
 	// Queue cleanup rules are read live via config.Get() inside CleanupQueue,
 	// so changes apply on the next cleanup cycle without a restart.

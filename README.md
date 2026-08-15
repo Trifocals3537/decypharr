@@ -14,6 +14,7 @@ Usenet streaming.
 - Mock Qbittorent and Sabnzbd API that supports the Arrs (Sonarr, Radarr, Lidarr etc)
 - Multiple Debrid and usenet providers support with a single interface
 - Direct Usenet streaming via NNTP (no separate download client required)
+- Optional signed STRM library for mountless Plex, Jellyfin, and Emby playback
 
 ## Supported Debrid Providers
 

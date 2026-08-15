@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -721,6 +722,8 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error saving config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	strmChanged := currentConfig.AppURL != newConfig.AppURL ||
+		!reflect.DeepEqual(currentConfig.Strm, newConfig.Strm)
 
 	// Only mutate live Arr state after the new configuration is durable.
 	s.manager.Arr().SyncFromConfig(newConfig.Arrs)
@@ -737,6 +740,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		go s.Restart()
 	} else {
 		currentConfig.ApplyRuntime(newConfig)
+		if strmChanged && s.manager.Strm() != nil {
+			s.manager.Strm().SweepAsync("config_change")
+		}
 		// Reschedule/reapply the repair sweep if its settings changed.
 		if svc := s.manager.Repair(); svc != nil {
 			if err := svc.ApplyConfig(); err != nil {
@@ -746,6 +752,18 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)
+}
+
+func (s *Server) handleStrmRegenerate(w http.ResponseWriter, _ *http.Request) {
+	if !config.Get().Strm.Active() {
+		http.Error(w, "STRM is disabled or has no export path", http.StatusBadRequest)
+		return
+	}
+	if s.manager.Strm() == nil || !s.manager.Strm().SweepAsync("manual_regenerate") {
+		http.Error(w, "STRM regeneration could not be scheduled", http.StatusServiceUnavailable)
+		return
+	}
+	utils.JSONResponse(w, map[string]string{"status": "started"}, http.StatusAccepted)
 }
 
 func validateConfigUpdate(candidate *config.Config) error {

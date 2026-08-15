@@ -40,6 +40,7 @@ func secretConfigFixture() *config.Config {
 			WebhookURL:  "https://discord.example/webhook-secret",
 			CallbackURL: "https://callback.example/callback-secret",
 		},
+		Strm:           config.Strm{Enabled: true, Path: "/media/strm", Secret: "strm-signing-secret"},
 		DiscordWebhook: "https://legacy.example/discord-secret",
 		CallbackURL:    "https://legacy.example/callback-secret",
 		Auth: &config.Auth{
@@ -82,6 +83,7 @@ func TestNewConfigResponseRedactsSecretsWithoutMutatingLiveConfig(t *testing.T) 
 		"discord-secret",
 		"control-plane-secret",
 		"session-secret",
+		"strm-signing-secret",
 	} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("configuration response exposed %q: %s", secret, encoded)
@@ -126,6 +128,9 @@ func TestRestoreConfigSecretsPreservesConfiguredValuesAndAcceptsReplacements(t *
 	}
 	if candidate.Usenet.Providers[0].Password != "replacement-usenet-secret" {
 		t.Fatalf("replacement Usenet password was not accepted: %q", candidate.Usenet.Providers[0].Password)
+	}
+	if candidate.Strm.Secret != "strm-signing-secret" {
+		t.Fatalf("STRM secret = %q, want configured value", candidate.Strm.Secret)
 	}
 }
 

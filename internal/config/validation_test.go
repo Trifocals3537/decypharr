@@ -241,7 +241,7 @@ func TestValidateDeploymentRejectsUnprotectedRemoteServices(t *testing.T) {
 func TestParseAllowedClientCIDRs(t *testing.T) {
 	prefixes, err := ParseAllowedClientCIDRs([]string{
 		"127.0.0.1",
-		"10.100.7.99/24",
+		"192.0.2.99/24",
 		"::1",
 	})
 	if err != nil {
@@ -252,7 +252,7 @@ func TestParseAllowedClientCIDRs(t *testing.T) {
 	for index, prefix := range prefixes {
 		got[index] = prefix.String()
 	}
-	want := []string{"127.0.0.1/32", "10.100.7.0/24", "::1/128"}
+	want := []string{"127.0.0.1/32", "192.0.2.0/24", "::1/128"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("prefixes = %v, want %v", got, want)
 	}

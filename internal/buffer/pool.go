@@ -1,6 +1,7 @@
 package buffer
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 )
@@ -106,11 +107,19 @@ func NewPool(cfg PoolConfig) *Pool {
 // NewBuffer creates a Buffer bound to this pool. Its RAM and disk usage count
 // against the pool's budgets.
 func (p *Pool) NewBuffer(cfg Config) (*Buffer, error) {
+	if p.closed.Load() {
+		return nil, ErrClosed
+	}
 	b, err := newBuffer(p, cfg)
 	if err != nil {
 		return nil, err
 	}
 	p.mu.Lock()
+	if p.closed.Load() {
+		p.mu.Unlock()
+		_ = b.Close()
+		return nil, ErrClosed
+	}
 	p.buffers[b] = struct{}{}
 	p.mu.Unlock()
 	return b, nil
@@ -143,22 +152,24 @@ func (p *Pool) Stats() PoolStats {
 // to call when callers already own their Buffers' lifetimes — Buffer.Close is
 // idempotent.
 func (p *Pool) Close() error {
+	p.mu.Lock()
 	if !p.closed.CompareAndSwap(false, true) {
+		p.mu.Unlock()
 		return nil
 	}
-	if p.diskLimit.Load() > 0 {
-		close(p.stopCh)
-		p.wg.Wait()
-	}
-	p.mu.Lock()
 	bufs := make([]*Buffer, 0, len(p.buffers))
 	for b := range p.buffers {
 		bufs = append(bufs, b)
 	}
 	p.mu.Unlock()
+
+	if p.diskLimit.Load() > 0 {
+		close(p.stopCh)
+		p.wg.Wait()
+	}
 	var firstErr error
 	for _, b := range bufs {
-		if err := b.Close(); err != nil && firstErr == nil {
+		if err := b.Close(); err != nil && !errors.Is(err, ErrClosed) && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -170,11 +181,35 @@ func (p *Pool) Close() error {
 // wouldExceedMemory reports whether caching one more block would push the
 // pool's resident total past the budget.
 func (p *Pool) wouldExceedMemory() bool {
+	if p.closed.Load() {
+		return true
+	}
 	b := p.memBudget.Load()
-	return b > 0 && p.memInUse.Load()+int64(blockSize) > b
+	return b > 0 && p.memInUse.Load() > b-int64(blockSize)
 }
 
-func (p *Pool) addBlock() { p.memInUse.Add(int64(blockSize)) }
+// tryReserveBlock atomically admits one resident block against the shared RAM
+// budget. Keeping the check and increment in one compare-and-swap loop prevents
+// concurrent Buffers from each observing the same remaining capacity.
+func (p *Pool) tryReserveBlock() bool {
+	if p.closed.Load() {
+		return false
+	}
+	for {
+		current := p.memInUse.Load()
+		budget := p.memBudget.Load()
+		if budget > 0 && current > budget-int64(blockSize) {
+			return false
+		}
+		if p.memInUse.CompareAndSwap(current, current+int64(blockSize)) {
+			return true
+		}
+		if p.closed.Load() {
+			return false
+		}
+	}
+}
+
 func (p *Pool) dropBytes(n int64) {
 	if n > 0 {
 		p.memInUse.Add(-n)

@@ -103,6 +103,24 @@ class TorrentDashboard {
                 this.toggleTorrentSelection(e.target.dataset.hash, e.target.checked);
             }
         });
+
+        this.refs.torrentsList.addEventListener('click', (e) => {
+            const button = e.target.closest('[data-torrent-action]');
+            if (!button) return;
+            const torrent = this.findTorrent(button.closest('tr[data-hash]')?.dataset.hash);
+            if (!torrent) return;
+            this.deleteTorrent(
+                torrent.info_hash,
+                torrent.category || '',
+                button.dataset.torrentAction === 'delete-provider'
+            );
+        });
+
+        this.refs.paginationControls.addEventListener('click', (e) => {
+            const button = e.target.closest('[data-page]');
+            if (!button || button.disabled) return;
+            this.goToPage(Number.parseInt(button.dataset.page, 10));
+        });
     }
 
     bindContextMenu() {
@@ -133,10 +151,12 @@ class TorrentDashboard {
     }
 
     showContextMenu(event, row) {
+        const selected = this.findTorrent(row.dataset.hash);
+        if (!selected) return;
         this.state.selectedTorrentContextMenu = {
-            hash: row.dataset.hash,
-            name: row.dataset.name,
-            category: row.dataset.category || ''
+            hash: selected.info_hash,
+            name: selected.name,
+            category: selected.category || ''
         };
 
         this.refs.torrentContextMenu.querySelector('.torrent-name').textContent =
@@ -277,18 +297,19 @@ class TorrentDashboard {
 
         this.refs.torrentsList.innerHTML = this.state.torrents.map(torrent => {
             const isSelected = this.state.selectedEntries.has(torrent.info_hash);
+            const hash = this.escapeAttr(String(torrent.info_hash || ''));
             return `
-                <tr class="hover" data-hash="${torrent.info_hash}" data-name="${this.escapeHtml(torrent.name)}" data-category="${this.escapeHtml(torrent.category || '')}">
+                <tr class="hover" data-hash="${hash}">
                     <td>
                         <label class="cursor-pointer">
                             <input type="checkbox" class="checkbox checkbox-sm checkbox-primary torrent-select"
-                                   data-hash="${torrent.info_hash}" ${isSelected ? 'checked' : ''}>
+                                   data-hash="${hash}" ${isSelected ? 'checked' : ''}>
                         </label>
                     </td>
                     <td>
                         <div class="flex flex-col">
                             <span class="font-medium">${this.escapeHtml(torrent.name)}</span>
-                            <span class="text-xs text-base-content/60 font-mono">${torrent.info_hash.substring(0, 8)}...</span>
+                            <span class="text-xs text-base-content/60 font-mono">${this.escapeHtml(String(torrent.info_hash || '').substring(0, 8))}...</span>
                         </div>
                     </td>
                     <td>
@@ -318,12 +339,12 @@ class TorrentDashboard {
                     <td>
                         <button class="btn btn-ghost btn-xs text-error"
                                 title="Delete Torrent"
-                                onclick="window.dashboard.deleteTorrent('${torrent.info_hash}', '${this.escapeAttr(torrent.category || '')}', false);">
+                                data-torrent-action="delete">
                             <i class="bi bi-trash"></i>
                         </button>
                         <button class="btn btn-ghost btn-xs text-error"
                                 title="Delete from Provider"
-                                onclick="window.dashboard.deleteTorrent('${torrent.info_hash}', '${this.escapeAttr(torrent.category || '')}', true);">
+                                data-torrent-action="delete-provider">
                             <i class="bi bi-cloud-slash"></i>
                         </button>
                     </td>
@@ -356,8 +377,8 @@ class TorrentDashboard {
             'paused': {class: 'badge-warning', text: 'Paused'}
         };
 
-        const s = stateMap[state] || {class: 'badge-ghost', text: state};
-        return `<span class="badge ${s.class} badge-sm">${s.text}</span>`;
+        const s = stateMap[state] || {class: 'badge-ghost', text: state || 'Unknown'};
+        return `<span class="badge ${s.class} badge-sm">${this.escapeHtml(String(s.text))}</span>`;
     }
 
     renderProtocolBadge(protocol) {
@@ -371,7 +392,7 @@ class TorrentDashboard {
             icon: 'bi-question-circle',
             text: protocol || 'Unknown'
         };
-        return `<span class="badge ${p.class} badge-sm"><i class="${p.icon} mr-1"></i>${p.text}</span>`;
+        return `<span class="badge ${p.class} badge-sm"><i class="${p.icon} mr-1"></i>${this.escapeHtml(String(p.text))}</span>`;
     }
 
     renderPagination() {
@@ -390,7 +411,7 @@ class TorrentDashboard {
 
         let html = `
             <button class="join-item btn btn-sm ${this.state.currentPage === 1 ? 'btn-disabled' : ''}"
-                    onclick="window.dashboard.goToPage(${this.state.currentPage - 1});">«</button>
+                    data-page="${this.state.currentPage - 1}" ${this.state.currentPage === 1 ? 'disabled' : ''}>«</button>
         `;
 
         for (let i = 1; i <= this.state.totalPages; i++) {
@@ -398,7 +419,7 @@ class TorrentDashboard {
                 (i >= this.state.currentPage - 2 && i <= this.state.currentPage + 2)) {
                 html += `
                     <button class="join-item btn btn-sm ${i === this.state.currentPage ? 'btn-active' : ''}"
-                            onclick="window.dashboard.goToPage(${i});">${i}</button>
+                            data-page="${i}">${i}</button>
                 `;
             } else if (i === this.state.currentPage - 3 || i === this.state.currentPage + 3) {
                 html += `<button class="join-item btn btn-sm btn-disabled">...</button>`;
@@ -407,14 +428,14 @@ class TorrentDashboard {
 
         html += `
             <button class="join-item btn btn-sm ${this.state.currentPage === this.state.totalPages ? 'btn-disabled' : ''}"
-                    onclick="window.dashboard.goToPage(${this.state.currentPage + 1})">»</button>
+                    data-page="${this.state.currentPage + 1}" ${this.state.currentPage === this.state.totalPages ? 'disabled' : ''}>»</button>
         `;
 
         this.refs.paginationControls.innerHTML = html;
     }
 
     goToPage(page) {
-        if (page < 1 || page > this.state.totalPages) return;
+        if (!Number.isInteger(page) || page < 1 || page > this.state.totalPages) return;
         this.state.currentPage = page;
         this.loadTorrents();
     }
@@ -444,6 +465,10 @@ class TorrentDashboard {
         this.updateSelectionUI();
     }
 
+    findTorrent(hash) {
+        return this.state.torrents.find(torrent => String(torrent.info_hash || '') === String(hash || ''));
+    }
+
     updateSelectionUI() {
         const hasSelection = this.state.selectedEntries.size > 0;
         this.refs.batchDeleteBtn.classList.toggle('hidden', !hasSelection);
@@ -458,7 +483,7 @@ class TorrentDashboard {
         if (!confirm('Are you sure you want to delete this torrent?')) return;
 
         try {
-            const url = `${window.urlBase}api/torrents/${category}/${hash}?removeFromDebrid=${removeFromDebrid}`;
+			const url = `${window.urlBase}api/torrents/${encodeURIComponent(category)}/${encodeURIComponent(hash)}?removeFromDebrid=${removeFromDebrid}`;
             const response = await window.decypharrUtils.fetcher(url, {method: 'DELETE'});
 
             if (!response.ok) throw new Error('Failed to delete entry');
@@ -478,8 +503,11 @@ class TorrentDashboard {
         if (!confirm(`Delete ${this.state.selectedEntries.size} selected items?`)) return;
 
         try {
-            const hashes = Array.from(this.state.selectedEntries).join(',');
-            const url = `${window.urlBase}api/torrents?hashes=${hashes}&removeFromDebrid=${removeFromDebrid}`;
+			const params = new URLSearchParams({
+				hashes: Array.from(this.state.selectedEntries).join(','),
+				removeFromDebrid: String(removeFromDebrid)
+			});
+			const url = `${window.urlBase}api/torrents?${params}`;
             const response = await window.decypharrUtils.fetcher(url, {method: 'DELETE'});
 
             if (!response.ok) throw new Error('Failed to delete items');
@@ -521,7 +549,11 @@ class TorrentDashboard {
     }
 
     escapeAttr(text) {
-        if (!text) return '';
-        return text.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+        return String(text || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/'/g, '&#39;')
+            .replace(/"/g, '&quot;');
     }
 }

@@ -7,6 +7,7 @@ class ConfigManager {
         this.debridDirectoryCounts = {};
         this.directoryFilterCounts = {};
         this.virtualFolderCount = 0;
+        this.redactedSecret = '__DECYPHARR_REDACTED__';
 
         this.refs = {
             configForm: document.getElementById('configForm'),
@@ -245,13 +246,13 @@ class ConfigManager {
         // Handle webhook URL
         const webhookElement = document.getElementById('notifications.webhook_url');
         if (webhookElement && notificationsConfig.webhook_url) {
-            webhookElement.value = notificationsConfig.webhook_url;
+            this.populateSecretInput(webhookElement, notificationsConfig.webhook_url);
         }
 
         // Handle callback URL
         const callbackElement = document.getElementById('notifications.callback_url');
         if (callbackElement && notificationsConfig.callback_url) {
-            callbackElement.value = notificationsConfig.callback_url;
+            this.populateSecretInput(callbackElement, notificationsConfig.callback_url);
         }
 
         // Handle events checkboxes
@@ -269,13 +270,12 @@ class ConfigManager {
         if (!mountConfig) return;
 
         // Handle mount type radio buttons
-        if (mountConfig.type) {
-            const typeRadio = document.querySelector(`input[name="mount.type"][value="${mountConfig.type}"]`);
-            if (typeRadio) {
-                typeRadio.checked = true;
-                // Trigger change event to switch to the correct tab
-                typeRadio.dispatchEvent(new Event('change'));
-            }
+        const mountType = mountConfig.type || 'none';
+        const typeRadio = document.querySelector(`input[name="mount.type"][value="${mountType}"]`);
+        if (typeRadio) {
+            typeRadio.checked = true;
+            // Trigger change event to switch to the correct tab
+            typeRadio.dispatchEvent(new Event('change'));
         }
 
         // Handle mount path
@@ -342,9 +342,35 @@ class ConfigManager {
         fields.forEach(field => {
             const element = document.querySelector(`[name="mount.external_rclone.${field}"]`);
             if (element && externalRcloneConfig[field] !== undefined) {
-                element.value = externalRcloneConfig[field];
+                if (field === 'rc_password') {
+                    this.populateSecretInput(element, externalRcloneConfig[field]);
+                } else {
+                    element.value = externalRcloneConfig[field];
+                }
             }
         });
+    }
+
+    populateSecretInput(input, value) {
+        const values = Array.isArray(value) ? value : [value];
+        if (values.includes(this.redactedSecret)) {
+            input.value = '';
+            input.dataset.secretConfigured = 'true';
+            input.placeholder = 'Configured — enter a replacement';
+            input.required = false;
+            return;
+        }
+
+        input.value = Array.isArray(value) ? value.join('\n') : (value || '');
+        delete input.dataset.secretConfigured;
+    }
+
+    collectSecretValue(input) {
+        if (!input) return '';
+        if (!input.value && input.dataset.secretConfigured === 'true') {
+            return this.redactedSecret;
+        }
+        return input.value;
     }
 
     addDebridConfig(data = {}) {
@@ -407,8 +433,10 @@ class ConfigManager {
             if (input) {
                 if (input.type === 'checkbox') {
                     input.checked = value;
+                } else if (['api_key', 'proxy', 'rc_pass'].includes(key)) {
+                    this.populateSecretInput(input, value);
                 } else if (key === 'download_api_keys' && Array.isArray(value)) {
-                    input.value = value.join('\n');
+                    this.populateSecretInput(input, value);
                     // Apply masking to populated textarea
                     if (input.tagName.toLowerCase() === 'textarea') {
                         input.style.webkitTextSecurity = 'disc';
@@ -744,20 +772,21 @@ class ConfigManager {
 
     getFilterTemplate(debridIndex, dirIndex, filterIndex, filterType) {
         const filterConfig = this.getFilterConfig(filterType);
+		const escape = window.decypharrUtils.escapeHtml;
 
         return `
             <div class="filter-item flex items-center gap-3 p-3 bg-base-100 rounded-lg border border-base-300">
                 <div class="badge ${filterConfig.badgeClass} badge-sm">
-                    ${filterConfig.label}
+                    ${escape(filterConfig.label)}
                 </div>
                 <input type="hidden"
                        name="debrid[${debridIndex}].directory[${dirIndex}].filter[${filterIndex}].type"
-                       value="${filterType}">
+                       value="${escape(filterType)}">
                 <div class="flex-1">
                     <input type="text" 
                            class="input input-sm w-full webdav-field"
                            name="debrid[${debridIndex}].directory[${dirIndex}].filter[${filterIndex}].value"
-                           placeholder="${filterConfig.placeholder}">
+                           placeholder="${escape(filterConfig.placeholder)}">
                 </div>
                 <button type="button" class="btn btn-error btn-xs" onclick="this.closest('.filter-item').remove();">
                     <i class="bi bi-x"></i>
@@ -958,6 +987,8 @@ class ConfigManager {
             if (input) {
                 if (input.type === 'checkbox') {
                     input.checked = value;
+                } else if (key === 'token') {
+                    this.populateSecretInput(input, value);
                 } else {
                     input.value = value;
                 }
@@ -987,7 +1018,7 @@ class ConfigManager {
                         ` : ''}
                     </div>
 
-                    <input type="hidden" name="arr[${index}].source" value="${data.source || ''}">
+                    <input type="hidden" name="arr[${index}].source" value="${window.decypharrUtils.escapeHtml(data.source || '')}">
 
                     <div class="grid grid-cols-1 gap-3">
                         <div>
@@ -1134,11 +1165,11 @@ class ConfigManager {
         });
 
         if (config.mount.type === "") {
-            errors.push('Mount type is required when ');
+            errors.push('Mount type is required');
         }
 
-        if (config.mount.mount_path === "") {
-            errors.push('Mount path is required when Rclone is enabled');
+        if (config.mount.type !== 'none' && config.mount.mount_path === "") {
+            errors.push('Mount path is required when mounting is enabled');
         }
 
         if (config.repair?.enabled && !config.repair.schedule) {
@@ -1223,8 +1254,8 @@ class ConfigManager {
 
         return {
             enabled: enabledElement ? enabledElement.checked : false,
-            webhook_url: webhookElement ? webhookElement.value : '',
-            callback_url: callbackElement ? callbackElement.value : '',
+            webhook_url: this.collectSecretValue(webhookElement),
+            callback_url: this.collectSecretValue(callbackElement),
             events: events
         };
     }
@@ -1254,7 +1285,7 @@ class ConfigManager {
                 host: hostInput.value,
                 port: parseInt(portInput.value) || 119,
                 username: usernameInput.value,
-                password: passwordInput.value,
+                password: this.collectSecretValue(passwordInput),
                 backbone: backboneInput.value.trim(),
                 ssl: sslInput.checked,
                 max_connections: parseInt(maxConnectionsInput.value) || 100,
@@ -1317,12 +1348,12 @@ class ConfigManager {
             const debrid = {
                 name: nameInput.value,
                 provider: providerInput.value,
-                api_key: apiKeyInput.value,
+                api_key: this.collectSecretValue(apiKeyInput),
                 rate_limit: rateLimitInput.value,
                 repair_rate_limit: repairRateLimitInput.value,
                 download_rate_limit: downloadRateLimitInput.value,
                 minimum_free_slot: parseInt(minimumFreeSlotInput.value) || 0,
-                proxy: proxyInput.value,
+                proxy: this.collectSecretValue(proxyInput),
                 download_uncached: downloadUncachedInput.checked,
                 unpack_rar: unpackRarInput.checked,
                 user_agent: userAgentInput.value
@@ -1334,6 +1365,8 @@ class ConfigManager {
                     .split('\n')
                     .map(key => key.trim())
                     .filter(key => key.length > 0);
+            } else if (downloadKeysTextarea?.dataset.secretConfigured === 'true') {
+                debrid.download_api_keys = [this.redactedSecret];
             }
 
             debrid.torrents_refresh_interval = torrentsRefreshIntervalInput.value;
@@ -1370,7 +1403,7 @@ class ConfigManager {
             const arr = {
                 name: nameInput.value,
                 host: hostInput.value,
-                token: tokenInput.value,
+                token: this.collectSecretValue(tokenInput),
                 skip_repair: skipRepairInput.checked,
                 download_uncached: downloadUncachedInput.checked,
                 selected_debrid: selectedDebridInput.value,
@@ -1475,7 +1508,7 @@ class ConfigManager {
         return {
             rc_url: document.querySelector('[name="mount.external_rclone.rc_url"]')?.value || "",
             rc_username: document.querySelector('[name="mount.external_rclone.rc_username"]')?.value || "",
-            rc_password: document.querySelector('[name="mount.external_rclone.rc_password"]')?.value || "",
+            rc_password: this.collectSecretValue(document.querySelector('[name="mount.external_rclone.rc_password"]')),
         };
     }
 
@@ -1593,8 +1626,11 @@ class ConfigManager {
     populateAPIToken(config) {
         const tokenDisplay = document.getElementById('api-token-display');
         if (tokenDisplay) {
-            tokenDisplay.value = config.api_token || '****';
+			tokenDisplay.value = config.api_token_configured ? 'Configured (hidden)' : 'Not configured';
+			tokenDisplay.dataset.tokenAvailable = 'false';
         }
+		const copyButton = document.getElementById('copy-token-btn');
+		if (copyButton) copyButton.disabled = true;
 
         // Populate username (password is not populated for security)
         const usernameField = document.getElementById('auth-username');
@@ -1808,6 +1844,8 @@ class ConfigManager {
             if (input) {
                 if (input.type === 'checkbox') {
                     input.checked = value;
+                } else if (key === 'password') {
+                    this.populateSecretInput(input, value);
                 } else {
                     input.value = value;
                 }

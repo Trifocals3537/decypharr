@@ -1,6 +1,7 @@
 package rclone
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,7 +12,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"golang.org/x/net/context"
 )
 
 // mountWithRetry attempts to mount with retry logic using avast/retry-go

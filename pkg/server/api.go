@@ -646,24 +646,11 @@ func (s *Server) handleDeleteTorrents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	arrStorage := s.manager.Arr()
 	cfg := config.Get()
-	cfg.Arrs = arrStorage.SyncToConfig()
-
-	// Create response with API token info
-	type ConfigResponse struct {
-		*config.Config
-		APIToken     string `json:"api_token,omitempty"`
-		AuthUsername string `json:"auth_username,omitempty"`
-	}
-
-	response := &ConfigResponse{Config: cfg}
-
-	// AddOrUpdate API token and auth information
-	auth := cfg.GetAuth()
-	if auth != nil {
-		if auth.APIToken != "" {
-			response.APIToken = auth.APIToken
-		}
-		response.AuthUsername = auth.Username
+	response, err := newConfigResponse(cfg, arrStorage.SyncToConfig())
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to prepare configuration response")
+		http.Error(w, "Failed to prepare configuration response", http.StatusInternalServerError)
+		return
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
@@ -689,6 +676,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		w.Header().Set("Deprecation", "true")
 		w.Header().Set("Warning", `299 - "POST /api/config is deprecated; use PUT for replacement or PATCH for partial updates"`)
+	}
+	if err := restoreConfigSecrets(newConfig, currentConfig); err != nil {
+		s.logger.Warn().Err(err).Msg("Rejected configuration update with an unresolved secret placeholder")
+		http.Error(w, "Invalid configuration: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	// Basic validation
@@ -1258,6 +1250,10 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		cfg.UseAuth = false
 		auth.Username = ""
 		auth.Password = ""
+		auth.SessionVersion++
+		if auth.SessionVersion == 0 {
+			auth.SessionVersion = 1
+		}
 		if err := cfg.SaveAuth(auth); err != nil {
 			s.logger.Error().Err(err).Msg("Failed to save auth config")
 			http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)

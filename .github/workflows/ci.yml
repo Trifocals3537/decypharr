@@ -7,6 +7,9 @@ on:
       - main
       - beta
       - next
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -63,14 +66,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Race-test stateful packages
-        run: >-
-          go test -race
-          ./internal/config
-          ./internal/buffer
-          ./pkg/server
-          ./pkg/manager
-          ./cmd/decypharr
+      - name: Install pinned security analyzers
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
+      - name: Static analysis
+        run: staticcheck ./...
+
+      - name: Vulnerability analysis
+        run: govulncheck ./...
+
+      - name: Race-test all packages
+        run: go test -race ./...
 
       - name: Build native binary
         run: |

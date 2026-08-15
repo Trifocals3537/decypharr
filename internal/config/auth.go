@@ -52,6 +52,10 @@ func (c *Config) SetAuthCredentials(username, password string) error {
 	}
 	auth.Username = username
 	auth.Password = string(hashedPassword)
+	auth.SessionVersion++
+	if auth.SessionVersion == 0 {
+		auth.SessionVersion = 1
+	}
 	c.UseAuth = true
 	if err := c.SaveAuth(auth); err != nil {
 		return fmt.Errorf("save authentication: %w", err)

@@ -240,7 +240,7 @@ func (d *Downloader) processSymlink(ctx context.Context, entry *storage.Entry, m
 		return err
 	}
 	files := entry.GetActiveFiles()
-	torrentSymlinkPath := entry.DownloadPath()
+	var torrentSymlinkPath string
 	if entry.IsNZB() {
 		var err error
 		torrentSymlinkPath, _, err = claimUsenetEntryDirectory(d.dest, entry)
@@ -1037,7 +1037,7 @@ func (d *Downloader) processStrm(ctx context.Context, torrent *storage.Entry) er
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
 
-	torrentSymlinkPath := torrent.DownloadPath()
+	var torrentSymlinkPath string
 	if torrent.IsNZB() {
 		var err error
 		torrentSymlinkPath, _, err = claimUsenetEntryDirectory(d.dest, torrent)
@@ -1067,7 +1067,7 @@ func (d *Downloader) processStrm(ctx context.Context, torrent *storage.Entry) er
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		strmFilePath := filepath.Join(torrentSymlinkPath, file.Name+".strm")
+		var strmFilePath string
 		if torrent.IsNZB() {
 			safePath, pathErr := safeUsenetFilePath(d.dest, torrent, file.Name+".strm")
 			if pathErr != nil {

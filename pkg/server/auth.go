@@ -43,13 +43,16 @@ func (s *Server) skipAuthHandler(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	if !s.requireBrowserMutation(w, r) {
+		return
+	}
 	cfg.UseAuth = false
 	if err := cfg.Save(); err != nil {
 		s.logger.Error().Err(err).Msg("failed to save config")
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
 }
 
 // isValidAPIToken checks if the request contains a valid API token

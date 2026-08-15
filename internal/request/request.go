@@ -95,6 +95,7 @@ func WithTransport(transport *http.Transport) ClientOption {
 		secured.TLSClientConfig = tlsconfig.Harden(secured.TLSClientConfig)
 		// Custom TLS dial hooks bypass TLSClientConfig entirely. Clear them so
 		// WithTransport cannot silently opt out of certificate verification.
+		//lint:ignore SA1019 DialTLS must be cleared alongside DialTLSContext to secure caller-owned transports.
 		secured.DialTLS = nil
 		secured.DialTLSContext = nil
 		c.httpClient.Transport = secured
@@ -183,14 +184,6 @@ func (c *Client) Get(url string) (*http.Response, error) {
 	}
 
 	return c.Do(req)
-}
-
-// zerologAdapter bridges zerolog to the retryablehttp.Logger interface so that
-// retry events (including 429 backoffs) appear in decypharr's structured log.
-type zerologAdapter struct{ log zerolog.Logger }
-
-func (z zerologAdapter) Printf(format string, args ...interface{}) {
-	z.log.Debug().Msgf(format, args...)
 }
 
 // retryAfterBackoff extends DefaultBackoff with Retry-After header support.

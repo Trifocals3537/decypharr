@@ -158,11 +158,11 @@ func TestRemoteInitialSetupCannotSkipAuthentication(t *testing.T) {
 	response = httptest.NewRecorder()
 	(&Server{}).setupCompleteHandler(response, request)
 
-	if response.Code != http.StatusBadRequest {
+	if response.Code != http.StatusForbidden {
 		t.Fatalf(
 			"setup status = %d, want %d",
 			response.Code,
-			http.StatusBadRequest,
+			http.StatusForbidden,
 		)
 	}
 	if !cfg.UseAuth {

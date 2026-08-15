@@ -36,26 +36,22 @@ const (
 
 var streamBufferPool = sync.Pool{
 	New: func() any {
-		return make([]byte, bufferSize)
+		return new([bufferSize]byte)
 	},
 }
 
 func acquireStreamBuffer() []byte {
-	buf := streamBufferPool.Get().([]byte)
-	if cap(buf) < bufferSize {
-		buf = make([]byte, bufferSize)
-	}
-	return buf[:bufferSize]
+	return streamBufferPool.Get().(*[bufferSize]byte)[:]
 }
 
 func releaseStreamBuffer(buf []byte) {
 	if buf == nil {
 		return
 	}
-	if cap(buf) < bufferSize {
+	if len(buf) < bufferSize {
 		return
 	}
-	streamBufferPool.Put(buf[:bufferSize])
+	streamBufferPool.Put((*[bufferSize]byte)(buf[:bufferSize]))
 }
 
 type fsEntry struct {

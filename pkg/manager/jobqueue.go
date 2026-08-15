@@ -724,10 +724,7 @@ func (q *JobQueue) DeleteJob(jobID string) bool {
 		}
 	}
 	key := normalizeQueueEntryKey(jobID)
-	if q.removeDelayedLocked(key, jobID) {
-		return true
-	}
-	return false
+	return q.removeDelayedLocked(key, jobID)
 }
 
 // DeleteJobs removes every pending incarnation of a queue key. An active job

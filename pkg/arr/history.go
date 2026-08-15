@@ -1,6 +1,8 @@
 package arr
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	gourl "net/url"
@@ -137,6 +139,11 @@ func (a *Arr) GetHistory(downloadId, eventType string) *HistorySchema {
 }
 
 func (a *Arr) GetQueue() []QueueSchema {
+	queue, _ := a.GetQueueCtx(context.Background())
+	return queue
+}
+
+func (a *Arr) GetQueueCtx(ctx context.Context) ([]QueueSchema, error) {
 	query := gourl.Values{}
 	query.Add("page", "1")
 	query.Add("pageSize", "200")
@@ -145,12 +152,15 @@ func (a *Arr) GetQueue() []QueueSchema {
 	for {
 		url := "api/v3/queue" + "?" + query.Encode()
 		var data QueueResponseScheme
-		resp, err := a.Request(http.MethodGet, url, nil, &data)
+		resp, err := a.RequestCtx(ctx, http.MethodGet, url, nil, &data)
 		if err != nil {
-			break
+			return results, err
 		}
 		if resp.StatusCode != http.StatusOK {
-			break
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			return results, fmt.Errorf("get queue: %s", resp.Status)
 		}
 
 		results = append(results, data.Records...)
@@ -162,7 +172,7 @@ func (a *Arr) GetQueue() []QueueSchema {
 		query.Set("page", strconv.Itoa(data.Page+1))
 	}
 
-	return results
+	return results, nil
 }
 
 // queueItemText returns the lowercased join of every statusMessages title and
@@ -206,13 +216,21 @@ func resolveAction(q QueueSchema, rules []config.QueueCleanupRule) QueueAction {
 }
 
 func (a *Arr) CleanupQueue() error {
+	return a.CleanupQueueCtx(context.Background())
+}
+
+func (a *Arr) CleanupQueueCtx(ctx context.Context) error {
 	if a == nil {
 		return fmt.Errorf("arr not configured")
 	}
 	l := logger.New("arr")
 	rules := config.Get().QueueCleanup.Rules
 
-	queue := a.GetQueue()
+	queue, err := a.GetQueueCtx(ctx)
+	if err != nil {
+		return err
+	}
+	var cleanupErr error
 	blacklists := make(map[int]bool)        // blocklist + remove, no re-search
 	blacklistResearch := make(map[int]bool) // blocklist + remove + re-search
 	manualImports := make(map[string]bool)  // force manual import
@@ -228,24 +246,25 @@ func (a *Arr) CleanupQueue() error {
 	}
 
 	if len(blacklistResearch) > 0 {
-		if err := a.removeQueueItems(blacklistResearch, true, false); err != nil {
+		if err := a.removeQueueItemsCtx(ctx, blacklistResearch, true, false); err != nil {
 			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: blacklist + research failed")
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if len(blacklists) > 0 {
-		if err := a.removeQueueItems(blacklists, true, true); err != nil {
+		if err := a.removeQueueItemsCtx(ctx, blacklists, true, true); err != nil {
 			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: blacklist failed")
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if len(manualImports) > 0 {
-		go func() {
-			if err := a.ManualImportItems(manualImports); err != nil {
-				l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: manual import failed")
-			}
-		}()
+		if err := a.ManualImportItemsCtx(ctx, manualImports); err != nil {
+			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: manual import failed")
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
 
-	return nil
+	return cleanupErr
 }
 
 // FindGrabHistoryID returns the ID and downloadId of the most recent "grabbed"
@@ -315,7 +334,7 @@ func (a *Arr) MarkHistoryFailed(historyID int) error {
 // removeQueueItems bulk-removes queue items from the arr. blocklist controls
 // whether the releases are added to the blocklist; skipRedownload controls
 // whether a re-search is triggered (false = re-search, the "research" action).
-func (a *Arr) removeQueueItems(items map[int]bool, blocklist, skipRedownload bool) error {
+func (a *Arr) removeQueueItemsCtx(ctx context.Context, items map[int]bool, blocklist, skipRedownload bool) error {
 	queueIDs := make([]int, 0, len(items))
 	for id := range items {
 		queueIDs = append(queueIDs, id)
@@ -332,20 +351,34 @@ func (a *Arr) removeQueueItems(items map[int]bool, blocklist, skipRedownload boo
 	query.Add("changeCategory", "false")
 	url := "api/v3/queue/bulk" + "?" + query.Encode()
 
-	_, err := a.Request(http.MethodDelete, url, payload, nil)
+	resp, err := a.RequestCtx(ctx, http.MethodDelete, url, payload, nil)
 	if err != nil {
 		return err
+	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("remove queue items: %s", resp.Status)
 	}
 	return nil
 }
 
 func (a *Arr) ManualImportItems(items map[string]bool) error {
+	return a.ManualImportItemsCtx(context.Background(), items)
+}
+
+func (a *Arr) ManualImportItemsCtx(ctx context.Context, items map[string]bool) error {
+	var importErr error
 	for downloadId := range items {
-		_, err := a.Import(downloadId)
+		body, err := a.ImportCtx(ctx, downloadId)
 		if err != nil {
-			// log error
-			fmt.Println(err)
+			importErr = errors.Join(importErr, err)
+			continue
+		}
+		if body != nil {
+			_ = body.Close()
 		}
 	}
-	return nil
+	return importErr
 }

@@ -14,6 +14,7 @@ type QBit struct {
 	logger                  zerolog.Logger
 	Tags                    []string
 	manager                 *manager.Manager
+	sessions                *qbitSessionStore
 }
 
 func New(manager *manager.Manager) *QBit {
@@ -24,5 +25,6 @@ func New(manager *manager.Manager) *QBit {
 		alwaysRemoveTrackerURLS: cfg.AlwaysRmTrackerUrls,
 		manager:                 manager,
 		logger:                  logger.New("qbit"),
+		sessions:                newQbitSessionStore(),
 	}
 }

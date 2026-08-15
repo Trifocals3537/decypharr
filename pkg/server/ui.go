@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -10,7 +11,7 @@ import (
 func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 	if cfg.NeedsAuth() {
-		http.Redirect(w, r, "/register", http.StatusSeeOther)
+		http.Redirect(w, r, urlBasePath(cfg.URLBase, "register"), http.StatusSeeOther)
 		return
 	}
 	if r.Method == "GET" {
@@ -23,6 +24,9 @@ func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("error rendering /login template")
 		}
+		return
+	}
+	if !s.requireBrowserMutation(w, r) {
 		return
 	}
 
@@ -45,18 +49,26 @@ func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientKey := loginClientKey(r)
+	if retry := s.loginLimiter.retryAfter(clientKey); retry > 0 {
+		setRetryAfter(w, int((retry+time.Second-1)/time.Second))
+		http.Error(w, "Too many failed login attempts", http.StatusTooManyRequests)
+		return
+	}
+
 	if s.verifyAuth(credentials.Username, credentials.Password) {
+		s.loginLimiter.reset(clientKey)
 		session, _ := s.cookie.Get(r, "auth-session")
-		session.Values["authenticated"] = true
-		session.Values["username"] = credentials.Username
+		setAuthenticatedSession(session.Values, credentials.Username)
 		if err := session.Save(r, w); err != nil {
 			http.Error(w, "Error saving session", http.StatusInternalServerError)
 			return
 		}
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
 		return
 	}
 
+	s.loginLimiter.recordFailure(clientKey)
 	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
@@ -68,7 +80,7 @@ func (s *Server) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	http.Redirect(w, r, urlBasePath(config.Get().URLBase, "login"), http.StatusSeeOther)
 }
 
 func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +108,9 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("error rendering /register template")
 		}
+		return
+	}
+	if !s.requireBrowserMutation(w, r) {
 		return
 	}
 
@@ -137,14 +152,13 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Create a session
 	session, _ := s.cookie.Get(r, "auth-session")
-	session.Values["authenticated"] = true
-	session.Values["username"] = username
+	setAuthenticatedSession(session.Values, username)
 	if err := session.Save(r, w); err != nil {
 		http.Error(w, "Error saving session", http.StatusInternalServerError)
 		return
 	}
 
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
 }
 
 func registrationAllowed(cfg *config.Config) bool {

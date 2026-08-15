@@ -78,6 +78,7 @@ type Server struct {
 	restartFunc     func()
 	configMu        sync.Mutex
 	restartPending  bool
+	loginLimiter    *loginAttemptLimiter
 	allowedClients  []netip.Prefix
 	accessPolicyErr error
 }
@@ -111,12 +112,13 @@ func New(mgr *manager.Manager) *Server {
 	statsCollector := stats.New(mgr)
 
 	s := &Server{
-		logger:    l,
-		manager:   mgr,
-		stats:     statsCollector,
-		cookie:    cookieStore,
-		templates: templates,
-		urlBase:   cfg.URLBase,
+		logger:       l,
+		manager:      mgr,
+		stats:        statsCollector,
+		cookie:       cookieStore,
+		templates:    templates,
+		urlBase:      cfg.URLBase,
+		loginLimiter: newLoginAttemptLimiter(),
 	}
 	s.allowedClients, s.accessPolicyErr =
 		config.ParseAllowedClientCIDRs(cfg.AllowedClientCIDRs)

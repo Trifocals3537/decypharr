@@ -49,8 +49,9 @@ See [Configuration Reference](../guides/configuration/) for all options.
 
 ### How do I get my API token?
 
-After setup, go to **Settings** → **Auth** in the web UI. Your API token is displayed once after initial setup - save it
-immediately.
+Go to **Settings** → **Auth** and regenerate the token. The new token is shown
+only in that authenticated response, so save it immediately. Configuration
+reads report only whether a token exists and never return the stored token.
 
 To regenerate:
 
@@ -58,6 +59,8 @@ To regenerate:
 curl -X POST -H "Authorization: Bearer OLD_TOKEN" \
   http://localhost:8282/api/refresh-token
 ```
+
+The response field is named `token`.
 
 ## Debrid Providers
 

@@ -9,11 +9,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
-//go:fix inline
-func ptrTime(t time.Time) *time.Time {
-	return new(t)
-}
-
 // This is in-charge of moving torrents between different debrid services
 
 // SwitchTorrent moves a torrent from one debrid to another

@@ -9,7 +9,22 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 )
+
+func baseStreamHTTPTransport(t *testing.T, client *http.Client) *http.Transport {
+	t.Helper()
+	governed, ok := client.Transport.(*cdntraffic.Transport)
+	if !ok {
+		t.Fatalf("stream transport = %T, want *cdntraffic.Transport", client.Transport)
+	}
+	transport, ok := governed.BaseTransport().(*http.Transport)
+	if !ok {
+		t.Fatalf("base stream transport = %T, want *http.Transport", governed.BaseTransport())
+	}
+	return transport
+}
 
 func managerTLSServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -25,7 +40,7 @@ func managerTLSServer(t *testing.T) *httptest.Server {
 
 func TestStreamClientRejectsUntrustedTLSByDefault(t *testing.T) {
 	server := managerTLSServer(t)
-	client := newStreamHTTPClient()
+	client := newStreamHTTPClient(nil)
 	client.Timeout = 2 * time.Second
 
 	response, err := client.Get(server.URL)
@@ -39,10 +54,10 @@ func TestStreamClientRejectsUntrustedTLSByDefault(t *testing.T) {
 
 func TestStreamClientUsesTrustedRoots(t *testing.T) {
 	server := managerTLSServer(t)
-	client := newStreamHTTPClient()
+	client := newStreamHTTPClient(nil)
 	client.Timeout = 2 * time.Second
 
-	transport := client.Transport.(*http.Transport)
+	transport := baseStreamHTTPTransport(t, client)
 	trustedTransport := server.Client().Transport.(*http.Transport)
 	transport.TLSClientConfig.RootCAs = trustedTransport.TLSClientConfig.RootCAs
 
@@ -66,8 +81,8 @@ func TestStreamClientBoundsResponseHeaderWait(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := newStreamHTTPClient()
-	transport := client.Transport.(*http.Transport)
+	client := newStreamHTTPClient(nil)
+	transport := baseStreamHTTPTransport(t, client)
 	if transport.ResponseHeaderTimeout != 30*time.Second {
 		t.Fatalf(
 			"ResponseHeaderTimeout = %s, want 30s",

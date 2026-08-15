@@ -354,7 +354,17 @@ Download specific file.
 
 ## Rate Limiting
 
-API respects Debrid provider rate limits configured in `config.json`. No additional API rate limiting.
+API calls respect Debrid provider rate limits configured in `config.json`.
+CDN response bodies use a separate automatic concurrency governor: playback
+and seeks take priority over background downloads, one playback slot is kept
+available whenever the budget has at least two slots, and `429` responses
+reduce concurrency until the provider's `Retry-After` window has passed. This
+behavior requires no configuration.
+
+The authenticated `GET /debug/stats` response exposes a secret-free
+`cdn_traffic` snapshot with active and waiting request counts, adaptive limits,
+and throttle counters grouped by provider. API keys and download-account
+tokens are never included.
 
 ## Examples
 

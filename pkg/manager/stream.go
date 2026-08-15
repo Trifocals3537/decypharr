@@ -12,9 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -204,6 +206,11 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 
 	expectedLen := end - start + 1
 
+	// Link validation and body transfer both inherit playback priority. This
+	// lets a seek get ahead of queued bulk downloads without bypassing the
+	// provider's shared concurrency budget.
+	ctx = cdntraffic.WithPriority(ctx, cdntraffic.PriorityInteractive)
+
 	// Get the validated download link using the link service
 	downloadLink, err := m.linkService.GetLink(ctx, torrent, filename)
 	if err != nil {
@@ -219,7 +226,7 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	linkRefreshes := 0
 	remainingWait := config.DefaultRetryDelayMax
 	for {
-		resp, reqErr := m.doRequest(ctx, downloadLink.DownloadLink, start, end)
+		resp, reqErr := m.doRequest(ctx, downloadLink, torrent.ActiveProvider, start, end)
 		if reqErr != nil {
 			// Connection retries happen inside doRequest and never receive body
 			// bytes, so returning here cannot replay caller-visible data.
@@ -444,12 +451,13 @@ func normalizeStreamRange(size, start, end int64) (int64, int64, error) {
 	return start, end, nil
 }
 
-func (m *Manager) doRequest(ctx context.Context, url string, start, end int64) (*http.Response, error) {
+func (m *Manager) doRequest(ctx context.Context, downloadLink debridTypes.DownloadLink, fallbackProvider string, start, end int64) (*http.Response, error) {
 	var resp *http.Response
+	ctx = m.withCDNIdentity(ctx, downloadLink, fallbackProvider)
 
 	err := retry.Do(
 		func() error {
-			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, downloadLink.DownloadLink, nil)
 			if reqErr != nil {
 				return retry.Unrecoverable(StreamError{Err: reqErr, Retryable: false})
 			}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -22,6 +23,9 @@ const (
 	maxLinkRefreshes      = 1
 	maxValidatedEntries   = 8192
 	maxLinkRetryWait      = 30 * time.Second
+	refreshBackoffBase    = 30 * time.Second
+	refreshBackoffMax     = 5 * time.Minute
+	maxRefreshBackoffs    = 4096
 )
 
 var (
@@ -36,20 +40,28 @@ type cachedLinkInvalidator interface {
 	InvalidateCachedLink(types.DownloadLink) error
 }
 
+type refreshBackoffState struct {
+	failures    int
+	nextAttempt time.Time
+}
+
 // Service handles download link fetching and validation.
 // It uses the account-level cache for storing links and only tracks validation state.
 type Service struct {
-	validated      *xsync.Map[string, struct{}]
-	singleflight   singleflight.Group
-	refreshflight  singleflight.Group
-	clients        *xsync.Map[string, debrid.Client]
-	entryRefresher EntryRefresher
-	repairer       EntryRepairer
-	entrySaver     EntrySaver
-	httpClient     *http.Client
-	retries        int
-	wait           func(context.Context, time.Duration) error
-	logger         zerolog.Logger
+	validated       *xsync.Map[string, struct{}]
+	singleflight    singleflight.Group
+	refreshflight   singleflight.Group
+	refreshMu       sync.Mutex
+	refreshBackoffs map[string]refreshBackoffState
+	clients         *xsync.Map[string, debrid.Client]
+	entryRefresher  EntryRefresher
+	repairer        EntryRepairer
+	entrySaver      EntrySaver
+	httpClient      *http.Client
+	retries         int
+	wait            func(context.Context, time.Duration) error
+	now             func() time.Time
+	logger          zerolog.Logger
 }
 
 // New creates a new LinkService
@@ -63,15 +75,17 @@ func New(
 	logger zerolog.Logger,
 ) *Service {
 	return &Service{
-		validated:      xsync.NewMap[string, struct{}](),
-		clients:        clients,
-		entryRefresher: entryRefresher,
-		repairer:       entryReinsert,
-		entrySaver:     entrySaver,
-		httpClient:     httpClient,
-		retries:        retries,
-		wait:           waitWithContext,
-		logger:         logger,
+		validated:       xsync.NewMap[string, struct{}](),
+		refreshBackoffs: make(map[string]refreshBackoffState),
+		clients:         clients,
+		entryRefresher:  entryRefresher,
+		repairer:        entryReinsert,
+		entrySaver:      entrySaver,
+		httpClient:      httpClient,
+		retries:         retries,
+		wait:            waitWithContext,
+		now:             time.Now,
+		logger:          logger,
 	}
 }
 
@@ -79,7 +93,7 @@ func New(
 // Links are cached at the account level; this service only tracks validation state.
 func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
 	// Use singleflight to deduplicate concurrent requests for the same file
-	key := entry.InfoHash + ":" + filename
+	key := linkLifecycleKey(entry, filename)
 	v, err, _ := s.singleflight.Do(key, func() (any, error) {
 		return s.fetchAndValidate(ctx, entry, filename, 0, 0)
 	})
@@ -99,17 +113,7 @@ func (s *Service) Refresh(ctx context.Context, entry *storage.Entry, bad types.D
 		return emptyDownloadLink, NewPermanentError(ErrEmptyLink, "empty_link")
 	}
 
-	key := entry.InfoHash + ":" + bad.Filename
-	v, err, _ := s.refreshflight.Do(key, func() (any, error) {
-		if err := s.invalidateCachedLink(bad); err != nil {
-			return emptyDownloadLink, err
-		}
-		return s.fetchAndValidate(ctx, entry, bad.Filename, 0, maxLinkRefreshes)
-	})
-	if err != nil {
-		return emptyDownloadLink, err
-	}
-	return v.(types.DownloadLink), nil
+	return s.refreshRejectedLink(ctx, entry, bad, 0, 0)
 }
 
 func (s *Service) getClient(provider string) (debrid.Client, error) {
@@ -136,6 +140,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	// Only successful validations are memoized. Transient failures must be
 	// allowed to recover on the next request.
 	if _, exists := s.validated.Load(validationKey(link)); exists {
+		s.clearRefreshBackoff(linkLifecycleKey(entry, filename))
 		return link, nil
 	}
 
@@ -163,15 +168,12 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 				return s.fetchAndValidate(ctx, entry, filename, repairAttempt, linkRefreshes)
 			} else if linkErr.ShouldRefetch() {
 				if linkRefreshes >= maxLinkRefreshes {
-					return emptyDownloadLink, NewPermanentError(
-						fmt.Errorf("replacement download link was also rejected: %w", validationErr),
-						"link_refresh_exhausted",
-					)
+					// Preserve the refetchable error. The outer refresh governor records
+					// the failed replacement and suppresses another provider regeneration
+					// until its bounded cooldown expires.
+					return emptyDownloadLink, validationErr
 				}
-				if err := s.invalidateCachedLink(link); err != nil {
-					return emptyDownloadLink, err
-				}
-				return s.fetchAndValidate(ctx, entry, filename, repairAttempt, linkRefreshes+1)
+				return s.refreshRejectedLink(ctx, entry, link, repairAttempt, linkRefreshes)
 			}
 		}
 		return emptyDownloadLink, validationErr
@@ -181,7 +183,128 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 		s.validated.Clear()
 	}
 	s.validated.Store(validationKey(link), struct{}{})
+	s.clearRefreshBackoff(linkLifecycleKey(entry, filename))
 	return link, nil
+}
+
+// refreshRejectedLink coalesces provider refreshes across validation and stream
+// recovery paths. A rejected replacement starts an adaptive per-file cooldown:
+// callers continue probing the cached CDN URL for recovery, but do not repeatedly
+// regenerate provider links while that URL remains rejected.
+func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry, rejected types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
+	key := linkLifecycleKey(entry, rejected.Filename)
+	v, err, _ := s.refreshflight.Do(key, func() (any, error) {
+		if err := ctx.Err(); err != nil {
+			return emptyDownloadLink, err
+		}
+		if delay, blocked := s.refreshDelay(key); blocked {
+			linkErr := NewLinkError(
+				fmt.Errorf("download link refresh deferred for %s", delay.Round(time.Millisecond)),
+				CategoryThrottled,
+				"link_refresh_cooldown",
+			)
+			linkErr.RetryAfter = delay
+			return emptyDownloadLink, linkErr
+		}
+		if err := s.invalidateCachedLink(rejected); err != nil {
+			return emptyDownloadLink, err
+		}
+
+		replacement, err := s.fetchAndValidate(ctx, entry, rejected.Filename, repairAttempt, linkRefreshes+1)
+		if err != nil {
+			if linkErr := GetLinkError(err); linkErr != nil && linkErr.ShouldRefetch() &&
+				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				delay, failures := s.recordRefreshFailure(key)
+				s.logger.Warn().
+					Str("debrid", entry.ActiveProvider).
+					Str("infohash", entry.InfoHash).
+					Str("filename", rejected.Filename).
+					Int("failures", failures).
+					Dur("retry_after", delay).
+					Msg("Download link replacement was rejected; deferring provider refresh")
+			}
+			return emptyDownloadLink, err
+		}
+
+		s.clearRefreshBackoff(key)
+		return replacement, nil
+	})
+	if err != nil {
+		return emptyDownloadLink, err
+	}
+	return v.(types.DownloadLink), nil
+}
+
+func linkLifecycleKey(entry *storage.Entry, filename string) string {
+	placementID := ""
+	if placement := entry.Providers[entry.ActiveProvider]; placement != nil {
+		placementID = placement.ID
+	}
+	return entry.ActiveProvider + "\x00" + entry.InfoHash + "\x00" + placementID + "\x00" + filename
+}
+
+func (s *Service) refreshDelay(key string) (time.Duration, bool) {
+	now := s.now()
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
+	state, exists := s.refreshBackoffs[key]
+	if !exists || !now.Before(state.nextAttempt) {
+		return 0, false
+	}
+	return state.nextAttempt.Sub(now), true
+}
+
+func (s *Service) recordRefreshFailure(key string) (time.Duration, int) {
+	now := s.now()
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
+	state, exists := s.refreshBackoffs[key]
+	if !exists && len(s.refreshBackoffs) >= maxRefreshBackoffs {
+		s.evictOldestRefreshBackoffLocked()
+	}
+	state.failures++
+	delay := refreshBackoffDelay(state.failures)
+	state.nextAttempt = now.Add(delay)
+	s.refreshBackoffs[key] = state
+	return delay, state.failures
+}
+
+func (s *Service) clearRefreshBackoff(key string) {
+	s.refreshMu.Lock()
+	delete(s.refreshBackoffs, key)
+	s.refreshMu.Unlock()
+}
+
+func (s *Service) evictOldestRefreshBackoffLocked() {
+	var oldestKey string
+	var oldestTime time.Time
+	found := false
+	for key, state := range s.refreshBackoffs {
+		if !found || state.nextAttempt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = state.nextAttempt
+			found = true
+		}
+	}
+	if found {
+		delete(s.refreshBackoffs, oldestKey)
+	}
+}
+
+func refreshBackoffDelay(failures int) time.Duration {
+	delay := refreshBackoffBase
+	for attempt := 1; attempt < failures && delay < refreshBackoffMax; attempt++ {
+		if delay >= refreshBackoffMax/2 {
+			return refreshBackoffMax
+		}
+		delay *= 2
+	}
+	if delay > refreshBackoffMax {
+		return refreshBackoffMax
+	}
+	return delay
 }
 
 func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.Entry, dl types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
@@ -554,7 +677,10 @@ func (s *Service) invalidateCachedLink(link types.DownloadLink) error {
 	return accounts.InvalidateDownloadLink(link)
 }
 
-// Clear removes all validation tracking entries
+// Clear removes all validation and refresh-backoff tracking entries.
 func (s *Service) Clear() {
 	s.validated.Clear()
+	s.refreshMu.Lock()
+	clear(s.refreshBackoffs)
+	s.refreshMu.Unlock()
 }

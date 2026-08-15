@@ -424,6 +424,18 @@ For Rclone:
 - Try different Usenet provider
 - Check network bandwidth
 
+### Repeated playback errors after a Debrid link expires
+
+Decypharr validates a generated download URL and replaces it once when the CDN
+rejects it. If the replacement is also rejected, Decypharr continues probing
+that cached URL for recovery but temporarily defers another provider API
+refresh. The delay increases from 30 seconds to a maximum of 5 minutes for a
+file that keeps failing, and clears immediately when the URL works again.
+
+If logs report `link_refresh_cooldown`, check the provider status and the host's
+clock. No configuration change is required; the cooldown is isolated to that
+provider placement and file, so other playback remains unaffected.
+
 ### Database growing large
 
 Config stored in `config.json` (text). No separate database.

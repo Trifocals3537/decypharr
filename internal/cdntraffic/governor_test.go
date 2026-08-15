@@ -267,6 +267,131 @@ func TestGovernorConcurrentAcquireReleaseStaysWithinLimit(t *testing.T) {
 	}
 }
 
+func TestGovernorMixedTrafficSoakStaysBoundedAndMakesProgress(t *testing.T) {
+	const (
+		limit      = 4
+		workers    = 16
+		iterations = 30
+	)
+	governor := New(Options{
+		DefaultLimit:        limit,
+		TorBoxLimit:         limit,
+		MinimumLimit:        1,
+		RecoveryInterval:    2 * time.Millisecond,
+		DefaultBackoff:      3 * time.Millisecond,
+		MaximumBackoff:      20 * time.Millisecond,
+		MaxInteractiveBurst: 3,
+	})
+	identity := Identity{Provider: "torbox-primary", ProviderType: "torbox", AccountToken: "secret"}
+
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRun()
+
+	var active atomic.Int64
+	var peak atomic.Int64
+	var observed atomic.Int64
+	var completedInteractive atomic.Int64
+	var completedBackground atomic.Int64
+	var canceled atomic.Int64
+	errCh := make(chan error, workers)
+	start := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for iteration := range iterations {
+				priority := PriorityBackground
+				if (worker+iteration)%3 != 0 {
+					priority = PriorityInteractive
+				}
+
+				if (worker+iteration)%13 == 0 {
+					requestCtx, cancelRequest := context.WithCancel(runCtx)
+					cancelRequest()
+					_, err := governor.Acquire(requestCtx, identity, "cdn.example", priority)
+					if !errors.Is(err, context.Canceled) {
+						errCh <- fmt.Errorf("canceled Acquire() error = %v", err)
+						return
+					}
+					canceled.Add(1)
+					continue
+				}
+
+				requestCtx, cancelRequest := context.WithTimeout(runCtx, time.Second)
+				permit, err := governor.Acquire(requestCtx, identity, "cdn.example", priority)
+				cancelRequest()
+				if err != nil {
+					errCh <- fmt.Errorf("Acquire() error = %w", err)
+					return
+				}
+
+				current := active.Add(1)
+				for {
+					previous := peak.Load()
+					if current <= previous || peak.CompareAndSwap(previous, current) {
+						break
+					}
+				}
+
+				time.Sleep(200 * time.Microsecond)
+				if observed.Add(1)%41 == 0 {
+					governor.Observe(identity, "cdn.example", http.StatusTooManyRequests, nil)
+				} else {
+					governor.Observe(identity, "cdn.example", http.StatusOK, nil)
+				}
+
+				active.Add(-1)
+				permit.Release()
+				if priority == PriorityInteractive {
+					completedInteractive.Add(1)
+				} else {
+					completedBackground.Add(1)
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	if err := runCtx.Err(); err != nil {
+		t.Fatalf("mixed traffic soak exceeded its deadline: %v", err)
+	}
+	if got := peak.Load(); got > limit {
+		t.Fatalf("peak concurrency = %d, want <= %d", got, limit)
+	}
+	if completedInteractive.Load() == 0 || completedBackground.Load() == 0 {
+		t.Fatalf(
+			"completed interactive/background = %d/%d, want both to make progress",
+			completedInteractive.Load(),
+			completedBackground.Load(),
+		)
+	}
+	if canceled.Load() == 0 {
+		t.Fatal("mixed traffic soak did not exercise cancellation")
+	}
+
+	stats := governor.Snapshot()
+	if stats.Active != 0 || stats.WaitingInteractive != 0 || stats.WaitingBackground != 0 {
+		t.Fatalf("governor leaked admission state: %+v", stats)
+	}
+	if stats.Throttles == 0 {
+		t.Fatal("mixed traffic soak did not exercise 429 throttling")
+	}
+	if len(stats.Providers) != 1 {
+		t.Fatalf("provider stats = %d, want 1", len(stats.Providers))
+	}
+	provider := stats.Providers[0]
+	if provider.AdmittedInteractive == 0 || provider.AdmittedBackground == 0 {
+		t.Fatalf("provider admissions did not make progress: %+v", provider)
+	}
+}
+
 func TestRetryAfterSupportsSecondsAndHTTPDate(t *testing.T) {
 	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
 	seconds := make(http.Header)

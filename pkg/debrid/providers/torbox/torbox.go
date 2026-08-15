@@ -273,6 +273,52 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
+// isCached checks one hash without conflating a failed probe with a definite
+// cache miss. The public IsAvailable method intentionally returns only positive
+// results, which is useful for bulk lookup but cannot tell callers whether an
+// absent key means "not cached" or "the request failed".
+func (tb *Torbox) isCached(hash string) (cached bool, known bool) {
+	if strings.TrimSpace(hash) == "" {
+		return false, false
+	}
+
+	var res AvailableResponse
+	resp, err := tb.doGet("/api/torrents/checkcached", map[string]string{
+		"hash":       hash,
+		"format":     "object",
+		"list_files": "false",
+	}, &res)
+	if err != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 ||
+		!res.Success {
+		return false, false
+	}
+	if res.Data == nil {
+		// TorBox v4.3 documented a successful null-data response for a cache
+		// miss, while newer versions use an empty object. Only accept the legacy
+		// form when its detail explicitly states the negative result.
+		detail := strings.ToLower(strings.TrimSpace(res.Detail))
+		return false, strings.Contains(detail, "no cached data")
+	}
+	if len(*res.Data) == 0 {
+		return false, true
+	}
+
+	for responseHash, cachedTorrent := range *res.Data {
+		if strings.EqualFold(responseHash, hash) {
+			if cachedTorrent.Size > 0 {
+				return true, true
+			}
+			// A matching but incomplete object is not the documented cached
+			// representation. Preserve the existing create call instead of
+			// converting a response-shape change into a false cache miss.
+			return false, false
+		}
+	}
+	// A non-empty response for some other hash is inconsistent with this
+	// single-hash lookup, so its absence is not trustworthy evidence of a miss.
+	return false, false
+}
+
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	var data AddMagnetResponse
 
@@ -281,6 +327,13 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	}
 	if !torrent.DownloadUncached {
 		formData["add_only_if_cached"] = "true"
+		// TorBox can leave createtorrent unanswered for a known cache miss,
+		// causing the request client's timeout and retry policy to turn a cheap
+		// refusal into minutes of latency. Probe first, but only act on a
+		// trustworthy answer so a provider outage cannot become a false miss.
+		if cached, known := tb.isCached(torrent.InfoHash); known && !cached {
+			return nil, customerror.NewTorrentNotCachedError(torrent.Name)
+		}
 	}
 
 	resp, err := tb.doPostForm("/api/torrents/createtorrent", formData, &data)
@@ -550,7 +603,7 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 			return torrent, nil
 		case types.TorrentStatusDownloading:
 			if !torrent.DownloadUncached {
-				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+				return torrent, customerror.NewTorrentNotCachedError(torrent.Name)
 			}
 			return torrent, nil
 		default:

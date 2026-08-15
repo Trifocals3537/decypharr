@@ -299,6 +299,11 @@ curl -X POST \
   http://localhost:8282/api/v2/torrents/add
 ```
 
+When every eligible provider gives a definite cache miss, the endpoint returns
+`409 Conflict` with `X-Decypharr-Error-Code: torrent_not_cached`. Mixed failures
+(for example, a cache miss followed by a provider outage) are not mislabeled as
+an all-provider cache miss.
+
 ### POST /api/v2/torrents/delete
 
 Delete torrents (QBit format).

@@ -232,7 +232,7 @@ func (pm *Premiumize) UpdateAndReturnTorrent(t *types.Torrent) (*types.Torrent, 
 	}
 	if t.Status == types.TorrentStatusDownloading || t.Status == types.TorrentStatusQueued {
 		if !t.DownloadUncached {
-			return t, fmt.Errorf("torrent: %s not cached", t.Name)
+			return t, customerror.NewTorrentNotCachedError(t.Name)
 		}
 		return t, nil
 	}

@@ -3,6 +3,7 @@ package customerror
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +42,21 @@ func TestNewErrorRetainsHTTPMetadata(t *testing.T) {
 	}
 	if err.Code != "server.busy" {
 		t.Errorf("Code = %q, want server.busy", err.Code)
+	}
+}
+
+func TestTorrentNotCachedErrorIsRetryableConflict(t *testing.T) {
+	err := NewTorrentNotCachedError("Release")
+	if err.HTTPStatus() != http.StatusConflict {
+		t.Errorf("HTTPStatus() = %d, want %d", err.HTTPStatus(), http.StatusConflict)
+	}
+	if err.Code != "torrent_not_cached" {
+		t.Errorf("Code = %q, want torrent_not_cached", err.Code)
+	}
+	if !err.IsRetryable() || err.IsPermanent() {
+		t.Fatal("cache miss must be retryable and non-permanent")
+	}
+	if !strings.Contains(err.Error(), "Release") {
+		t.Fatalf("error = %q, want release name", err.Error())
 	}
 }

@@ -475,7 +475,7 @@ func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error)
 			return torrent, nil
 		case types.TorrentStatusDownloading:
 			if !torrent.DownloadUncached {
-				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+				return torrent, customerror.NewTorrentNotCachedError(torrent.Name)
 			}
 			return torrent, nil
 		case types.TorrentStatusError:

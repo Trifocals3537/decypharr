@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,25 +24,40 @@ type lifecycleTestClient struct {
 	debrid.Client
 	mu            sync.Mutex
 	links         []types.DownloadLink
+	cacheLinks    bool
+	cached        map[string]types.DownloadLink
 	fetches       int
 	invalidations int
 	accounts      *account.Manager
 }
 
-func (c *lifecycleTestClient) GetDownloadLink(_ string, _ *types.File) (types.DownloadLink, error) {
+func (c *lifecycleTestClient) GetDownloadLink(_ string, file *types.File) (types.DownloadLink, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.cacheLinks {
+		if cached, ok := c.cached[file.Link]; ok {
+			return cached, nil
+		}
+	}
 	c.fetches++
 	if len(c.links) == 0 {
 		return types.DownloadLink{}, fmt.Errorf("no test links configured")
 	}
 	index := min(c.fetches-1, len(c.links)-1)
-	return c.links[index], nil
+	link := c.links[index]
+	if c.cacheLinks {
+		if c.cached == nil {
+			c.cached = make(map[string]types.DownloadLink)
+		}
+		c.cached[file.Link] = link
+	}
+	return link, nil
 }
 
-func (c *lifecycleTestClient) InvalidateCachedLink(types.DownloadLink) error {
+func (c *lifecycleTestClient) InvalidateCachedLink(link types.DownloadLink) error {
 	c.mu.Lock()
 	c.invalidations++
+	delete(c.cached, link.Link)
 	c.mu.Unlock()
 	return nil
 }
@@ -184,28 +200,281 @@ func TestRejectedLinkRefreshesOnceAndValidatesReplacement(t *testing.T) {
 	}
 }
 
-func TestRejectedReplacementDoesNotLoop(t *testing.T) {
+func TestRejectedReplacementStartsRefreshCooldown(t *testing.T) {
+	var heads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		heads.Add(1)
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
 
-	client := &lifecycleTestClient{links: []types.DownloadLink{
+	client := &lifecycleTestClient{cacheLinks: true, links: []types.DownloadLink{
 		lifecycleDownloadLink(server.URL + "/old"),
 		lifecycleDownloadLink(server.URL + "/new"),
 		lifecycleDownloadLink(server.URL + "/unexpected"),
 	}}
 	service := newLifecycleService(client, server.Client(), 0)
-	_, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv")
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	entry := lifecycleTestEntry()
+
+	_, err := service.GetLink(context.Background(), entry, "video.mkv")
 	if err == nil {
 		t.Fatal("GetLink() succeeded, want rejected replacement error")
 	}
-	if linkErr := GetLinkError(err); linkErr == nil || !linkErr.IsPermanent() || linkErr.Code != "link_refresh_exhausted" {
-		t.Fatalf("error = %v, want permanent exhausted-refresh error", err)
+	if linkErr := GetLinkError(err); linkErr == nil || !linkErr.ShouldRefetch() || linkErr.Code != "403" {
+		t.Fatalf("error = %v, want original refetchable rejection", err)
+	}
+
+	for attempt := range 2 {
+		_, err = service.GetLink(context.Background(), entry, "video.mkv")
+		linkErr := GetLinkError(err)
+		if linkErr == nil || !linkErr.ShouldBackoff() || linkErr.Code != "link_refresh_cooldown" {
+			t.Fatalf("cooldown attempt %d error = %v, want throttled refresh cooldown", attempt+1, err)
+		}
+		if linkErr.RetryAfter != refreshBackoffBase {
+			t.Fatalf("cooldown attempt %d RetryAfter = %s, want %s", attempt+1, linkErr.RetryAfter, refreshBackoffBase)
+		}
 	}
 	fetches, invalidations := client.counts()
 	if fetches != 2 || invalidations != 1 {
-		t.Fatalf("fetches/invalidations = %d/%d, want bounded 2/1", fetches, invalidations)
+		t.Fatalf("provider fetches/invalidations = %d/%d, want bounded 2/1", fetches, invalidations)
+	}
+	if got := heads.Load(); got != 4 {
+		t.Fatalf("HEAD requests = %d, want 4 so the cached CDN URL remains probeable", got)
+	}
+}
+
+func TestRefreshCooldownClearsWhenCachedLinkRecovers(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusForbidden)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(int(status.Load()))
+	}))
+	defer server.Close()
+
+	client := &lifecycleTestClient{cacheLinks: true, links: []types.DownloadLink{
+		lifecycleDownloadLink(server.URL + "/old"),
+		lifecycleDownloadLink(server.URL + "/replacement"),
+	}}
+	service := newLifecycleService(client, server.Client(), 0)
+	entry := lifecycleTestEntry()
+
+	if _, err := service.GetLink(context.Background(), entry, "video.mkv"); err == nil {
+		t.Fatal("first GetLink() succeeded, want rejected replacement")
+	}
+	status.Store(http.StatusOK)
+	got, err := service.GetLink(context.Background(), entry, "video.mkv")
+	if err != nil {
+		t.Fatalf("recovery GetLink() error = %v", err)
+	}
+	if got.DownloadLink != server.URL+"/replacement" {
+		t.Fatalf("recovered link = %q, want cached replacement", got.DownloadLink)
+	}
+	fetches, invalidations := client.counts()
+	if fetches != 2 || invalidations != 1 {
+		t.Fatalf("provider fetches/invalidations = %d/%d, want 2/1 without another regeneration", fetches, invalidations)
+	}
+	service.refreshMu.Lock()
+	remaining := len(service.refreshBackoffs)
+	service.refreshMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("refresh backoffs = %d, want recovery to clear state", remaining)
+	}
+}
+
+func TestRefreshCooldownExpiresAndBacksOffExponentially(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := &lifecycleTestClient{cacheLinks: true, links: []types.DownloadLink{
+		lifecycleDownloadLink(server.URL + "/old"),
+		lifecycleDownloadLink(server.URL + "/replacement-1"),
+		lifecycleDownloadLink(server.URL + "/replacement-2"),
+	}}
+	service := newLifecycleService(client, server.Client(), 0)
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	entry := lifecycleTestEntry()
+
+	if _, err := service.GetLink(context.Background(), entry, "video.mkv"); err == nil {
+		t.Fatal("first GetLink() succeeded, want rejected replacement")
+	}
+	now = now.Add(refreshBackoffBase)
+	if _, err := service.GetLink(context.Background(), entry, "video.mkv"); err == nil {
+		t.Fatal("post-cooldown GetLink() succeeded, want second rejected replacement")
+	}
+
+	_, err := service.GetLink(context.Background(), entry, "video.mkv")
+	linkErr := GetLinkError(err)
+	if linkErr == nil || linkErr.Code != "link_refresh_cooldown" || linkErr.RetryAfter != 2*refreshBackoffBase {
+		t.Fatalf("error = %v (RetryAfter %v), want second 1m cooldown", err, linkErrRetryAfter(linkErr))
+	}
+	fetches, invalidations := client.counts()
+	if fetches != 3 || invalidations != 2 {
+		t.Fatalf("provider fetches/invalidations = %d/%d, want one new refresh after expiry (3/2)", fetches, invalidations)
+	}
+}
+
+func linkErrRetryAfter(err *Error) time.Duration {
+	if err == nil {
+		return 0
+	}
+	return err.RetryAfter
+}
+
+func TestGetLinkAndRefreshShareOneProviderRegeneration(t *testing.T) {
+	replacementStarted := make(chan struct{})
+	releaseReplacement := make(chan struct{})
+	var startOnce sync.Once
+	var heads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		heads.Add(1)
+		switch r.URL.Path {
+		case "/old":
+			w.WriteHeader(http.StatusForbidden)
+		case "/replacement":
+			startOnce.Do(func() { close(replacementStarted) })
+			<-releaseReplacement
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	old := lifecycleDownloadLink(server.URL + "/old")
+	replacement := lifecycleDownloadLink(server.URL + "/replacement")
+	unexpected := lifecycleDownloadLink(server.URL + "/unexpected")
+	client := &lifecycleTestClient{cacheLinks: true, links: []types.DownloadLink{old, replacement, unexpected}}
+	service := newLifecycleService(client, server.Client(), 0)
+	entry := lifecycleTestEntry()
+
+	type refreshResult struct {
+		link types.DownloadLink
+		err  error
+	}
+	firstResult := make(chan refreshResult, 1)
+	go func() {
+		link, err := service.GetLink(context.Background(), entry, "video.mkv")
+		firstResult <- refreshResult{link: link, err: err}
+	}()
+	<-replacementStarted
+
+	releaseTimer := time.AfterFunc(100*time.Millisecond, func() { close(releaseReplacement) })
+	secondLink, secondErr := service.Refresh(context.Background(), entry, old)
+	first := <-firstResult
+	_ = releaseTimer.Stop()
+	if first.err != nil || secondErr != nil {
+		t.Fatalf("concurrent GetLink()/Refresh() errors = %v / %v", first.err, secondErr)
+	}
+	if first.link.DownloadLink != replacement.DownloadLink || secondLink.DownloadLink != replacement.DownloadLink {
+		t.Fatalf("concurrent links = %q / %q, want shared replacement", first.link.DownloadLink, secondLink.DownloadLink)
+	}
+	fetches, invalidations := client.counts()
+	if fetches != 2 || invalidations != 1 || heads.Load() != 2 {
+		t.Fatalf("provider fetches/invalidations/HEADs = %d/%d/%d, want 2/1/2", fetches, invalidations, heads.Load())
+	}
+}
+
+func TestCanceledRefreshDoesNotCreateBackoff(t *testing.T) {
+	client := &lifecycleTestClient{}
+	service := newLifecycleService(client, http.DefaultClient, 0)
+	entry := lifecycleTestEntry()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Refresh(ctx, entry, lifecycleDownloadLink("https://cdn.example/rejected"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Refresh() error = %v, want context cancellation", err)
+	}
+	fetches, invalidations := client.counts()
+	if fetches != 0 || invalidations != 0 {
+		t.Fatalf("provider fetches/invalidations = %d/%d, want 0/0", fetches, invalidations)
+	}
+	service.refreshMu.Lock()
+	states := len(service.refreshBackoffs)
+	service.refreshMu.Unlock()
+	if states != 0 {
+		t.Fatalf("refresh backoffs = %d, want none after cancellation", states)
+	}
+}
+
+func TestRefreshBackoffIsScopedByProviderPlacementAndFile(t *testing.T) {
+	service := newLifecycleService(&lifecycleTestClient{}, http.DefaultClient, 0)
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	entry := lifecycleTestEntry()
+	baseKey := linkLifecycleKey(entry, "video.mkv")
+	fileKey := linkLifecycleKey(entry, "extras/trailer.mkv")
+	otherPlacement := lifecycleTestEntry()
+	otherPlacement.Providers["test"].ID = "replacement-torrent"
+	placementKey := linkLifecycleKey(otherPlacement, "video.mkv")
+	otherProvider := lifecycleTestEntry()
+	otherProvider.ActiveProvider = "other"
+	otherProvider.Providers["other"] = &storage.ProviderEntry{Provider: "other", ID: "torrent"}
+	providerKey := linkLifecycleKey(otherProvider, "video.mkv")
+
+	service.recordRefreshFailure(baseKey)
+	if _, blocked := service.refreshDelay(baseKey); !blocked {
+		t.Fatal("base file is not in cooldown")
+	}
+	for label, key := range map[string]string{
+		"file":      fileKey,
+		"placement": placementKey,
+		"provider":  providerKey,
+	} {
+		if _, blocked := service.refreshDelay(key); blocked {
+			t.Fatalf("%s key unexpectedly inherited another file's cooldown", label)
+		}
+	}
+}
+
+func TestRefreshBackoffStateIsBoundedAndClearable(t *testing.T) {
+	service := newLifecycleService(&lifecycleTestClient{}, http.DefaultClient, 0)
+	service.now = func() time.Time {
+		return time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	}
+
+	for index := range maxRefreshBackoffs + 17 {
+		service.recordRefreshFailure(fmt.Sprintf("key-%d", index))
+	}
+	service.refreshMu.Lock()
+	states := len(service.refreshBackoffs)
+	service.refreshMu.Unlock()
+	if states != maxRefreshBackoffs {
+		t.Fatalf("refresh backoffs = %d, want bounded %d", states, maxRefreshBackoffs)
+	}
+
+	service.validated.Store("validated", struct{}{})
+	service.Clear()
+	service.refreshMu.Lock()
+	states = len(service.refreshBackoffs)
+	service.refreshMu.Unlock()
+	if states != 0 || service.validated.Size() != 0 {
+		t.Fatalf("state after Clear() = %d backoffs/%d validations, want 0/0", states, service.validated.Size())
+	}
+}
+
+func TestRefreshBackoffDelayCapsAtMaximum(t *testing.T) {
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{failures: 1, want: 30 * time.Second},
+		{failures: 2, want: time.Minute},
+		{failures: 3, want: 2 * time.Minute},
+		{failures: 4, want: 4 * time.Minute},
+		{failures: 5, want: 5 * time.Minute},
+		{failures: 20, want: 5 * time.Minute},
+	}
+	for _, test := range tests {
+		if got := refreshBackoffDelay(test.failures); got != test.want {
+			t.Errorf("refreshBackoffDelay(%d) = %s, want %s", test.failures, got, test.want)
+		}
 	}
 }
 

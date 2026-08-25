@@ -101,6 +101,7 @@ func newStreamFailoverTestManager(
 		logger:                    zerolog.Nop(),
 		activeStreams:             xsync.NewMap[string, *ActiveStream](),
 		streamProviderPreferences: xsync.NewMap[string, streamProviderPreference](),
+		streamProviderWeather:     newStreamProviderWeather(),
 	}
 }
 

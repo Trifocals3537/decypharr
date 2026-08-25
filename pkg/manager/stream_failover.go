@@ -31,10 +31,13 @@ type streamCandidate struct {
 // Successes counts alternate providers that became ready before response
 // commitment; Exhausted counts requests that tried every eligible placement.
 type StreamFailoverStats struct {
-	Attempts      uint64 `json:"attempts"`
-	Successes     uint64 `json:"successes"`
-	Exhausted     uint64 `json:"exhausted"`
-	PreferredHits uint64 `json:"preferred_hits"`
+	Attempts             uint64 `json:"attempts"`
+	Successes            uint64 `json:"successes"`
+	Exhausted            uint64 `json:"exhausted"`
+	PreferredHits        uint64 `json:"preferred_hits"`
+	ProviderDeferrals    uint64 `json:"provider_deferrals"`
+	ProviderDegradations uint64 `json:"provider_degradations"`
+	ProviderRecoveries   uint64 `json:"provider_recoveries"`
 }
 
 // StreamFailoverStats returns a lock-free snapshot of provider failover.
@@ -43,10 +46,13 @@ func (m *Manager) StreamFailoverStats() StreamFailoverStats {
 		return StreamFailoverStats{}
 	}
 	return StreamFailoverStats{
-		Attempts:      m.streamFailoverAttempts.Load(),
-		Successes:     m.streamFailoverSuccesses.Load(),
-		Exhausted:     m.streamFailoverExhausted.Load(),
-		PreferredHits: m.streamPreferredHits.Load(),
+		Attempts:             m.streamFailoverAttempts.Load(),
+		Successes:            m.streamFailoverSuccesses.Load(),
+		Exhausted:            m.streamFailoverExhausted.Load(),
+		PreferredHits:        m.streamPreferredHits.Load(),
+		ProviderDeferrals:    m.streamProviderDeferrals.Load(),
+		ProviderDegradations: m.streamProviderDegraded.Load(),
+		ProviderRecoveries:   m.streamProviderRecoveries.Load(),
 	}
 }
 
@@ -123,7 +129,7 @@ func (m *Manager) streamCandidates(entry *storage.Entry, filename string) []stre
 			preferred: preferred != "" && strings.EqualFold(provider, preferred),
 		})
 	}
-	return candidates
+	return m.orderStreamCandidatesByWeather(candidates)
 }
 
 func (candidate streamCandidate) entryForAttempt(original *storage.Entry, filename string) *storage.Entry {

@@ -104,10 +104,14 @@ type Manager struct {
 	// playback does not retry a known-bad primary on every seek. Counters are
 	// exposed through the secret-free stats snapshot.
 	streamProviderPreferences *xsync.Map[string, streamProviderPreference]
+	streamProviderWeather     *streamProviderWeather
 	streamFailoverAttempts    atomic.Uint64
 	streamFailoverSuccesses   atomic.Uint64
 	streamFailoverExhausted   atomic.Uint64
 	streamPreferredHits       atomic.Uint64
+	streamProviderDeferrals   atomic.Uint64
+	streamProviderDegraded    atomic.Uint64
+	streamProviderRecoveries  atomic.Uint64
 
 	// In-flight queue-processor dispatches, keyed by InfoHash, to prevent
 	// duplicate goroutines from processing the same entry when the scheduler
@@ -202,6 +206,7 @@ func New() *Manager {
 		debridSpeedTestResults:    xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:             xsync.NewMap[string, *ActiveStream](),
 		streamProviderPreferences: xsync.NewMap[string, streamProviderPreference](),
+		streamProviderWeather:     newStreamProviderWeather(),
 		processingEntries:         xsync.NewMap[string, struct{}](),
 		entryLifecycle:            entryLifecycle,
 	}

@@ -1,11 +1,9 @@
 package webdav
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -37,13 +35,7 @@ func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w
 		return nil
 	}, client)
 	if err != nil {
-		var customErr *customerror.Error
-		if errors.As(err, &customErr) {
-			customErr.HeadersWritten = headersWritten
-			return customErr
-		}
-
-		return customerror.NewError(err, http.StatusInternalServerError, "server.internal_error", false, headersWritten)
+		return normalizeStreamError(err, headersWritten)
 	}
 	return nil
 }

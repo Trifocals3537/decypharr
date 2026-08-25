@@ -227,6 +227,18 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		if err := ctx.Err(); err != nil {
 			return retry.Unrecoverable(err)
 		}
+		weatherProbe := false
+		if m.streamProviderWeather != nil {
+			probe, allowed := m.streamProviderWeather.beginAttempt(candidate.provider)
+			if !allowed {
+				failures = append(failures, fmt.Errorf("provider %s: %w", candidate.provider, StreamError{
+					Err:       errors.New("provider recovery probe already in progress"),
+					Retryable: true,
+				}))
+				continue
+			}
+			weatherProbe = probe
+		}
 
 		candidateCtx := ctx
 		hasFallback := index+1 < len(candidates)
@@ -251,6 +263,9 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			buf,
 			hasFallback,
 		)
+		if weatherProbe {
+			m.streamProviderWeather.releaseProbe(candidate.provider)
+		}
 		if err == nil {
 			return nil
 		}
@@ -258,16 +273,17 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
+		provider := candidate.provider
+		if provider == "" {
+			provider = "active"
+		}
+		weather := m.recordStreamProviderFailure(provider, streamPreferenceKey(torrent, filename), err)
 		if !hasFallback && len(failures) == 0 {
 			// Preserve the exact historical error type/semantics when an entry
 			// has no alternate placement.
 			return err
 		}
 
-		provider := candidate.provider
-		if provider == "" {
-			provider = "active"
-		}
 		failures = append(failures, fmt.Errorf("provider %s: %w", provider, err))
 		if !hasFallback {
 			break
@@ -278,11 +294,12 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		if nextProvider == "" {
 			nextProvider = "active"
 		}
-		m.logger.Warn().
+		m.logger.Debug().
 			Str("failed_provider", provider).
 			Str("next_provider", nextProvider).
-			Str("infohash", torrent.InfoHash).
-			Str("filename", filename).
+			Str("failure_class", weather.Class).
+			Int("distinct_files", weather.DistinctFiles).
+			Dur("cooldown", weather.Cooldown).
 			Msg("Stream provider failed before response commitment; trying next placement")
 	}
 
@@ -462,6 +479,12 @@ func (m *Manager) streamHTTPFromCandidate(
 func (m *Manager) markStreamProviderReady(original *storage.Entry, filename string, candidate streamCandidate) {
 	if original == nil {
 		return
+	}
+	if m.streamProviderWeather != nil && m.streamProviderWeather.recordSuccess(candidate.provider) {
+		m.streamProviderRecoveries.Add(1)
+		m.logger.Info().
+			Str("provider", candidate.provider).
+			Msg("Stream provider recovered")
 	}
 	m.rememberStreamProvider(original, filename, candidate.provider)
 	m.updateActiveStreamProvider(original.Name, filename, candidate.provider)

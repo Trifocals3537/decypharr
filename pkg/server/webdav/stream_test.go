@@ -55,6 +55,19 @@ func TestNormalizeStreamErrorUsesRetryableProviderSemantics(t *testing.T) {
 	}
 }
 
+func TestWriteStreamErrorPreservesProviderRetryAfter(t *testing.T) {
+	linkErr := link.NewLinkError(errors.New("provider cooldown"), link.CategoryThrottled, "account_cooldown")
+	linkErr.RetryAfter = 90*time.Second + time.Millisecond
+	streamErr := normalizeStreamError(manager.StreamError{Err: linkErr, Retryable: true}, false)
+
+	handler := &Handler{}
+	response := httptest.NewRecorder()
+	handler.writeStreamError("movie", streamErr, response)
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "91" {
+		t.Fatalf("response = status %d Retry-After %q", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
 func TestNormalizeStreamErrorPreservesCustomStatusAndSilencesCancellation(t *testing.T) {
 	existing := customerror.NewArticleNotFoundError(errors.New("article missing"))
 	if got := normalizeStreamError(existing, false); got != existing || got.HTTPStatus() != http.StatusGone {

@@ -639,7 +639,7 @@ func TestRegeneratedLinkWithSameURLIsRevalidated(t *testing.T) {
 	}
 }
 
-func TestAccountFailureStopsWhenNoAlternateAccountExists(t *testing.T) {
+func TestAccountFailureStartsRetryableCooldownWhenNoAlternateExists(t *testing.T) {
 	previousPath := config.GetMainPath()
 	config.Reset()
 	config.SetConfigPath(t.TempDir())
@@ -652,6 +652,7 @@ func TestAccountFailureStopsWhenNoAlternateAccountExists(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		heads.Add(1)
 		w.Header().Set("X-Error", "bandwidth_exceeded")
+		w.Header().Set("Retry-After", "120")
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
@@ -667,13 +668,17 @@ func TestAccountFailureStopsWhenNoAlternateAccountExists(t *testing.T) {
 	service := newLifecycleService(client, server.Client(), 0)
 	_, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv")
 	if err == nil {
-		t.Fatal("GetLink() succeeded, want no-active-account error")
+		t.Fatal("GetLink() succeeded, want account cooldown error")
 	}
-	if linkErr := GetLinkError(err); linkErr == nil || linkErr.Code != "no_active_account" || !linkErr.IsPermanent() {
-		t.Fatalf("error = %v, want permanent no-active-account error", err)
+	if linkErr := GetLinkError(err); linkErr == nil || linkErr.Code != "account_cooldown" || !linkErr.ShouldBackoff() || linkErr.RetryAfter < 119*time.Second {
+		t.Fatalf("error = %v, want throttled account cooldown honoring Retry-After", err)
 	}
 	if heads.Load() != 1 {
 		t.Fatalf("HEAD requests = %d, want 1 without recursive fallback", heads.Load())
+	}
+	accountState := accounts.All()[0].RecoveryStatus(time.Now())
+	if accountState.State != account.StateTemporarilySuspended || accounts.All()[0].Disabled.Load() {
+		t.Fatalf("account state/disabled = %s/%v, want temporary/false", accountState.State, accounts.All()[0].Disabled.Load())
 	}
 }
 
@@ -720,5 +725,60 @@ func TestAccountFailureMovesToAlternateAccount(t *testing.T) {
 	}
 	if heads.Load() != 2 || len(accounts.Active()) != 1 || accounts.Active()[0].Token != "second-token" {
 		t.Fatalf("HEAD requests/active accounts = %d/%v, want 2/[second-token]", heads.Load(), accounts.Active())
+	}
+	firstAccount, _ := accounts.GetAccount("first-token")
+	if status := firstAccount.RecoveryStatus(time.Now()); status.State != account.StateTemporarilySuspended || firstAccount.Disabled.Load() {
+		t.Fatalf("first account state/disabled = %s/%v, want temporary/false", status.State, firstAccount.Disabled.Load())
+	}
+}
+
+func TestSuccessfulValidatedProbeRecoversSuspendedAccount(t *testing.T) {
+	previousPath := config.GetMainPath()
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(func() {
+		config.Reset()
+		config.SetConfigPath(previousPath)
+	})
+
+	var heads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		heads.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	accounts := account.NewManager(config.Debrid{
+		Name:            "test",
+		DownloadAPIKeys: []string{"token"},
+	}, nil, zerolog.Nop())
+	testAccount := accounts.All()[0]
+	status, changed := accounts.SuspendTemporary(testAccount, 0, 0, "bytes_limit_reached")
+	if !changed {
+		t.Fatal("account was not initially suspended")
+	}
+	acquired, probeID, _ := testAccount.TryAcquire(status.RetryAt)
+	if !acquired || probeID == 0 {
+		t.Fatal("recovery probe was not acquired")
+	}
+	probeLink := lifecycleDownloadLink(server.URL)
+	probeLink.RecoveryProbeID = probeID
+	client := &lifecycleTestClient{
+		links:    []types.DownloadLink{probeLink},
+		accounts: accounts,
+	}
+	service := newLifecycleService(client, server.Client(), 0)
+	// Simulate a late success from a request that started before suspension.
+	// The half-open probe must still perform its own validation.
+	service.validated.Store(validationKey(probeLink), struct{}{})
+
+	if _, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv"); err != nil {
+		t.Fatalf("GetLink() error = %v", err)
+	}
+	if heads.Load() != 1 {
+		t.Fatalf("HEAD requests = %d, want 1 fresh half-open validation", heads.Load())
+	}
+	if recovered := testAccount.RecoveryStatus(time.Now()); recovered.State != account.StateActive || len(accounts.Active()) != 1 {
+		t.Fatalf("recovered account status/active = %+v/%d", recovered, len(accounts.Active()))
 	}
 }

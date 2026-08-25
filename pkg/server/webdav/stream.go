@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
 )
@@ -139,7 +141,11 @@ func (h *Handler) writeStreamError(logKey string, err error, w http.ResponseWrit
 		if !streamErr.HeadersWritten {
 			status := streamErr.HTTPStatus()
 			if status == http.StatusServiceUnavailable && w.Header().Get("Retry-After") == "" {
-				w.Header().Set("Retry-After", "5")
+				retryAfter := 5
+				if linkErr := link.GetLinkError(err); linkErr != nil && linkErr.RetryAfter > 0 {
+					retryAfter = int((linkErr.RetryAfter + time.Second - 1) / time.Second)
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			}
 			http.Error(w, http.StatusText(status), status)
 		}

@@ -1,6 +1,7 @@
 package account
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,8 +21,11 @@ type Account struct {
 	httpClient  *request.Client
 	Expiration  time.Time `json:"expiration"`
 
-	// Account reactivation tracking
+	// Permanent-disable tracking. Temporary recovery state is protected below.
 	DisableCount atomic.Int32 `json:"disable_count"`
+
+	recoveryMu sync.Mutex
+	recovery   recoveryState
 }
 
 func (a *Account) Equals(other *Account) bool {
@@ -68,6 +72,8 @@ func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetch
 }
 
 func (a *Account) storeLink(dl types.DownloadLink) {
+	// Probe ownership is request-scoped and must never leak into the cache.
+	dl.RecoveryProbeID = 0
 	slicedLink := a.sliceFileLink(dl.Link)
 	a.links.Store(slicedLink, dl)
 }
@@ -119,10 +125,16 @@ func (a *Account) StoreDownloadLinks(dls map[string]*types.DownloadLink) {
 // MarkDisabled marks the account as disabled and increments the disable count
 func (a *Account) MarkDisabled() {
 	a.Disabled.Store(true)
+	a.recoveryMu.Lock()
+	a.recovery = recoveryState{}
+	a.recoveryMu.Unlock()
 	a.DisableCount.Add(1)
 }
 
 func (a *Account) Reset() {
+	a.recoveryMu.Lock()
+	a.recovery = recoveryState{}
+	a.recoveryMu.Unlock()
 	a.DisableCount.Store(0)
 	a.Disabled.Store(false)
 }

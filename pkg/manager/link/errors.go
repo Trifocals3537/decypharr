@@ -18,7 +18,7 @@ const (
 	CategoryRetryable
 	// CategoryRefetchable - Get new link (expired, invalid code)
 	CategoryRefetchable
-	// CategoryAccountIssue - Disable account (bandwidth exceeded)
+	// CategoryAccountIssue - Temporarily suspend account (bandwidth/quota pressure)
 	CategoryAccountIssue
 	// CategoryThrottled - wait and retry the same link (429)
 	CategoryThrottled
@@ -73,9 +73,16 @@ func (e *Error) ShouldRefetch() bool {
 	return e.Category == CategoryRefetchable
 }
 
-// ShouldDisableAccount returns true if the account should be disabled
-func (e *Error) ShouldDisableAccount() bool {
+// ShouldSuspendAccount returns true when provider pressure should temporarily
+// remove the account from selection and schedule a recovery probe.
+func (e *Error) ShouldSuspendAccount() bool {
 	return e.Category == CategoryAccountIssue
+}
+
+// ShouldDisableAccount is retained for source compatibility. Account-issue
+// errors are now temporary suspensions rather than permanent disables.
+func (e *Error) ShouldDisableAccount() bool {
+	return e.ShouldSuspendAccount()
 }
 
 // ShouldBackoff reports whether the same link should be retried after a delay.
@@ -140,7 +147,7 @@ func NewRefetchableError(err error, code string) *Error {
 	return NewLinkError(err, CategoryRefetchable, code)
 }
 
-// NewAccountError creates an error that requires disabling the account
+// NewAccountError creates an error that temporarily suspends the account.
 func NewAccountError(err error, code string) *Error {
 	return NewLinkError(err, CategoryAccountIssue, code)
 }

@@ -157,6 +157,11 @@ type DownloadLink struct {
 	Size         int64     `json:"size"`
 	Id           string    `json:"id"`
 	ExpiresAt    time.Time
+
+	// RecoveryProbeID ties a generated or cached URL to the one account
+	// recovery probe that acquired it. It is deliberately process-local and
+	// must never be serialized or exposed through the API.
+	RecoveryProbeID uint64 `json:"-"`
 }
 
 const maxDownloadLinkRefreshSkew = time.Minute

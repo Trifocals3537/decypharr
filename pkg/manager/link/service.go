@@ -138,6 +138,13 @@ func (s *Service) withCDNIdentity(ctx context.Context, link *types.DownloadLink)
 	if link != nil {
 		identity.Provider = link.Debrid
 		identity.AccountToken = link.Token
+		if link.Link != "" {
+			identity.LinkKey = link.Link
+		} else if link.Id != "" || link.Filename != "" {
+			identity.LinkKey = link.Id + "\x00" + link.Filename
+		} else {
+			identity.LinkKey = link.DownloadLink
+		}
 	}
 	if identity.Provider != "" && s.providerType != nil {
 		identity.ProviderType = s.providerType(identity.Provider)

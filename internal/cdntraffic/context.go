@@ -15,13 +15,14 @@ const (
 	PriorityInteractive
 )
 
-// Identity groups requests that consume the same provider-side CDN budget.
-// AccountToken is hashed before it is used as an internal key and is never
-// included in snapshots.
+// Identity groups requests that consume the same provider-side traffic
+// budgets. AccountToken and LinkKey are hashed before use as internal keys and
+// are never included in snapshots.
 type Identity struct {
 	Provider     string
 	ProviderType string
 	AccountToken string
+	LinkKey      string
 }
 
 type requestMetadata struct {
@@ -42,6 +43,7 @@ func WithIdentity(ctx context.Context, identity Identity) context.Context {
 		Provider:     strings.TrimSpace(identity.Provider),
 		ProviderType: strings.ToLower(strings.TrimSpace(identity.ProviderType)),
 		AccountToken: identity.AccountToken,
+		LinkKey:      identity.LinkKey,
 	}
 	return context.WithValue(ctx, metadataContextKey{}, metadata)
 }

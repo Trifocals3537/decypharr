@@ -63,7 +63,7 @@ func (m *Manager) createClient(dc config.Debrid) (debrid.Client, error) {
 	case "alldebrid":
 		client, err = alldebrid.New(dc, rateLimits)
 	case "torbox":
-		client, err = torbox.New(dc, rateLimits)
+		client, err = torbox.New(dc, rateLimits, m.providerTraffic)
 	case "debridlink":
 		client, err = debridlink.New(dc, rateLimits)
 	case "premiumize":

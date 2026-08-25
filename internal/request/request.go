@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/providertraffic"
 	"github.com/sirrobot01/decypharr/internal/tlsconfig"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"go.uber.org/ratelimit"
@@ -50,6 +51,8 @@ type Client struct {
 	logger           zerolog.Logger
 	proxy            string
 	configurationErr error
+	traffic          *providertraffic.Controller
+	trafficIdentity  providertraffic.Identity
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -125,6 +128,23 @@ func WithRetryableStatus(statusCodes ...int) ClientOption {
 func WithProxy(proxyURL string) ClientOption {
 	return func(c *Client) {
 		c.proxy = proxyURL
+	}
+}
+
+// WithProviderTraffic applies the provider's built-in API contract to every
+// physical attempt, including retries. User-configured rate limits remain an
+// additional guard at the logical-request layer.
+func WithProviderTraffic(
+	controller *providertraffic.Controller,
+	providerType string,
+	accountToken string,
+) ClientOption {
+	return func(c *Client) {
+		c.traffic = controller
+		c.trafficIdentity = providertraffic.Identity{
+			ProviderType: providerType,
+			AccountToken: accountToken,
+		}
 	}
 }
 
@@ -278,6 +298,13 @@ func New(options ...ClientOption) *Client {
 	}
 	if client.proxy != "" {
 		client.configurationErr = setProxy(transport, client.proxy)
+	}
+	if client.traffic != nil {
+		client.httpClient.Transport = &providerTrafficTransport{
+			base:       client.httpClient.Transport,
+			controller: client.traffic,
+			identity:   client.trafficIdentity,
+		}
 	}
 
 	// Create retryablehttp client

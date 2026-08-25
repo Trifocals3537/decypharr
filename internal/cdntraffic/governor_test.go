@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/internal/providertraffic"
 )
 
 func testGovernor(limit int) *Governor {
@@ -422,5 +425,220 @@ func TestGovernorBoundsIdleTrafficStates(t *testing.T) {
 	governor.mu.Unlock()
 	if states > maxTrafficStates {
 		t.Fatalf("traffic states = %d, want <= %d", states, maxTrafficStates)
+	}
+}
+
+func mustParseURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
+}
+
+func TestTorBoxPerLinkLimitDoesNotSerializeIndependentFiles(t *testing.T) {
+	governor := New(Options{TorBoxLimit: 4, TorBoxHostLimit: 16})
+	first := Identity{
+		Provider: "torbox-primary", ProviderType: "torbox",
+		AccountToken: "secret", LinkKey: "torbox://1/1",
+	}
+	second := first
+	second.LinkKey = "torbox://2/1"
+
+	permits := make([]*Permit, 0, 5)
+	for range 4 {
+		permit, err := governor.Acquire(context.Background(), first, "nexus.example", PriorityInteractive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		permits = append(permits, permit)
+	}
+
+	blocked := make(chan *Permit, 1)
+	go func() {
+		permit, _ := governor.Acquire(context.Background(), first, "nexus.example", PriorityInteractive)
+		blocked <- permit
+	}()
+	select {
+	case permit := <-blocked:
+		permit.Release()
+		t.Fatal("fifth request for one link exceeded the per-link limit")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	otherCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	other, err := governor.Acquire(otherCtx, second, "nexus.example", PriorityInteractive)
+	if err != nil {
+		t.Fatalf("independent link was serialized behind the first: %v", err)
+	}
+	other.Release()
+
+	permits[0].Release()
+	select {
+	case permit := <-blocked:
+		if permit == nil {
+			t.Fatal("queued same-link request returned nil permit")
+		}
+		permit.Release()
+	case <-time.After(time.Second):
+		t.Fatal("same-link request did not resume after capacity returned")
+	}
+	for _, permit := range permits[1:] {
+		permit.Release()
+	}
+}
+
+func TestTorBoxHostLimitSpansLinksAccountsAndConfiguredProviders(t *testing.T) {
+	governor := New(Options{TorBoxLimit: 4, TorBoxHostLimit: 3})
+	identities := []Identity{
+		{Provider: "one", ProviderType: "torbox", AccountToken: "a", LinkKey: "torbox://1/1"},
+		{Provider: "one", ProviderType: "torbox", AccountToken: "a", LinkKey: "torbox://2/1"},
+		{Provider: "two", ProviderType: "torbox", AccountToken: "b", LinkKey: "torbox://3/1"},
+		{Provider: "two", ProviderType: "torbox", AccountToken: "b", LinkKey: "torbox://4/1"},
+	}
+	permits := make([]*Permit, 0, 3)
+	for _, identity := range identities[:3] {
+		permit, err := governor.Acquire(context.Background(), identity, "nexus.example", PriorityInteractive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		permits = append(permits, permit)
+	}
+
+	queued := make(chan *Permit, 1)
+	go func() {
+		permit, _ := governor.Acquire(context.Background(), identities[3], "nexus.example", PriorityInteractive)
+		queued <- permit
+	}()
+	select {
+	case permit := <-queued:
+		permit.Release()
+		t.Fatal("request exceeded the shared CDN-host limit")
+	case <-time.After(20 * time.Millisecond):
+	}
+	stats := governor.Snapshot()
+	if stats.Active != 3 || stats.WaitingInteractive != 1 {
+		t.Fatalf("host queue snapshot active/waiting = %d/%d, want 3/1", stats.Active, stats.WaitingInteractive)
+	}
+	permits[0].Release()
+	select {
+	case permit := <-queued:
+		permit.Release()
+	case <-time.After(time.Second):
+		t.Fatal("host-limited request did not resume")
+	}
+	for _, permit := range permits[1:] {
+		permit.Release()
+	}
+}
+
+func TestTorBoxResolverDoesNotConsumePerLinkCDNCapacity(t *testing.T) {
+	traffic := providertraffic.New(providertraffic.Options{
+		Capabilities: func(string) providertraffic.Capabilities {
+			return providertraffic.Capabilities{
+				APIBudget: providertraffic.RateBudget{
+					Requests: 1000, Period: time.Second, Burst: 100,
+				},
+			}
+		},
+	})
+	governor := New(Options{TorBoxLimit: 4, TorBoxHostLimit: 16, Traffic: traffic})
+	identity := Identity{
+		Provider: "torbox-primary", ProviderType: "torbox",
+		AccountToken: "secret", LinkKey: "torbox://1/1",
+	}
+	permits := make([]*Permit, 0, 4)
+	for range 4 {
+		permit, err := governor.Acquire(context.Background(), identity, "nexus.example", PriorityInteractive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		permits = append(permits, permit)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	resolver, err := governor.AcquireRequest(
+		ctx,
+		identity,
+		mustParseURL(t, "https://api.torbox.app/v1/api/torrents/requestdl?token=secret"),
+		PriorityInteractive,
+	)
+	if err != nil {
+		t.Fatalf("link resolution was serialized behind CDN bytes: %v", err)
+	}
+	resolver.Release()
+	for _, permit := range permits {
+		permit.Release()
+	}
+}
+
+func TestTorBoxResolverRedirectRecoversAdaptiveLimit(t *testing.T) {
+	governor := testGovernor(4)
+	identity := Identity{
+		Provider: "torbox-primary", ProviderType: "torbox", AccountToken: "secret",
+	}
+	resolverURL := mustParseURL(t, "https://api.torbox.app/v1/api/torrents/requestdl?token=secret")
+	governor.ObserveRequest(identity, resolverURL, http.StatusTooManyRequests, nil)
+	if got := governor.Snapshot().Providers[0].CurrentLimit; got != 2 {
+		t.Fatalf("throttled resolver limit = %d, want 2", got)
+	}
+
+	time.Sleep(65 * time.Millisecond)
+	governor.ObserveRequest(identity, resolverURL, http.StatusFound, nil)
+	if got := governor.Snapshot().Providers[0].CurrentLimit; got != 3 {
+		t.Fatalf("redirect-recovered resolver limit = %d, want 3", got)
+	}
+}
+
+func TestTorBoxSnapshotCountsCompositeRequestOnceAndRedactsKeys(t *testing.T) {
+	governor := New(Options{TorBoxLimit: 4, TorBoxHostLimit: 16})
+	identity := Identity{
+		Provider: "torbox-primary", ProviderType: "torbox",
+		AccountToken: "account-secret", LinkKey: "signed-link-secret",
+	}
+	permit, err := governor.Acquire(context.Background(), identity, "nexus.example", PriorityInteractive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := governor.Snapshot()
+	if stats.Active != 1 || len(stats.Providers) != 1 || stats.Providers[0].Accounts != 1 {
+		permit.Release()
+		t.Fatalf("composite request snapshot = %+v, want one request/account", stats)
+	}
+	encoded, err := json.Marshal(stats)
+	if err != nil {
+		permit.Release()
+		t.Fatal(err)
+	}
+	for _, secret := range []string{identity.AccountToken, identity.LinkKey} {
+		if strings.Contains(string(encoded), secret) {
+			permit.Release()
+			t.Fatalf("snapshot exposed secret %q: %s", secret, encoded)
+		}
+	}
+	permit.Release()
+}
+
+func BenchmarkGovernorTorBoxAcquireRelease(b *testing.B) {
+	governor := New(Options{TorBoxLimit: 4, TorBoxHostLimit: 16})
+	identity := Identity{
+		Provider: "torbox-primary", ProviderType: "torbox",
+		AccountToken: "secret", LinkKey: "torbox://1/1",
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		permit, err := governor.Acquire(
+			context.Background(),
+			identity,
+			"nexus.example",
+			PriorityInteractive,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		permit.Release()
 	}
 }

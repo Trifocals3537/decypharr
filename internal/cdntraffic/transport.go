@@ -37,11 +37,12 @@ func (t *Transport) BaseTransport() http.RoundTripper {
 // body. Redirect hops naturally release before the next hop is admitted.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	metadata, _ := metadataFromContext(req.Context())
-	host := ""
-	if req.URL != nil {
-		host = req.URL.Host
-	}
-	permit, err := t.governor.Acquire(req.Context(), metadata.identity, host, metadata.priority)
+	permit, err := t.governor.AcquireRequest(
+		req.Context(),
+		metadata.identity,
+		req.URL,
+		metadata.priority,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +56,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		permit.Release()
 		return nil, errors.New("cdn base transport returned a nil response")
 	}
-	t.governor.Observe(metadata.identity, host, resp.StatusCode, resp.Header)
+	t.governor.ObserveRequest(metadata.identity, req.URL, resp.StatusCode, resp.Header)
 	body := resp.Body
 	if body == nil {
 		body = http.NoBody

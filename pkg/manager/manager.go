@@ -19,6 +19,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/providertraffic"
 	"github.com/sirrobot01/decypharr/internal/tlsconfig"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -34,17 +35,18 @@ import (
 
 // Manager handles unified torrent management - replaces wire.Store completely
 type Manager struct {
-	storage      *storage.Storage
-	migrator     *Migrator
-	repair       *Repair
-	clients      *xsync.Map[string, debrid.Client]
-	arr          *arr.Storage
-	logger       zerolog.Logger
-	ready        chan struct{}
-	readyOnce    sync.Once
-	streamClient *http.Client
-	streamWait   func(context.Context, time.Duration) error
-	cdnTraffic   *cdntraffic.Governor
+	storage         *storage.Storage
+	migrator        *Migrator
+	repair          *Repair
+	clients         *xsync.Map[string, debrid.Client]
+	arr             *arr.Storage
+	logger          zerolog.Logger
+	ready           chan struct{}
+	readyOnce       sync.Once
+	streamClient    *http.Client
+	streamWait      func(context.Context, time.Duration) error
+	cdnTraffic      *cdntraffic.Governor
+	providerTraffic *providertraffic.Controller
 
 	// Migration jobs tracking
 	migrationJobs   *xsync.Map[string, *storage.SwitcherJob]
@@ -170,7 +172,8 @@ func New() *Manager {
 		usenetTimeout = 10 * time.Minute
 	}
 	entryLifecycle := newEntryLifecycle()
-	cdnGovernor := cdntraffic.New(cdntraffic.Options{})
+	providerTraffic := providertraffic.New(providertraffic.Options{})
+	cdnGovernor := cdntraffic.New(cdntraffic.Options{Traffic: providerTraffic})
 
 	instance := &Manager{
 		storage:                strg,
@@ -184,6 +187,7 @@ func New() *Manager {
 		streamClient:           newStreamHTTPClient(cdnGovernor),
 		streamWait:             waitForStreamRetry,
 		cdnTraffic:             cdnGovernor,
+		providerTraffic:        providerTraffic,
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),

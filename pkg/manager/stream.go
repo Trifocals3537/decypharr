@@ -211,26 +211,121 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	// provider's shared concurrency budget.
 	ctx = cdntraffic.WithPriority(ctx, cdntraffic.PriorityInteractive)
 
-	// Get the validated download link using the link service
-	downloadLink, err := m.linkService.GetLink(ctx, torrent, filename)
-	if err != nil {
-		return fmt.Errorf("failed to get download link: %w", err)
-	}
-
 	// Get buffer from pool - reduces GC pressure significantly
 	bufPtr := streamBufPool.Get().(*[]byte)
 	buf := *bufPtr
 	defer streamBufPool.Put(bufPtr)
 
+	candidates := m.streamCandidates(torrent, filename)
+	if len(candidates) == 0 {
+		return fmt.Errorf("no eligible stream providers for %s", filename)
+	}
+	candidates = streamAttemptCandidates(candidates, torrent.ActiveProvider)
+
+	failures := make([]error, 0, len(candidates))
+	for index, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return retry.Unrecoverable(err)
+		}
+
+		candidateCtx := ctx
+		hasFallback := index+1 < len(candidates)
+		isAlternate := !strings.EqualFold(candidate.provider, torrent.ActiveProvider)
+		if isAlternate || (hasFallback && !candidate.recovery) {
+			candidateCtx = link.WithoutRepair(candidateCtx)
+		}
+		if hasFallback {
+			candidateCtx = link.WithFailFast(candidateCtx)
+		}
+		ready, err := m.streamHTTPFromCandidate(
+			candidateCtx,
+			torrent,
+			candidate,
+			filename,
+			file.Size,
+			start,
+			end,
+			expectedLen,
+			writer,
+			onReady,
+			buf,
+			hasFallback,
+		)
+		if err == nil {
+			return nil
+		}
+		if ready || ctx.Err() != nil || errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if !hasFallback && len(failures) == 0 {
+			// Preserve the exact historical error type/semantics when an entry
+			// has no alternate placement.
+			return err
+		}
+
+		provider := candidate.provider
+		if provider == "" {
+			provider = "active"
+		}
+		failures = append(failures, fmt.Errorf("provider %s: %w", provider, err))
+		if !hasFallback {
+			break
+		}
+
+		m.streamFailoverAttempts.Add(1)
+		nextProvider := candidates[index+1].provider
+		if nextProvider == "" {
+			nextProvider = "active"
+		}
+		m.logger.Warn().
+			Str("failed_provider", provider).
+			Str("next_provider", nextProvider).
+			Str("infohash", torrent.InfoHash).
+			Str("filename", filename).
+			Msg("Stream provider failed before response commitment; trying next placement")
+	}
+
+	if len(failures) == 1 {
+		return failures[0]
+	}
+	if len(failures) > 1 {
+		m.streamFailoverExhausted.Add(1)
+		return fmt.Errorf("all eligible stream providers failed: %w", errors.Join(failures...))
+	}
+	return fmt.Errorf("no stream provider produced a response for %s", filename)
+}
+
+func (m *Manager) streamHTTPFromCandidate(
+	ctx context.Context,
+	original *storage.Entry,
+	candidate streamCandidate,
+	filename string,
+	fileSize, start, end, expectedLen int64,
+	writer io.Writer,
+	onReady StreamReadyFunc,
+	buf []byte,
+	hasFallback bool,
+) (bool, error) {
+	candidateEntry := candidate.entryForAttempt(original, filename)
+	downloadLink, err := m.linkService.GetLink(ctx, candidateEntry, filename)
+	if err != nil {
+		return false, fmt.Errorf("failed to get download link: %w", err)
+	}
+
 	statusRetries := 0
 	linkRefreshes := 0
 	remainingWait := config.DefaultRetryDelayMax
 	for {
-		resp, reqErr := m.doRequest(ctx, downloadLink, torrent.ActiveProvider, start, end)
+		connectionAttempts := m.streamConnectionAttempts()
+		if hasFallback {
+			connectionAttempts = 1
+		}
+		resp, reqErr := m.doRequest(ctx, downloadLink, candidate.provider, start, end, connectionAttempts)
 		if reqErr != nil {
 			// Connection retries happen inside doRequest and never receive body
 			// bytes, so returning here cannot replay caller-visible data.
-			return reqErr
+			return false, reqErr
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
@@ -239,34 +334,37 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 
 			if linkErr.ShouldRefetch() {
 				if linkRefreshes >= maxLinkRefreshesPerStream {
-					return StreamError{
+					return false, StreamError{
 						Err:       fmt.Errorf("replacement download link was also rejected: %w", linkErr),
 						Retryable: false,
 						LinkError: true,
 					}
 				}
-				downloadLink, err = m.linkService.Refresh(ctx, torrent, downloadLink)
+				downloadLink, err = m.linkService.Refresh(ctx, candidateEntry, downloadLink)
 				if err != nil {
-					return fmt.Errorf("failed to refresh rejected download link: %w", err)
+					return false, fmt.Errorf("failed to refresh rejected download link: %w", err)
 				}
 				linkRefreshes++
 				continue
 			}
 
 			if (linkErr.ShouldRetry() || linkErr.ShouldBackoff()) && statusRetries < m.streamStatusRetries() {
+				if hasFallback {
+					return false, StreamError{Err: linkErr, Retryable: true}
+				}
 				delay := streamRetryDelay(linkErr, statusRetries, remainingWait)
 				if delay <= 0 {
-					return StreamError{Err: linkErr, Retryable: true}
+					return false, StreamError{Err: linkErr, Retryable: true}
 				}
 				if waitErr := m.waitForStreamRetry(ctx, delay); waitErr != nil {
-					return retry.Unrecoverable(waitErr)
+					return false, retry.Unrecoverable(waitErr)
 				}
 				remainingWait -= delay
 				statusRetries++
 				continue
 			}
 
-			return StreamError{
+			return false, StreamError{
 				Err:       linkErr,
 				Retryable: linkErr.IsRetryable(),
 				LinkError: false,
@@ -283,7 +381,7 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			ContentLength: resp.ContentLength,
 		}
 
-		isPartial := expectedLen > 0 && (start > 0 || end < file.Size-1)
+		isPartial := expectedLen > 0 && (start > 0 || end < fileSize-1)
 		if expectedLen > 0 {
 			meta.ContentLength = expectedLen
 			if header != nil {
@@ -293,26 +391,53 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		if isPartial && resp.StatusCode == http.StatusOK {
 			meta.StatusCode = http.StatusPartialContent
 			if header != nil {
-				header["Content-Range"] = []string{buildContentRange(start, end, file.Size)}
+				header["Content-Range"] = []string{buildContentRange(start, end, fileSize)}
 			}
 		}
 
-		if onReady != nil {
-			if readyErr := onReady(meta); readyErr != nil {
-				resp.Body.Close()
-				return retry.Unrecoverable(readyErr)
-			}
-		}
-
-		// Stream response body into provided writer
+		// Prove that the upstream body can produce at least one byte before the
+		// HTTP caller commits status/headers. This is the last point where a
+		// provider switch is safe. Once ready is reported or a writer is touched,
+		// this attempt is irrevocably committed and will never be replayed.
 		reader := io.Reader(resp.Body)
 		if expectedLen > 0 {
 			reader = io.LimitReader(resp.Body, expectedLen)
 		}
-		n, copyErr := io.CopyBuffer(writer, reader, buf)
+		var firstByte [1]byte
+		firstN, firstErr := io.ReadFull(reader, firstByte[:])
+		if firstN == 0 {
+			resp.Body.Close()
+			if firstErr == nil || firstErr == io.EOF {
+				firstErr = io.ErrUnexpectedEOF
+			}
+			return false, StreamError{
+				Err:       fmt.Errorf("upstream body failed before first byte: %w", firstErr),
+				Retryable: true,
+			}
+		}
+
+		m.markStreamProviderReady(original, filename, candidate)
+
+		if onReady != nil {
+			if readyErr := onReady(meta); readyErr != nil {
+				resp.Body.Close()
+				return true, retry.Unrecoverable(readyErr)
+			}
+		}
+
+		firstWritten, copyErr := writer.Write(firstByte[:firstN])
+		written := int64(firstWritten)
+		if copyErr == nil && firstWritten != firstN {
+			copyErr = io.ErrShortWrite
+		}
+		if copyErr == nil {
+			var copied int64
+			copied, copyErr = io.CopyBuffer(writer, reader, buf)
+			written += copied
+		}
 		resp.Body.Close()
 
-		if expectedLen > 0 && n < expectedLen && copyErr == nil {
+		if expectedLen > 0 && written < expectedLen && copyErr == nil {
 			copyErr = io.ErrUnexpectedEOF
 		}
 
@@ -321,16 +446,31 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			// vs a permanent error (context cancelled by user)
 			if ctx.Err() != nil {
 				// User/system cancelled - don't retry
-				return retry.Unrecoverable(ctx.Err())
+				return true, retry.Unrecoverable(ctx.Err())
 			}
 			if isConnectionError(copyErr) || strings.Contains(copyErr.Error(), "timeout") {
 				// Network/timeout error - retriable
-				return copyErr
+				return true, copyErr
 			}
 			// Unknown error - don't retry to avoid infinite loops
-			return retry.Unrecoverable(copyErr)
+			return true, retry.Unrecoverable(copyErr)
 		}
-		return nil
+		return true, nil
+	}
+}
+
+func (m *Manager) markStreamProviderReady(original *storage.Entry, filename string, candidate streamCandidate) {
+	if original == nil {
+		return
+	}
+	m.rememberStreamProvider(original, filename, candidate.provider)
+	m.updateActiveStreamProvider(original.Name, filename, candidate.provider)
+	if candidate.provider == "" || strings.EqualFold(candidate.provider, original.ActiveProvider) {
+		return
+	}
+	m.streamFailoverSuccesses.Add(1)
+	if candidate.preferred {
+		m.streamPreferredHits.Add(1)
 	}
 }
 
@@ -341,6 +481,10 @@ func (m *Manager) streamStatusRetries() int {
 		return 0
 	}
 	return m.config.Retries
+}
+
+func (m *Manager) streamConnectionAttempts() int {
+	return m.streamStatusRetries() + 1
 }
 
 func streamRetryDelay(linkErr *link.Error, attempt int, remaining time.Duration) time.Duration {
@@ -451,9 +595,16 @@ func normalizeStreamRange(size, start, end int64) (int64, int64, error) {
 	return start, end, nil
 }
 
-func (m *Manager) doRequest(ctx context.Context, downloadLink debridTypes.DownloadLink, fallbackProvider string, start, end int64) (*http.Response, error) {
+func (m *Manager) doRequest(
+	ctx context.Context,
+	downloadLink debridTypes.DownloadLink,
+	fallbackProvider string,
+	start, end int64,
+	attempts int,
+) (*http.Response, error) {
 	var resp *http.Response
 	ctx = m.withCDNIdentity(ctx, downloadLink, fallbackProvider)
+	attempts = max(1, attempts)
 
 	err := retry.Do(
 		func() error {
@@ -484,7 +635,7 @@ func (m *Manager) doRequest(ctx context.Context, downloadLink debridTypes.Downlo
 			return nil
 		},
 		retry.Context(ctx),
-		retry.Attempts(uint(m.config.Retries)+1),
+		retry.Attempts(uint(attempts)),
 		retry.Delay(config.DefaultRetryDelay),
 		retry.MaxDelay(config.DefaultRetryDelayMax),
 		retry.DelayType(retry.FixedDelay),

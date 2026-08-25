@@ -158,13 +158,15 @@ func TestStreamDoesNotLoopWhenReplacementIsRejected(t *testing.T) {
 }
 
 type failingBody struct {
-	sent bool
+	offset int
 }
 
 func (b *failingBody) Read(p []byte) (int, error) {
-	if !b.sent {
-		b.sent = true
-		return copy(p, "ab"), nil
+	const data = "ab"
+	if b.offset < len(data) {
+		n := copy(p, data[b.offset:])
+		b.offset += n
+		return n, nil
 	}
 	return 0, io.ErrUnexpectedEOF
 }

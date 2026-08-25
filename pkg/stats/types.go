@@ -9,16 +9,17 @@ import (
 // Snapshot holds a point-in-time stats snapshot.
 // Using typed structs avoids map[string]any allocations on every JSON encode.
 type Snapshot struct {
-	System        SystemStats       `json:"system"`
-	Debrids       []types.Stats     `json:"debrids"`
-	Mount         MountStats        `json:"mount"`
-	Usenet        map[string]any    `json:"usenet,omitempty"`
-	ActiveStreams ActiveStreamStats `json:"active_streams"`
-	CDNTraffic    cdntraffic.Stats  `json:"cdn_traffic"`
-	Storage       StorageStats      `json:"storage"`
-	Queue         QueueStats        `json:"queue"`
-	Arrs          ArrStats          `json:"arrs"`
-	Repair        RepairStats       `json:"repair"`
+	System         SystemStats                 `json:"system"`
+	Debrids        []types.Stats               `json:"debrids"`
+	Mount          MountStats                  `json:"mount"`
+	Usenet         map[string]any              `json:"usenet,omitempty"`
+	ActiveStreams  ActiveStreamStats           `json:"active_streams"`
+	CDNTraffic     cdntraffic.Stats            `json:"cdn_traffic"`
+	StreamFailover manager.StreamFailoverStats `json:"stream_failover"`
+	Storage        StorageStats                `json:"storage"`
+	Queue          QueueStats                  `json:"queue"`
+	Arrs           ArrStats                    `json:"arrs"`
+	Repair         RepairStats                 `json:"repair"`
 }
 
 type SystemStats struct {

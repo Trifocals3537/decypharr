@@ -47,6 +47,58 @@ type refreshBackoffState struct {
 	nextAttempt time.Time
 }
 
+type repairPolicyContextKey struct{}
+type retryPolicyContextKey struct{}
+
+// WithoutRepair marks a link attempt as read-only with respect to entry
+// placement state. Automatic stream failover uses it for cheap provider probes:
+// a candidate may resolve, refresh its cached URL, or disable a bad account,
+// but it must never reinsert the torrent, mark the entry bad, or persist a
+// temporary ActiveProvider selection. The final active-provider recovery keeps
+// the normal lifecycle policy.
+func WithoutRepair(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, repairPolicyContextKey{}, true)
+}
+
+func repairDisabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	disabled, _ := ctx.Value(repairPolicyContextKey{}).(bool)
+	return disabled
+}
+
+// WithFailFast limits link validation to one network attempt. Stream failover
+// probes use it while another completed placement remains, reserving the normal
+// retry budget for the final active-provider recovery attempt.
+func WithFailFast(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, retryPolicyContextKey{}, true)
+}
+
+func failFast(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(retryPolicyContextKey{}).(bool)
+	return enabled
+}
+
+func lifecyclePolicyKey(ctx context.Context, key string) string {
+	if repairDisabled(ctx) {
+		key += "\x00read-only"
+	}
+	if failFast(ctx) {
+		key += "\x00fail-fast"
+	}
+	return key
+}
+
 // Service handles download link fetching and validation.
 // It uses the account-level cache for storing links and only tracks validation state.
 type Service struct {
@@ -102,7 +154,7 @@ func New(
 // Links are cached at the account level; this service only tracks validation state.
 func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
 	// Use singleflight to deduplicate concurrent requests for the same file
-	key := linkLifecycleKey(entry, filename)
+	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename))
 	v, err, _ := s.singleflight.Do(key, func() (any, error) {
 		return s.fetchAndValidate(ctx, entry, filename, 0, 0)
 	})
@@ -168,7 +220,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	// Only successful validations are memoized. Transient failures must be
 	// allowed to recover on the next request.
 	if _, exists := s.validated.Load(validationKey(link)); exists {
-		s.clearRefreshBackoff(linkLifecycleKey(entry, filename))
+		s.clearRefreshBackoff(lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename)))
 		return link, nil
 	}
 
@@ -211,7 +263,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 		s.validated.Clear()
 	}
 	s.validated.Store(validationKey(link), struct{}{})
-	s.clearRefreshBackoff(linkLifecycleKey(entry, filename))
+	s.clearRefreshBackoff(lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename)))
 	return link, nil
 }
 
@@ -220,7 +272,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 // callers continue probing the cached CDN URL for recovery, but do not repeatedly
 // regenerate provider links while that URL remains rejected.
 func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry, rejected types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
-	key := linkLifecycleKey(entry, rejected.Filename)
+	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, rejected.Filename))
 	v, err, _ := s.refreshflight.Do(key, func() (any, error) {
 		if err := ctx.Err(); err != nil {
 			return emptyDownloadLink, err
@@ -337,6 +389,9 @@ func refreshBackoffDelay(failures int) time.Duration {
 
 func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.Entry, dl types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
 	if errors.Is(err, customerror.HosterUnavailableError) {
+		if repairDisabled(ctx) {
+			return dl, err
+		}
 		if entry.Bad {
 			return emptyDownloadLink, fmt.Errorf("can't repair %s since it's been marked as bad", entry.GetFolder())
 		}
@@ -391,7 +446,7 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 		)
 	}
 
-	placementFile, err := s.getPlacementFile(entry, filename)
+	placementFile, err := s.getPlacementFile(ctx, entry, filename)
 	if err != nil {
 		return emptyDownloadLink, err
 	}
@@ -436,6 +491,12 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 	}
 
 	if downloadLink.Empty() {
+		if repairDisabled(ctx) {
+			return emptyDownloadLink, NewPermanentError(
+				fmt.Errorf("alternate placement returned an empty link for %s", filename),
+				"empty_link",
+			)
+		}
 		// Let's try to reinsert the entry
 		if entry.Bad {
 			return emptyDownloadLink, fmt.Errorf("can't repair %s since it's been marked as bad", entry.GetFolder())
@@ -460,7 +521,7 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 }
 
 // getPlacementFile retrieves the placement file with refresh fallback
-func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*storage.ProviderFile, error) {
+func (s *Service) getPlacementFile(ctx context.Context, entry *storage.Entry, filename string) (*storage.ProviderFile, error) {
 	_, ok := entry.Files[filename]
 	if !ok {
 		return nil, NewPermanentError(
@@ -479,6 +540,12 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 
 	placementFile := placement.Files[filename]
 	if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
+		if repairDisabled(ctx) {
+			return nil, NewPermanentError(
+				fmt.Errorf("file %s is unavailable in alternate placement %s", filename, entry.ActiveProvider),
+				"file_not_available",
+			)
+		}
 		if s.entryRefresher == nil {
 			return nil, NewPermanentError(
 				fmt.Errorf("file %s not available and no refresher configured", filename),
@@ -584,6 +651,9 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 
 func (s *Service) validateWithRetry(ctx context.Context, link *types.DownloadLink) error {
 	attempts := max(1, s.retries+1)
+	if failFast(ctx) {
+		attempts = 1
+	}
 	remainingWait := maxLinkRetryWait
 	var lastErr error
 

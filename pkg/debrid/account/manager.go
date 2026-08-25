@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
@@ -27,6 +28,7 @@ type Manager struct {
 	current  atomic.Pointer[Account]
 	accounts *xsync.Map[string, *Account]
 	logger   zerolog.Logger
+	now      func() time.Time
 }
 
 func NewManager(
@@ -39,6 +41,7 @@ func NewManager(
 		debrid:   debridConf.Name,
 		accounts: xsync.NewMap[string, *Account](),
 		logger:   logger,
+		now:      time.Now,
 	}
 	cfg := config.Get()
 	var traffic *providertraffic.Controller
@@ -91,8 +94,10 @@ func NewManager(
 
 func (m *Manager) Active() []*Account {
 	activeAccounts := make([]*Account, 0)
+	now := m.nowTime()
 	m.accounts.Range(func(key string, acc *Account) bool {
-		if !acc.Disabled.Load() {
+		status := acc.RecoveryStatus(now)
+		if status.State == StateActive || status.State == StateRecoveryReady {
 			activeAccounts = append(activeAccounts, acc)
 		}
 		return true
@@ -118,25 +123,19 @@ func (m *Manager) All() []*Account {
 }
 
 func (m *Manager) Current() *Account {
-	// Fast path - most common case
+	now := m.nowTime()
 	current := m.current.Load()
-	if current != nil && !current.Disabled.Load() {
-		return current
+	if current != nil {
+		state := current.RecoveryStatus(now).State
+		if state == StateActive || state == StateRecoveryReady || state == StateRecoveryProbe {
+			return current
+		}
 	}
 
-	// Slow path - find new current account
 	activeAccounts := m.Active()
 	if len(activeAccounts) == 0 {
-		// No active accounts left, try to use disabled ones
-		m.logger.Warn().Str("debrid", m.debrid).Msg("No active accounts available, all accounts are disabled, falling back to disabled accounts")
-		allAccounts := m.All()
-		if len(allAccounts) == 0 {
-			m.logger.Error().Str("debrid", m.debrid).Msg("Cannot set current account, no accounts available")
-			m.current.Store(nil)
-			return nil
-		}
-		m.current.Store(allAccounts[0])
-		return allAccounts[0]
+		m.current.Store(nil)
+		return nil
 	}
 
 	newCurrent := activeAccounts[0]
@@ -151,21 +150,72 @@ func (m *Manager) Disable(account *Account) {
 
 	account.MarkDisabled()
 
-	// If the disabled account is currently in use, refresh the current account to switch to a new active one
 	activeAccounts := m.Active()
 	if len(activeAccounts) == 0 {
-		m.logger.Warn().Str("debrid", m.debrid).Msg("No active accounts available after disabling, all accounts are disabled, falling back to disabled accounts")
-		allAccounts := m.All()
-		if len(allAccounts) == 0 {
-			m.logger.Error().Str("debrid", m.debrid).Msg("Cannot set current account, no accounts available")
-			m.current.Store(nil)
-			return
-		}
-		m.current.Store(allAccounts[0])
+		m.current.Store(nil)
 		return
 	}
-	// Set current to first active account
 	m.current.Store(activeAccounts[0])
+}
+
+// SuspendTemporary removes an account from ordinary selection until its
+// cooldown expires. It logs only a real state transition, not every lookup.
+func (m *Manager) SuspendTemporary(account *Account, probeID uint64, retryAfter time.Duration, reason string) (RecoveryStatus, bool) {
+	if account == nil {
+		return RecoveryStatus{}, false
+	}
+	status, changed := account.SuspendTemporary(m.nowTime(), probeID, retryAfter, reason)
+	if changed {
+		m.logger.Warn().
+			Str("debrid", m.debrid).
+			Str("account_token", utils.Mask(account.Token)).
+			Str("reason", reason).
+			Int("failures", status.Failures).
+			Dur("retry_after", status.RetryAfter).
+			Msg("Debrid account temporarily suspended")
+	}
+
+	active := m.Active()
+	if len(active) == 0 {
+		m.current.Store(nil)
+	} else if current := m.current.Load(); current == nil || current.Equals(account) {
+		m.current.Store(active[0])
+	}
+	return status, changed
+}
+
+// MarkHealthy reactivates an account only when the matching half-open probe
+// successfully validated a download URL.
+func (m *Manager) MarkHealthy(account *Account, probeID uint64) bool {
+	if account == nil || !account.MarkHealthy(probeID) {
+		return false
+	}
+	m.current.Store(account)
+	m.logger.Info().
+		Str("debrid", m.debrid).
+		Str("account_token", utils.Mask(account.Token)).
+		Msg("Debrid account recovered after successful link validation")
+	return true
+}
+
+// FailRecoveryProbe advances the account's cooldown only when probeID still
+// owns the half-open lease.
+func (m *Manager) FailRecoveryProbe(account *Account, probeID uint64, retryAfter time.Duration, reason string) (RecoveryStatus, bool) {
+	return m.SuspendTemporary(account, probeID, retryAfter, reason)
+}
+
+func (m *Manager) ReleaseRecoveryProbe(account *Account, probeID uint64) bool {
+	if account == nil {
+		return false
+	}
+	return account.ReleaseProbe(probeID)
+}
+
+func (m *Manager) Status(account *Account) RecoveryStatus {
+	if account == nil {
+		return RecoveryStatus{State: StatePermanentlyDisabled}
+	}
+	return account.RecoveryStatus(m.nowTime())
 }
 
 func (m *Manager) Reset() {
@@ -195,27 +245,57 @@ func (m *Manager) GetAccount(token string) (*Account, error) {
 }
 
 func (m *Manager) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
-	current := m.Current()
-	if current == nil {
-		return types.DownloadLink{}, fmt.Errorf("no active account for debrid %s", m.debrid)
-	}
-	dl, err := current.GetDownloadLink(id, file, fetcher)
-	if err != nil {
-		activeAccounts := m.Active()
-		for _, acc := range activeAccounts {
-			if acc.Token == current.Token {
-				continue
-			}
-			dl, err = acc.GetDownloadLink(id, file, fetcher)
-			if err != nil {
-				continue
-			} else {
-				// Successfully got link from another account. Just return it, no need to switch current account
-				return dl, nil
+	now := m.nowTime()
+	accounts := m.All()
+	if current := m.current.Load(); current != nil {
+		for i, acc := range accounts {
+			if acc.Equals(current) {
+				accounts[0], accounts[i] = accounts[i], accounts[0]
+				break
 			}
 		}
 	}
-	return dl, nil
+
+	var lastLink types.DownloadLink
+	var lastErr error
+	var earliestRetry time.Duration
+	temporaryUnavailable := false
+	for _, acc := range accounts {
+		acquired, probeID, retryAfter := acc.TryAcquire(now)
+		if !acquired {
+			status := acc.RecoveryStatus(now)
+			if status.State != StatePermanentlyDisabled {
+				temporaryUnavailable = true
+				earliestRetry = earlierPositiveDuration(earliestRetry, retryAfter)
+			}
+			continue
+		}
+
+		dl, err := acc.GetDownloadLink(id, file, fetcher)
+		if probeID != 0 {
+			dl.RecoveryProbeID = probeID
+		}
+		if err == nil {
+			m.current.Store(acc)
+			return dl, nil
+		}
+		lastLink, lastErr = dl, err
+		if probeID != 0 {
+			m.FailRecoveryProbe(acc, probeID, 0, "link_fetch_failed")
+		}
+	}
+
+	if lastErr != nil {
+		return lastLink, lastErr
+	}
+	if temporaryUnavailable && earliestRetry <= 0 {
+		earliestRetry = time.Second
+	}
+	return types.DownloadLink{}, &UnavailableError{
+		Debrid:     m.debrid,
+		RetryAfter: earliestRetry,
+		Temporary:  temporaryUnavailable,
+	}
 }
 
 func (m *Manager) StoreDownloadLink(downloadLink types.DownloadLink) {
@@ -256,23 +336,49 @@ func (m *Manager) InvalidateDownloadLink(downloadLink types.DownloadLink) error 
 
 func (m *Manager) Stats() []map[string]any {
 	stats := make([]map[string]any, 0)
+	now := m.nowTime()
+	current := m.Current()
 
 	for _, acc := range m.All() {
 		maskedToken := utils.Mask(acc.Token)
+		recovery := acc.RecoveryStatus(now)
 		accountDetail := map[string]any{
-			"in_use":       acc.Equals(m.Current()),
-			"order":        acc.Index,
-			"disabled":     acc.Disabled.Load(),
-			"token_masked": maskedToken,
-			"username":     acc.Username,
-			"traffic_used": acc.TrafficUsed.Load(),
-			"expiration":   acc.Expiration,
-			"links_count":  acc.DownloadLinksCount(),
-			"debrid":       acc.Debrid,
+			"in_use":         acc.Equals(current),
+			"order":          acc.Index,
+			"disabled":       recovery.State == StatePermanentlyDisabled || recovery.State == StateTemporarilySuspended,
+			"state":          recovery.State,
+			"suspended":      recovery.State == StateTemporarilySuspended || recovery.State == StateRecoveryReady || recovery.State == StateRecoveryProbe,
+			"retry_at":       recovery.RetryAt,
+			"retry_after":    recovery.RetryAfter.Seconds(),
+			"failure_count":  recovery.Failures,
+			"failure_reason": recovery.Reason,
+			"token_masked":   maskedToken,
+			"username":       acc.Username,
+			"traffic_used":   acc.TrafficUsed.Load(),
+			"expiration":     acc.Expiration,
+			"links_count":    acc.DownloadLinksCount(),
+			"debrid":         acc.Debrid,
 		}
 		stats = append(stats, accountDetail)
 	}
 	return stats
+}
+
+func (m *Manager) nowTime() time.Time {
+	if m.now == nil {
+		return time.Now()
+	}
+	return m.now()
+}
+
+func earlierPositiveDuration(current, candidate time.Duration) time.Duration {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
 }
 
 func (m *Manager) RefreshLinks(fetcher LinksFetcher) error {

@@ -96,6 +96,24 @@ func TestInvalidateLinkOnlyEvictsLocalCache(t *testing.T) {
 	}
 }
 
+func TestStoreLinkDoesNotCacheRecoveryProbeOwnership(t *testing.T) {
+	account := newLinkCacheTestAccount()
+	link := types.DownloadLink{
+		Link:            "restricted-link",
+		DownloadLink:    "https://cdn.example/cached",
+		RecoveryProbeID: 42,
+	}
+	account.storeLink(link)
+
+	cached, ok := account.GetRandomLink()
+	if !ok {
+		t.Fatal("cached link not found")
+	}
+	if cached.RecoveryProbeID != 0 {
+		t.Fatalf("cached recovery probe ID = %d, want 0", cached.RecoveryProbeID)
+	}
+}
+
 func TestManagerInvalidateDownloadLinkUsesOwningAccount(t *testing.T) {
 	first := newLinkCacheTestAccount()
 	first.Token = "first"

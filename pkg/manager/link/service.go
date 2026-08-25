@@ -13,6 +13,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/cdntraffic"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	accountpkg "github.com/sirrobot01/decypharr/pkg/debrid/account"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -219,34 +220,42 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 
 	// Only successful validations are memoized. Transient failures must be
 	// allowed to recover on the next request.
-	if _, exists := s.validated.Load(validationKey(link)); exists {
+	if _, exists := s.validated.Load(validationKey(link)); exists && s.accountValidationIsCurrent(link) {
 		s.clearRefreshBackoff(lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename)))
 		return link, nil
 	}
+	s.validated.Delete(validationKey(link))
 
 	validationErr := s.validateWithRetry(ctx, &link)
 
 	if validationErr != nil {
 		// Handle link error categories
 		if linkErr := GetLinkError(validationErr); linkErr != nil {
-			if linkErr.ShouldDisableAccount() {
-				hasAlternate, err := s.disableLinkAccount(link, linkErr)
+			if linkErr.ShouldSuspendAccount() {
+				hasAlternate, status, err := s.suspendLinkAccount(link, linkErr)
 				if err != nil {
 					s.logger.Error().
 						Err(err).
 						Str("debrid", link.Debrid).
 						Str("token", utils.Mask(link.Token)).
 						Str("reason", linkErr.Code).
-						Msg("Failed to disable account after link error")
+						Msg("Failed to suspend account after link error")
 					return emptyDownloadLink, err
 				}
 				if !hasAlternate {
-					return emptyDownloadLink, NewPermanentError(ErrNoActiveAccount, "no_active_account")
+					if status.State == accountpkg.StatePermanentlyDisabled {
+						return emptyDownloadLink, NewPermanentError(ErrNoActiveAccount, "no_active_account")
+					}
+					cooldownErr := NewLinkError(ErrNoActiveAccount, CategoryThrottled, "account_cooldown")
+					cooldownErr.RetryAfter = status.RetryAfter
+					return emptyDownloadLink, cooldownErr
 				}
 				// This will use the next available account and fetch a new link, so we need to refetch and revalidate.
 				// Account swap doesn't consume a re-insertion attempt.
 				return s.fetchAndValidate(ctx, entry, filename, repairAttempt, linkRefreshes)
-			} else if linkErr.ShouldRefetch() {
+			}
+			s.failRecoveryProbe(link, validationErr)
+			if linkErr.ShouldRefetch() {
 				if linkRefreshes >= maxLinkRefreshes {
 					// Preserve the refetchable error. The outer refresh governor records
 					// the failed replacement and suppresses another provider regeneration
@@ -255,10 +264,19 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 				}
 				return s.refreshRejectedLink(ctx, entry, link, repairAttempt, linkRefreshes)
 			}
+		} else {
+			s.failRecoveryProbe(link, validationErr)
 		}
 		return emptyDownloadLink, validationErr
 	}
 
+	s.completeRecoveryProbe(link)
+	if !s.accountValidationIsCurrent(link) {
+		// Another request suspended or permanently disabled the account while
+		// this validation was in flight. The successful URL may serve this
+		// caller, but it must not let a later recovery probe skip its own HEAD.
+		return link, nil
+	}
 	if s.validated.Size() >= maxValidatedEntries {
 		s.validated.Clear()
 	}
@@ -487,6 +505,15 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 	// This uses account-level caching internally
 	downloadLink, err := client.GetDownloadLink(placement.ID, debridFile)
 	if err != nil {
+		var unavailable *accountpkg.UnavailableError
+		if errors.As(err, &unavailable) {
+			if unavailable.Temporary {
+				cooldownErr := NewLinkError(err, CategoryThrottled, "account_cooldown")
+				cooldownErr.RetryAfter = unavailable.RetryAfter
+				return downloadLink, cooldownErr
+			}
+			return downloadLink, NewPermanentError(ErrNoActiveAccount, "no_active_account")
+		}
 		return downloadLink, err
 	}
 
@@ -644,7 +671,9 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 	}
 	errorCode := resp.Header.Get("X-Error")
 	if errorCode != "" {
-		return ErrorCodeToLinkError(errorCode)
+		linkErr := ErrorCodeToLinkError(errorCode)
+		linkErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), s.now())
+		return linkErr
 	}
 	return ClassifyHTTPStatus(resp.StatusCode, resp.Header)
 }
@@ -721,37 +750,102 @@ func validationKey(link types.DownloadLink) string {
 		link.ExpiresAt.UTC().Format(time.RFC3339Nano)
 }
 
-// disableLinkAccount handles errors that require disabling an account
-func (s *Service) disableLinkAccount(link types.DownloadLink, linkErr *Error) (bool, error) {
+// suspendLinkAccount applies a recoverable provider-pressure cooldown. Account
+// expiration and authentication failures continue to use permanent disabling.
+func (s *Service) suspendLinkAccount(link types.DownloadLink, linkErr *Error) (bool, accountpkg.RecoveryStatus, error) {
 	client, err := s.getClient(link.Debrid)
 	if err != nil {
-		return false, fmt.Errorf("failed to get client for debrid %s: %w", link.Debrid, err)
+		return false, accountpkg.RecoveryStatus{}, fmt.Errorf("failed to get client for debrid %s: %w", link.Debrid, err)
 	}
 
 	accountManager := client.AccountManager()
 	if accountManager == nil {
-		return false, fmt.Errorf("account manager not available for debrid %s", link.Debrid)
+		return false, accountpkg.RecoveryStatus{}, fmt.Errorf("account manager not available for debrid %s", link.Debrid)
 	}
 	account, err := accountManager.GetAccount(link.Token)
 	if err != nil {
-		return false, fmt.Errorf("failed to get account for token %s: %w", utils.Mask(link.Token), err)
+		return false, accountpkg.RecoveryStatus{}, fmt.Errorf("failed to get account for token %s: %w", utils.Mask(link.Token), err)
 	}
 
 	if account == nil {
-		return false, fmt.Errorf("account not found for token %s", utils.Mask(link.Token))
+		return false, accountpkg.RecoveryStatus{}, fmt.Errorf("account not found for token %s", utils.Mask(link.Token))
 	}
 
-	accountManager.Disable(account)
+	status, _ := accountManager.SuspendTemporary(account, link.RecoveryProbeID, linkErr.RetryAfter, linkErr.Code)
 
 	// Remove all validations for all the links
 	s.validated.Clear()
-	s.logger.Warn().
-		Str("debrid", link.Debrid).
-		Str("token", utils.Mask(account.Token)).
-		Str("account", utils.Mask(account.Username)).
-		Str("reason", linkErr.Code).
-		Msg("Disabled account due to error")
-	return len(accountManager.Active()) > 0, nil
+	return len(accountManager.Active()) > 0, status, nil
+}
+
+func (s *Service) completeRecoveryProbe(link types.DownloadLink) {
+	if link.RecoveryProbeID == 0 {
+		return
+	}
+	accountManager, account, err := s.linkAccount(link)
+	if err != nil {
+		s.logger.Error().Err(err).Str("debrid", link.Debrid).Msg("Failed to complete account recovery probe")
+		return
+	}
+	accountManager.MarkHealthy(account, link.RecoveryProbeID)
+}
+
+func (s *Service) failRecoveryProbe(link types.DownloadLink, validationErr error) {
+	if link.RecoveryProbeID == 0 {
+		return
+	}
+	accountManager, account, err := s.linkAccount(link)
+	if err != nil {
+		s.logger.Error().Err(err).Str("debrid", link.Debrid).Msg("Failed to close account recovery probe")
+		return
+	}
+	if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+		accountManager.ReleaseRecoveryProbe(account, link.RecoveryProbeID)
+		return
+	}
+	reason := "link_validation_failed"
+	var retryAfter time.Duration
+	if linkErr := GetLinkError(validationErr); linkErr != nil {
+		if linkErr.Code != "" {
+			reason = linkErr.Code
+		}
+		retryAfter = linkErr.RetryAfter
+	}
+	accountManager.FailRecoveryProbe(account, link.RecoveryProbeID, retryAfter, reason)
+}
+
+func (s *Service) linkAccount(link types.DownloadLink) (*accountpkg.Manager, *accountpkg.Account, error) {
+	client, err := s.getClient(link.Debrid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get client for debrid %s: %w", link.Debrid, err)
+	}
+	accountManager := client.AccountManager()
+	if accountManager == nil {
+		return nil, nil, fmt.Errorf("account manager not available for debrid %s", link.Debrid)
+	}
+	account, err := accountManager.GetAccount(link.Token)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get account for token %s: %w", utils.Mask(link.Token), err)
+	}
+	return accountManager, account, nil
+}
+
+func (s *Service) accountValidationIsCurrent(link types.DownloadLink) bool {
+	client, err := s.getClient(link.Debrid)
+	if err != nil {
+		return false
+	}
+	accountManager := client.AccountManager()
+	if accountManager == nil {
+		// Some non-account test and extension clients deliberately omit account
+		// management. Preserve their existing validation-cache behavior.
+		return true
+	}
+	account, err := accountManager.GetAccount(link.Token)
+	if err != nil {
+		return false
+	}
+	return accountManager.Status(account).State == accountpkg.StateActive
 }
 
 // invalidateCachedLink removes only local validation and account-cache state.

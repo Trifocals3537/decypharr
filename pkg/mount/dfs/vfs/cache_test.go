@@ -21,7 +21,14 @@ func newTestCache(cacheDir string) *Cache {
 		},
 		items:  xsync.NewMap[string, *CacheItem](),
 		logger: zerolog.Nop(),
+		quota:  newDiskQuota(0),
 	}
+}
+
+func initializeTestCacheDiskState(c *Cache) {
+	scan := c.scanDiskCandidates()
+	c.quota.initialize(scan.totalSize)
+	c.storeDiskStats(scan.candidates, nil)
 }
 
 func TestScanDiskCandidates_DoesNotDeleteLegacyFiles(t *testing.T) {
@@ -161,6 +168,7 @@ func TestGetStatsReportsDiskItemsSeparatelyFromActiveItems(t *testing.T) {
 	}
 
 	c := newTestCache(cacheDir)
+	initializeTestCacheDiskState(c)
 	c.config.CacheDiskSize = 100
 	c.evict()
 
@@ -245,6 +253,7 @@ func TestPurgeCacheRemovesIdleDiskItemsAndSkipsActiveItems(t *testing.T) {
 	}
 
 	c := newTestCache(cacheDir)
+	initializeTestCacheDiskState(c)
 	activeItem := &CacheItem{
 		cache:    c,
 		key:      "entry/active.mkv",

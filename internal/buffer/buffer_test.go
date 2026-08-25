@@ -236,3 +236,42 @@ func TestBufferCloseReportsFlushFailure(t *testing.T) {
 		t.Fatalf("pool stats after failed flush = %+v, want memory and buffers released", stats)
 	}
 }
+
+func TestPoolReclaimDiskPunchesSafeReadBehind(t *testing.T) {
+	pool := NewPool(PoolConfig{
+		Name:       "synchronous-reclaim",
+		BackWindow: 16,
+	})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	var evictedOff, evictedSize int64
+	b, err := pool.NewBuffer(Config{
+		DiskPath:  filepath.Join(t.TempDir(), "buffer.bin"),
+		TotalSize: 64,
+		OnEvict: func(off, size int64) {
+			evictedOff = off
+			evictedSize += size
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewBuffer: %v", err)
+	}
+	if _, err := b.WriteAt(make([]byte, 64), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	b.SetReadHead(64)
+
+	reclaimed := pool.ReclaimDisk(32)
+	if reclaimed != 48 {
+		t.Fatalf("ReclaimDisk = %d, want 48 bytes below the 16-byte back-window", reclaimed)
+	}
+	if evictedOff != 0 || evictedSize != 48 {
+		t.Fatalf("OnEvict = %d+%d, want 0+48", evictedOff, evictedSize)
+	}
+	if stats := pool.Stats(); stats.DiskInUse != 16 {
+		t.Fatalf("pool disk usage after reclaim = %d, want 16", stats.DiskInUse)
+	}
+	if !b.HasRange(48, 16) || b.HasRange(0, 1) {
+		t.Fatal("reclaim did not preserve only the protected read-behind window")
+	}
+}

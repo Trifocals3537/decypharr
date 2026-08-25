@@ -35,6 +35,9 @@ type Pool struct {
 
 	mu      sync.RWMutex
 	buffers map[*Buffer]struct{}
+	// reclaimMu serializes background backstop work with synchronous cache
+	// pressure reclamation so two scans cannot punch the same ranges at once.
+	reclaimMu sync.Mutex
 
 	evictSig chan struct{}
 	stopCh   chan struct{}
@@ -59,9 +62,9 @@ type PoolConfig struct {
 	// 0 = no disk backstop.
 	DiskLimit int64
 
-	// BackWindow is how many bytes behind a Buffer's read head the disk
-	// backstop preserves before punching (short seek-backs stay local). Only
-	// meaningful when DiskLimit > 0.
+	// BackWindow is how many bytes behind a Buffer's read head disk reclamation
+	// preserves (short seek-backs stay local). It applies to both the optional
+	// DiskLimit worker and explicit ReclaimDisk calls.
 	BackWindow int64
 }
 
@@ -266,7 +269,21 @@ func (p *Pool) reclaimDisk() {
 	if limit <= 0 {
 		return
 	}
-	for p.diskInUse.Load() > limit {
+	p.ReclaimDisk(max(p.diskInUse.Load()-limit, 0))
+}
+
+// ReclaimDisk synchronously punches up to n safely-reclaimable bytes behind
+// active read heads. It is used by DFS admission before rejecting a cache
+// write. The return value is the number of logical present bytes reclaimed.
+func (p *Pool) ReclaimDisk(n int64) int64 {
+	if p == nil || n <= 0 || p.closed.Load() {
+		return 0
+	}
+	p.reclaimMu.Lock()
+	defer p.reclaimMu.Unlock()
+
+	var total int64
+	for total < n {
 		p.mu.RLock()
 		bufs := make([]*Buffer, 0, len(p.buffers))
 		for b := range p.buffers {
@@ -274,20 +291,19 @@ func (p *Pool) reclaimDisk() {
 		}
 		p.mu.RUnlock()
 		if len(bufs) == 0 {
-			return
+			return total
 		}
 		var reclaimed int64
 		for _, b := range bufs {
 			reclaimed += b.punchBehindWindow(p.backWindow)
-			if p.diskInUse.Load() <= limit {
-				return
+			if total+reclaimed >= n {
+				break
 			}
 		}
+		total += reclaimed
 		if reclaimed == 0 {
-			// All remaining data is within the buffers' back-windows; nothing
-			// can be reclaimed without disrupting active playback. Accept the
-			// bounded overshoot and stop until the next signal.
-			return
+			return total
 		}
 	}
+	return total
 }

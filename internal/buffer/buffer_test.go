@@ -256,6 +256,7 @@ func TestPoolReclaimDiskPunchesSafeReadBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBuffer: %v", err)
 	}
+	t.Cleanup(func() { _ = b.Close() })
 	if _, err := b.WriteAt(make([]byte, 64), 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}

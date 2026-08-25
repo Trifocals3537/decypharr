@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
@@ -99,6 +100,15 @@ type Manager struct {
 	// Active streams tracking
 	activeStreams *xsync.Map[string, *ActiveStream]
 
+	// Successful pre-byte failovers are remembered briefly so range-heavy
+	// playback does not retry a known-bad primary on every seek. Counters are
+	// exposed through the secret-free stats snapshot.
+	streamProviderPreferences *xsync.Map[string, streamProviderPreference]
+	streamFailoverAttempts    atomic.Uint64
+	streamFailoverSuccesses   atomic.Uint64
+	streamFailoverExhausted   atomic.Uint64
+	streamPreferredHits       atomic.Uint64
+
 	// In-flight queue-processor dispatches, keyed by InfoHash, to prevent
 	// duplicate goroutines from processing the same entry when the scheduler
 	// re-fires before the previous pass has updated the queue row.
@@ -176,23 +186,24 @@ func New() *Manager {
 	cdnGovernor := cdntraffic.New(cdntraffic.Options{Traffic: providerTraffic})
 
 	instance := &Manager{
-		storage:                strg,
-		clients:                xsync.NewMap[string, debrid.Client](),
-		logger:                 _logger,
-		migrationJobs:          xsync.NewMap[string, *storage.SwitcherJob](),
-		config:                 cfg,
-		arr:                    arr.NewStorage(),
-		queue:                  newQueue(strg, cfg.RemoveStalledAfter, entryLifecycle),
-		ready:                  make(chan struct{}),
-		streamClient:           newStreamHTTPClient(cdnGovernor),
-		streamWait:             waitForStreamRetry,
-		cdnTraffic:             cdnGovernor,
-		providerTraffic:        providerTraffic,
-		usenetTimeout:          usenetTimeout,
-		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
-		activeStreams:          xsync.NewMap[string, *ActiveStream](),
-		processingEntries:      xsync.NewMap[string, struct{}](),
-		entryLifecycle:         entryLifecycle,
+		storage:                   strg,
+		clients:                   xsync.NewMap[string, debrid.Client](),
+		logger:                    _logger,
+		migrationJobs:             xsync.NewMap[string, *storage.SwitcherJob](),
+		config:                    cfg,
+		arr:                       arr.NewStorage(),
+		queue:                     newQueue(strg, cfg.RemoveStalledAfter, entryLifecycle),
+		ready:                     make(chan struct{}),
+		streamClient:              newStreamHTTPClient(cdnGovernor),
+		streamWait:                waitForStreamRetry,
+		cdnTraffic:                cdnGovernor,
+		providerTraffic:           providerTraffic,
+		usenetTimeout:             usenetTimeout,
+		debridSpeedTestResults:    xsync.NewMap[string, debridTypes.SpeedTestResult](),
+		activeStreams:             xsync.NewMap[string, *ActiveStream](),
+		streamProviderPreferences: xsync.NewMap[string, streamProviderPreference](),
+		processingEntries:         xsync.NewMap[string, struct{}](),
+		entryLifecycle:            entryLifecycle,
 	}
 
 	instance.resetLifecycle()

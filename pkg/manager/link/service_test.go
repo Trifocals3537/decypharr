@@ -14,6 +14,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -24,6 +25,8 @@ type lifecycleTestClient struct {
 	debrid.Client
 	mu            sync.Mutex
 	links         []types.DownloadLink
+	fetchErr      error
+	fetchErrLink  types.DownloadLink
 	cacheLinks    bool
 	cached        map[string]types.DownloadLink
 	fetches       int
@@ -40,6 +43,9 @@ func (c *lifecycleTestClient) GetDownloadLink(_ string, file *types.File) (types
 		}
 	}
 	c.fetches++
+	if c.fetchErr != nil {
+		return c.fetchErrLink, c.fetchErr
+	}
 	if len(c.links) == 0 {
 		return types.DownloadLink{}, fmt.Errorf("no test links configured")
 	}
@@ -109,6 +115,111 @@ func newLifecycleService(client *lifecycleTestClient, httpClient *http.Client, r
 	clients := xsync.NewMap[string, debrid.Client]()
 	clients.Store("test", client)
 	return New(clients, nil, nil, nil, httpClient, retries, zerolog.Nop())
+}
+
+func TestWithoutRepairNeverMutatesAlternatePlacement(t *testing.T) {
+	client := &lifecycleTestClient{fetchErr: customerror.HosterUnavailableError}
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store("test", client)
+	var repairs atomic.Int32
+	var saves atomic.Int32
+	service := New(
+		clients,
+		nil,
+		func(context.Context, *storage.Entry) error {
+			repairs.Add(1)
+			return nil
+		},
+		func(*storage.Entry) error {
+			saves.Add(1)
+			return nil
+		},
+		http.DefaultClient,
+		0,
+		zerolog.Nop(),
+	)
+
+	entry := lifecycleTestEntry()
+	_, err := service.GetLink(WithoutRepair(context.Background()), entry, "video.mkv")
+	if !errors.Is(err, customerror.HosterUnavailableError) {
+		t.Fatalf("GetLink() error = %v, want hoster unavailable", err)
+	}
+	if repairs.Load() != 0 || saves.Load() != 0 || entry.Bad {
+		t.Fatalf("read-only alternate repairs/saves/bad = %d/%d/%v, want 0/0/false", repairs.Load(), saves.Load(), entry.Bad)
+	}
+}
+
+func TestReadOnlyProbePreservesFullActiveRepairRecovery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &lifecycleTestClient{
+		fetchErr:     customerror.HosterUnavailableError,
+		fetchErrLink: lifecycleDownloadLink(server.URL),
+		links:        []types.DownloadLink{lifecycleDownloadLink(server.URL)},
+	}
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store("test", client)
+	var repairs atomic.Int32
+	service := New(
+		clients,
+		nil,
+		func(context.Context, *storage.Entry) error {
+			repairs.Add(1)
+			client.mu.Lock()
+			client.fetchErr = nil
+			client.mu.Unlock()
+			return nil
+		},
+		nil,
+		server.Client(),
+		0,
+		zerolog.Nop(),
+	)
+	entry := lifecycleTestEntry()
+
+	if _, err := service.GetLink(WithoutRepair(WithFailFast(context.Background())), entry, "video.mkv"); !errors.Is(err, customerror.HosterUnavailableError) {
+		t.Fatalf("read-only GetLink() error = %v, want hoster unavailable", err)
+	}
+	if repairs.Load() != 0 {
+		t.Fatalf("read-only repairs = %d, want 0", repairs.Load())
+	}
+	if _, err := service.GetLink(context.Background(), entry, "video.mkv"); err != nil {
+		t.Fatalf("full recovery GetLink() error = %v", err)
+	}
+	if repairs.Load() != 1 {
+		t.Fatalf("full recovery repairs = %d, want 1", repairs.Load())
+	}
+}
+
+func TestFailFastValidationSkipsRetryDelay(t *testing.T) {
+	var heads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if heads.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &lifecycleTestClient{links: []types.DownloadLink{lifecycleDownloadLink(server.URL)}}
+	service := newLifecycleService(client, server.Client(), 3)
+	var waits atomic.Int32
+	service.wait = func(context.Context, time.Duration) error {
+		waits.Add(1)
+		return nil
+	}
+
+	_, err := service.GetLink(WithFailFast(context.Background()), lifecycleTestEntry(), "video.mkv")
+	if err == nil {
+		t.Fatal("GetLink() succeeded, want first-attempt transient failure")
+	}
+	if heads.Load() != 1 || waits.Load() != 0 {
+		t.Fatalf("HEAD requests/waits = %d/%d, want 1/0", heads.Load(), waits.Load())
+	}
 }
 
 func TestTransientValidationFailureIsNotSticky(t *testing.T) {

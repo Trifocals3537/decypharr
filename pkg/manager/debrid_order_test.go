@@ -21,6 +21,7 @@ type routingTestClient struct {
 	cfg    config.Debrid
 	submit func(*debridTypes.Torrent) (*debridTypes.Torrent, error)
 	check  func(*debridTypes.Torrent) (*debridTypes.Torrent, error)
+	get    func(string) (*debridTypes.Torrent, error)
 	delete func(string) error
 }
 
@@ -39,6 +40,13 @@ func (c *routingTestClient) CheckStatus(torrent *debridTypes.Torrent) (*debridTy
 		return torrent, nil
 	}
 	return c.check(torrent)
+}
+
+func (c *routingTestClient) GetTorrent(id string) (*debridTypes.Torrent, error) {
+	if c.get == nil {
+		return nil, customerror.TorrentNotFoundError
+	}
+	return c.get(id)
 }
 
 func (c *routingTestClient) DeleteTorrent(id string) error {

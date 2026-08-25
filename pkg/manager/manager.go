@@ -58,8 +58,15 @@ type Manager struct {
 	queue        *Queue
 
 	// downloading
-	refreshSG   singleflight.Group
-	linkService downloadLinkService
+	refreshSG          singleflight.Group
+	migrationCleanupSG singleflight.Group
+	linkService        downloadLinkService
+
+	// migrationCleanupNow is overridden only by focused retry/backoff tests.
+	// Production always falls back to time.Now.
+	migrationCleanupNow func() time.Time
+	migrationLocksMu    sync.Mutex
+	migrationLocks      map[string]*migrationEntryLock
 
 	// repair
 	fixer  *Fixer
@@ -796,11 +803,12 @@ func (m *Manager) GetStats() (map[string]any, error) {
 	})
 
 	return map[string]any{
-		"total_torrents": count,
-		"storage_stats":  map[string]any{"total_size": diskSize},
-		"active_jobs":    activeJobs,
-		"completed_jobs": completedJobs,
-		"failed_jobs":    failedJobs,
+		"total_torrents":             count,
+		"storage_stats":              map[string]any{"total_size": diskSize},
+		"active_jobs":                activeJobs,
+		"completed_jobs":             completedJobs,
+		"failed_jobs":                failedJobs,
+		"pending_migration_cleanups": m.storage.MigrationCleanupCount(),
 	}, nil
 }
 

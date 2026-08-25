@@ -21,6 +21,11 @@ func (m *Manager) runInitialCalls(ctx context.Context) {
 	m.startBackground("initial account sync", func() {
 		m.syncAccounts(ctx)
 	})
+	m.startBackground("initial migration source cleanup recovery", func() {
+		if err := m.processMigrationCleanups(ctx); err != nil && ctx.Err() == nil {
+			m.logger.Warn().Err(err).Msg("Initial migration source cleanup recovery was incomplete")
+		}
+	})
 }
 
 // awaitProviderCall makes cancellation observable around legacy provider APIs
@@ -104,6 +109,29 @@ func (m *Manager) addQueueProcessorJob(ctx context.Context) error {
 			} else {
 				m.logger.Debug().Msgf("Remove stalled torrents job scheduled for every %s", "1m")
 			}
+		}
+	}
+
+	// Recover source placements whose target migration committed but whose
+	// provider deletion or local checkpoint was interrupted. Singleton mode
+	// keeps a slow provider call from causing overlapping sweeps.
+	if jd, err := utils.ConvertToJobDef(migrationCleanupSweepInterval.String()); err != nil {
+		m.logger.Error().Err(err).Msg("Failed to convert migration cleanup interval to job definition")
+	} else {
+		if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
+			if err := m.processMigrationCleanups(ctx); err != nil && ctx.Err() == nil {
+				m.logger.Warn().Err(err).Msg("Migration source cleanup sweep was incomplete")
+			}
+		}),
+			gocron.WithContext(ctx),
+			gocron.WithName("migration-source-cleanup"),
+			gocron.WithSingletonMode(gocron.LimitModeReschedule),
+		); err != nil {
+			m.logger.Error().Err(err).Msg("Failed to create migration source cleanup job")
+		} else {
+			m.logger.Debug().
+				Dur("interval", migrationCleanupSweepInterval).
+				Msg("Migration source cleanup recovery scheduled")
 		}
 	}
 

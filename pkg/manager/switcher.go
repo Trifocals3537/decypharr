@@ -51,7 +51,8 @@ func (m *Manager) SwitchTorrent(ctx context.Context, infohash, target string, ke
 	return job, nil
 }
 
-// executeMigration performs the actual torrent migration - COMPLETE IMPLEMENTATION
+// executeMigration activates a durable target first, then applies keep-old or
+// records an exact, restart-safe source cleanup before any source-provider call.
 func (m *Manager) executeMigration(job *storage.SwitcherJob, torrent *storage.Entry) {
 	m.logger.Info().
 		Str("job_id", job.ID).
@@ -60,6 +61,35 @@ func (m *Manager) executeMigration(job *storage.SwitcherJob, torrent *storage.En
 		Str("target", job.TargetProvider).
 		Msg("Starting torrent migration")
 	job.Status = storage.SwitcherStatusInProgress
+	releaseMigration := m.acquireMigrationEntryLock(job.InfoHash)
+	migrationLocked := true
+	defer func() {
+		if migrationLocked {
+			releaseMigration()
+		}
+	}()
+
+	// SwitchTorrent's snapshot may have waited behind another migration. Reload
+	// under the per-entry lock so stale work cannot submit a second target or
+	// remove a source that is no longer active.
+	current, err := m.GetEntry(job.InfoHash)
+	if err != nil {
+		job.Status = storage.SwitcherStatusFailed
+		job.Error = fmt.Sprintf("failed to reload migration source: %v", err)
+		job.CompletedAt = new(time.Now())
+		return
+	}
+	if current.ActiveProvider != job.SourceProvider {
+		job.Status = storage.SwitcherStatusFailed
+		job.Error = fmt.Sprintf(
+			"migration was superseded: active provider changed from %s to %s",
+			job.SourceProvider,
+			current.ActiveProvider,
+		)
+		job.CompletedAt = new(time.Now())
+		return
+	}
+	torrent = current
 
 	// Verify the target client still exists before starting provider work.
 	if m.ProviderClient(job.TargetProvider) == nil {
@@ -85,61 +115,78 @@ func (m *Manager) executeMigration(job *storage.SwitcherJob, torrent *storage.En
 		return
 	}
 
-	// MoveTorrent has durably activated the target. Source cleanup is a separate
-	// phase owned by the source provider client and controlled by keep-old.
-	if !job.KeepOld {
-		sourcePlacement := torrent.Providers[job.SourceProvider]
-		if sourcePlacement == nil {
-			// Retain compatibility with older rows whose map key did not match
-			// the configured provider name.
-			for _, placement := range torrent.Providers {
-				if placement != nil && placement.Provider == job.SourceProvider {
-					sourcePlacement = placement
-					break
-				}
-			}
-		}
-
-		if sourcePlacement != nil {
-			sourceClient := m.ProviderClient(job.SourceProvider)
-			if sourceClient == nil {
-				job.Status = storage.SwitcherStatusFailed
-				job.Error = fmt.Sprintf("source debrid %s not found after target activation", job.SourceProvider)
-				job.CompletedAt = new(time.Now())
-				m.logger.Error().
-					Str("job_id", job.ID).
-					Str("source", job.SourceProvider).
-					Msg("Target activated, but source client is unavailable")
-				return
-			}
-			if err := m.deleteProviderTorrent(sourceClient, sourcePlacement.ID); err != nil {
-				job.Status = storage.SwitcherStatusFailed
-				job.Error = fmt.Sprintf("failed to remove source placement %s/%s: %v", job.SourceProvider, sourcePlacement.ID, err)
-				job.CompletedAt = new(time.Now())
-				m.logger.Error().
-					Err(err).
-					Str("job_id", job.ID).
-					Str("source", job.SourceProvider).
-					Str("torrent_id", sourcePlacement.ID).
-					Msg("Target activated, but source cleanup failed")
-				return
-			}
-			torrent.RemoveProvider(job.SourceProvider)
-		}
-	}
-
-	// Save updated torrent
-	if err := m.AddOrUpdate(torrent, func(t *storage.Entry) {
-		m.RefreshEntries(false)
-	}); err != nil {
-		job.Status = storage.SwitcherStatusFailed
-		job.Error = fmt.Sprintf("failed to update torrent: %v", err)
-		m.logger.Error().Err(err).Msg("Failed to update torrent after migration")
-	} else {
+	// MoveTorrent has already flushed the target activation. Keeping the source
+	// therefore needs no second entry write.
+	if job.KeepOld {
 		job.Status = storage.SwitcherStatusCompleted
 		job.Progress = 100
+		job.CompletedAt = new(time.Now())
+		if m.entry != nil {
+			m.RefreshEntries(false)
+		}
+		m.logger.Info().
+			Str("job_id", job.ID).
+			Str("status", string(job.Status)).
+			Msg("Migration completed")
+		return
 	}
 
+	job.Progress = 75
+	intent, err := m.prepareMigrationCleanup(job)
+	if err != nil {
+		job.Status = storage.SwitcherStatusFailed
+		job.Error = fmt.Sprintf(
+			"target activated, but source cleanup could not be prepared: %v",
+			err,
+		)
+		job.CompletedAt = new(time.Now())
+		m.logger.Error().
+			Err(err).
+			Str("job_id", job.ID).
+			Msg("Target activated, but durable source cleanup could not be prepared")
+		return
+	}
+	if intent == nil {
+		job.Status = storage.SwitcherStatusCompleted
+		job.Progress = 100
+		job.CompletedAt = new(time.Now())
+		if m.entry != nil {
+			m.RefreshEntries(false)
+		}
+		m.logger.Info().
+			Str("job_id", job.ID).
+			Str("status", string(job.Status)).
+			Msg("Migration completed without a remaining source placement")
+		return
+	}
+
+	// Delayed cleanup acquires the same keyed lock. Release the target phase
+	// first so a scheduler that already joined this intent cannot deadlock with
+	// the immediate attempt through singleflight.
+	releaseMigration()
+	migrationLocked = false
+	job.Progress = 85
+	cleanupContext := m.ctx
+	if cleanupContext == nil {
+		cleanupContext = context.Background()
+	}
+	if err := m.runMigrationCleanup(cleanupContext, intent.ID); err != nil {
+		job.Status = storage.SwitcherStatusFailed
+		job.Error = fmt.Sprintf(
+			"target activated; durable source cleanup is pending retry: %v",
+			err,
+		)
+		job.CompletedAt = new(time.Now())
+		m.logger.Error().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("cleanup_id", intent.ID).
+			Msg("Target activated, but source cleanup is pending retry")
+		return
+	}
+
+	job.Status = storage.SwitcherStatusCompleted
+	job.Progress = 100
 	job.CompletedAt = new(time.Now())
 
 	m.logger.Info().

@@ -234,7 +234,7 @@ func (m *Manager) detectTorrentChanges(provider string, remote remoteTorrentInde
 
 			if placementOnDebrid {
 				if !onRemote {
-					entry.RemoveProvider(provider, nil)
+					entry.RemoveProvider(provider)
 					if len(entry.Providers) == 0 {
 						torrentsToDelete = append(torrentsToDelete, entry)
 					} else {

@@ -21,6 +21,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/providertraffic"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
@@ -58,7 +59,11 @@ type Torbox struct {
 	downloadPresentLoaded bool
 }
 
-func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
+func New(
+	dc config.Debrid,
+	ratelimits map[string]ratelimit.Limiter,
+	trafficControllers ...*providertraffic.Controller,
+) (*Torbox, error) {
 	cfg := config.Get()
 	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", dc.APIKey),
@@ -70,12 +75,21 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	}
 	_log := logger.New(dc.Name)
 
-	// TorBox enforces a hard cap of 300 req/min per API key, applied
-	// synchronously across all servers since v8.4 (Feb 2026, GAP-002).
-	// Default to that limit if the user has not configured one explicitly.
+	// The provider traffic controller owns TorBox's documented per-endpoint
+	// defaults. Keep an explicit user rate limit as an additional, potentially
+	// tighter service-wide guard, but do not replace the endpoint model with an
+	// implicit aggregate limiter.
 	mainRL := ratelimits["main"]
-	if mainRL == nil {
-		mainRL = ratelimit.New(300, ratelimit.Per(time.Minute), ratelimit.WithSlack(30))
+	var traffic *providertraffic.Controller
+	if len(trafficControllers) > 0 {
+		traffic = trafficControllers[0]
+	}
+	if traffic == nil {
+		traffic = providertraffic.New(providertraffic.Options{})
+	}
+	trafficProvider := strings.TrimSpace(dc.Provider)
+	if trafficProvider == "" {
+		trafficProvider = "torbox"
 	}
 
 	opts := []request.ClientOption{
@@ -84,6 +98,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		request.WithMaxRetries(cfg.Retries),
 		request.WithRetryableStatus(http.StatusTooManyRequests, http.StatusBadGateway),
 		request.WithLogger(_log),
+		request.WithProviderTraffic(traffic, trafficProvider, dc.APIKey),
 	}
 	if dc.Proxy != "" {
 		opts = append(opts, request.WithProxy(dc.Proxy))
@@ -94,10 +109,12 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		autoExpiresLinksAfter = 48 * time.Hour
 	}
 
+	accountConfig := dc
+	accountConfig.Provider = trafficProvider
 	tb := &Torbox{
 		Host:                  "https://api.torbox.app/v1",
 		APIKey:                dc.APIKey,
-		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
+		accountsManager:       account.NewManager(accountConfig, ratelimits["download"], _log, traffic),
 		config:                dc,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                request.New(opts...),
@@ -180,13 +197,22 @@ func (tb *Torbox) doGetContextBounded(
 }
 
 // doPostForm performs a POST request with form data
-func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result any) (*http.Response, error) {
+func (tb *Torbox) doPostForm(
+	endpoint string,
+	formData map[string]string,
+	result any,
+	operations ...providertraffic.Operation,
+) (*http.Response, error) {
 	form := url.Values{}
 	for k, v := range formData {
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, tb.Host+endpoint, strings.NewReader(form.Encode()))
+	ctx := context.Background()
+	if len(operations) > 0 && operations[0] != providertraffic.OperationNone {
+		ctx = providertraffic.WithOperation(ctx, operations[0])
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tb.Host+endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +362,11 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		}
 	}
 
-	resp, err := tb.doPostForm("/api/torrents/createtorrent", formData, &data)
+	operation := providertraffic.OperationAPI
+	if torrent.DownloadUncached {
+		operation = providertraffic.OperationCreateTorrentUncached
+	}
+	resp, err := tb.doPostForm("/api/torrents/createtorrent", formData, &data, operation)
 	if err != nil {
 		return nil, err
 	}
@@ -644,6 +674,10 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 	query.Set("token", account.Token)
 	query.Set("torrent_id", id)
 	query.Set("file_id", file.Id)
+	// TorBox explicitly recommends this revocable permalink instead of
+	// pre-generating and retaining its short-lived signed CDN URLs. The shared
+	// traffic layer treats this resolver hop separately from redirected media
+	// bytes, so seeks do not occupy the signed link's four-connection budget.
 	query.Set("redirect", "true")
 
 	downloadURL := fmt.Sprintf("%s/api/torrents/requestdl?%s", tb.Host, query.Encode())

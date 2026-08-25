@@ -9,6 +9,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/providertraffic"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -28,13 +29,22 @@ type Manager struct {
 	logger   zerolog.Logger
 }
 
-func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger zerolog.Logger) *Manager {
+func NewManager(
+	debridConf config.Debrid,
+	downloadRL ratelimit.Limiter,
+	logger zerolog.Logger,
+	trafficControllers ...*providertraffic.Controller,
+) *Manager {
 	m := &Manager{
 		debrid:   debridConf.Name,
 		accounts: xsync.NewMap[string, *Account](),
 		logger:   logger,
 	}
 	cfg := config.Get()
+	var traffic *providertraffic.Controller
+	if len(trafficControllers) > 0 {
+		traffic = trafficControllers[0]
+	}
 
 	var firstAccount *Account
 	for idx, token := range debridConf.DownloadAPIKeys {
@@ -54,6 +64,13 @@ func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger z
 		}
 		if debridConf.Proxy != "" {
 			opts = append(opts, request.WithProxy(debridConf.Proxy))
+		}
+		if traffic != nil {
+			opts = append(opts, request.WithProviderTraffic(
+				traffic,
+				debridConf.Provider,
+				token,
+			))
 		}
 
 		account := &Account{

@@ -18,7 +18,20 @@ func (m *Manager) withCDNIdentity(ctx context.Context, link debridTypes.Download
 		Provider:     provider,
 		ProviderType: providerType,
 		AccountToken: link.Token,
+		LinkKey:      cdnLinkKey(link),
 	})
+}
+
+func cdnLinkKey(link debridTypes.DownloadLink) string {
+	if link.Link != "" {
+		return link.Link
+	}
+	if link.Id != "" || link.Filename != "" {
+		return link.Id + "\x00" + link.Filename
+	}
+	// Some providers expose only the final URL. It may be signed, so the
+	// governor hashes it immediately and never includes it in snapshots.
+	return link.DownloadLink
 }
 
 func (m *Manager) cdnProviderType(provider string) string {

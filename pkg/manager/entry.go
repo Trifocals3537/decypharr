@@ -22,6 +22,7 @@ const (
 
 // FileInfo implements os.FileInfo
 type FileInfo struct {
+	fileID       string
 	name         string
 	size         int64
 	mode         os.FileMode
@@ -50,6 +51,7 @@ func (f *FileInfo) CanDelete() bool      { return f.canDelete }
 func (f *FileInfo) IsRemote() bool       { return len(f.content) == 0 }
 func (f *FileInfo) ByteRange() *[2]int64 { return f.byteRange }
 func (f *FileInfo) InfoHash() string     { return f.infohash }
+func (f *FileInfo) FileID() string       { return f.fileID }
 
 // GetTorrentMountPath returns the full mount path for a torrent
 // Returns the path based on the new unified mount structure
@@ -182,6 +184,7 @@ func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error
 		return nil, fmt.Errorf("file %s not found in torrent %s", fileName, torrentName)
 	}
 	return &FileInfo{
+		fileID:    file.ID,
 		infohash:  file.InfoHash,
 		name:      file.Name,
 		size:      file.Size,
@@ -356,6 +359,7 @@ func (m *Manager) getTorrentChildren(name string) (*FileInfo, []FileInfo) {
 	size := int64(0)
 	for _, file := range entry.Files {
 		infos = append(infos, FileInfo{
+			fileID:    file.ID,
 			name:      file.Name,
 			size:      file.Size,
 			modTime:   file.AddedOn,

@@ -5,6 +5,7 @@ package hanwen
 import (
 	"context"
 	"path"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,7 +38,8 @@ type Dir struct {
 	config      *config.FuseConfig
 	logger      zerolog.Logger
 	rlLogger    *logger.RateLimitedLogger
-	modTime     uint64
+	// modTime is refreshed by Lookup while Getattr can run concurrently.
+	modTime atomic.Uint64
 }
 
 var _ = (fs.NodeLookuper)((*Dir)(nil))
@@ -52,7 +54,7 @@ func NewDir(vfsManager *vfs.Manager, name string, level DirLevel, modTime uint64
 }
 
 func newDir(vfsManager *vfs.Manager, name, virtualPath string, level DirLevel, modTime uint64, config *config.FuseConfig, log zerolog.Logger, rl *logger.RateLimitedLogger) *Dir {
-	return &Dir{
+	d := &Dir{
 		vfs:         vfsManager,
 		name:        name,
 		virtualPath: virtualPath,
@@ -60,8 +62,9 @@ func newDir(vfsManager *vfs.Manager, name, virtualPath string, level DirLevel, m
 		config:      config,
 		logger:      log.With().Str("dir", name).Logger(),
 		rlLogger:    rl,
-		modTime:     modTime,
 	}
+	d.modTime.Store(modTime)
+	return d
 }
 
 func (d *Dir) childPath(name string) string {
@@ -73,6 +76,33 @@ func (d *Dir) childStableAttr(name string, mode uint32) fs.StableAttr {
 		Mode: mode,
 		Ino:  hashPath(d.childPath(name)),
 	}
+}
+
+func (d *Dir) childStableAttrForInfo(info *manager.FileInfo, mode uint32) fs.StableAttr {
+	attr := d.childStableAttr(info.Name(), mode)
+	if info.IsDir() {
+		return attr
+	}
+
+	// Ino identifies the path; Gen identifies the object currently occupying
+	// that path. Durable file IDs survive provider refreshes and safe renames,
+	// but change when a genuinely new file replaces an old one. This prevents
+	// an open stale inode from being silently reused for the replacement.
+	switch {
+	case info.FileID() != "":
+		attr.Gen = hashIdentity("file-id", info.FileID())
+	case len(info.Content()) != 0:
+		attr.Gen = hashIdentity("static", info.Name(), string(info.Content()))
+	default:
+		attr.Gen = hashIdentity(
+			"legacy",
+			info.InfoHash(),
+			info.Parent(),
+			info.Name(),
+			info.ModTime().UTC().Format(time.RFC3339Nano),
+		)
+	}
+	return attr
 }
 
 // newNode creates a new fuse node from a FileInfo, caching it on the FileInfo
@@ -105,9 +135,10 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 	out.Nlink = 2   // Directories have 2 links (itself + "." entry)
 	out.Uid = d.config.UID
 	out.Gid = d.config.GID
-	out.Atime = d.modTime
-	out.Mtime = d.modTime
-	out.Ctime = d.modTime
+	modTime := d.modTime.Load()
+	out.Atime = modTime
+	out.Mtime = modTime
+	out.Ctime = modTime
 	out.AttrValid = uint64(AttrTimeout.Seconds())
 	return 0
 }
@@ -120,10 +151,10 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 	}
 
 	// Stable attributes make go-fuse retain an existing inode. Refresh the
-	// retained file before returning it so replacements do not keep serving
-	// stale size and stream metadata.
-	if child, file := d.refreshExistingFile(name, info); child != nil {
-		d.setEntryOut(info, out, uint64(file.modTime(info).Unix()))
+	// retained child before returning it so replacements do not keep serving
+	// stale metadata.
+	if child := d.refreshExistingChild(name, info); child != nil {
+		d.setEntryOut(info, out, d.nodeModTime(info, child.Operations()))
 		return child, 0
 	}
 
@@ -134,28 +165,35 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 	d.setEntryOut(info, out, d.nodeModTime(info, node))
 
 	// Supplying a stable inode keeps identity consistent across repeated
-	// lookups and directory listings.
-	return d.NewInode(ctx, node, d.childStableAttr(name, out.Mode)), 0
+	// lookups and directory listings. The generation distinguishes a new file
+	// that later occupies the same path while an old handle is still open.
+	return d.NewInode(ctx, node, d.childStableAttrForInfo(info, out.Mode)), 0
 }
 
-func (d *Dir) refreshExistingFile(name string, info *manager.FileInfo) (*fs.Inode, *File) {
-	if info.IsDir() {
-		return nil, nil
-	}
-
+func (d *Dir) refreshExistingChild(name string, info *manager.FileInfo) *fs.Inode {
 	child := d.GetChild(name)
 	if child == nil {
-		return nil, nil
+		return nil
 	}
 
-	file, ok := child.Operations().(*File)
-	if !ok {
-		return nil, nil
+	switch ops := child.Operations().(type) {
+	case *File:
+		if info.IsDir() {
+			return nil
+		}
+		ops.updateInfo(info)
+		info.SetSys(ops)
+	case *Dir:
+		if !info.IsDir() {
+			return nil
+		}
+		if mt := info.ModTime(); !mt.IsZero() {
+			ops.modTime.Store(uint64(mt.Unix()))
+		}
+	default:
+		return nil
 	}
-
-	file.updateInfo(info)
-	info.SetSys(file)
-	return child, file
+	return child
 }
 
 func (d *Dir) nodeModTime(info *manager.FileInfo, node fs.InodeEmbedder) uint64 {
@@ -167,7 +205,7 @@ func (d *Dir) nodeModTime(info *manager.FileInfo, node fs.InodeEmbedder) uint64 
 	case *File:
 		return uint64(node.createdAt.Unix())
 	case *Dir:
-		return node.modTime
+		return node.modTime.Load()
 	default:
 		return 0
 	}
@@ -302,6 +340,10 @@ func (d *Dir) RefreshChild(name string) {
 			// Invalidate the child directory's content cache
 			_ = childDir.NotifyContent(0, 0)
 		}
+		// v2.10+ can ask the kernel to forget unused nodes in this subtree.
+		// Busy/open nodes survive, and older kernels return ENOSYS, so the entry
+		// and content notifications above remain the compatibility fallback.
+		_ = d.NotifyPrune([]*fs.Inode{child})
 	}
 }
 

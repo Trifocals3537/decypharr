@@ -127,27 +127,32 @@ func (h *Handler) streamIdentityFile(entry *storage.Entry, file *storage.File, w
 	if err == nil {
 		return nil
 	}
-	var streamErr *customerror.Error
-	if errors.As(err, &streamErr) {
-		streamErr.HeadersWritten = headersWritten
-		return streamErr
-	}
-	return customerror.NewError(err, http.StatusInternalServerError, "server.internal_error", false, headersWritten)
+	return normalizeStreamError(err, headersWritten)
 }
 
 func (h *Handler) writeStreamError(logKey string, err error, w http.ResponseWriter) {
 	var streamErr *customerror.Error
 	if errors.As(err, &streamErr) {
-		if !streamErr.HeadersWritten {
-			http.Error(w, streamErr.Error(), streamErr.HTTPStatus())
+		if streamErr.IsSilent() {
+			return
 		}
-		if !streamErr.IsSilent() {
+		if !streamErr.HeadersWritten {
+			status := streamErr.HTTPStatus()
+			if status == http.StatusServiceUnavailable && w.Header().Get("Retry-After") == "" {
+				w.Header().Set("Retry-After", "5")
+			}
+			http.Error(w, http.StatusText(status), status)
+		}
+		if h.logger != nil {
 			h.logger.Rate(logKey).Error().Err(err).Msgf("Error streaming file: %s", logKey)
 		}
 		return
 	}
-	if !customerror.IsSilentError(err) {
-		h.logger.Rate(logKey).Error().Err(err).Msgf("Error streaming file: %s", logKey)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	if customerror.IsSilentError(err) {
+		return
 	}
+	if h.logger != nil {
+		h.logger.Rate(logKey).Error().Err(err).Msgf("Error streaming file: %s", logKey)
+	}
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 }

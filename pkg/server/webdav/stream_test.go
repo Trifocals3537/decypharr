@@ -2,16 +2,20 @@ package webdav
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
 )
@@ -26,6 +30,43 @@ func identityRequest(method, target, infohash, fileID string) *http.Request {
 	routeContext.URLParams.Add("name", "Movie.mkv")
 	ctx := context.WithValue(request.Context(), chi.RouteCtxKey, routeContext)
 	return request.WithContext(ctx)
+}
+
+func TestNormalizeStreamErrorUsesRetryableProviderSemantics(t *testing.T) {
+	providerErr := manager.StreamError{
+		Err:       link.NewRetryableError(errors.New("signed-url-secret"), "503"),
+		Retryable: true,
+	}
+	streamErr := normalizeStreamError(providerErr, false)
+	if streamErr.HTTPStatus() != http.StatusServiceUnavailable || !streamErr.IsRetryable() ||
+		streamErr.Code != "stream.provider_unavailable" {
+		t.Fatalf("normalized error = status %d retryable %v code %q",
+			streamErr.HTTPStatus(), streamErr.IsRetryable(), streamErr.Code)
+	}
+
+	handler := &Handler{}
+	response := httptest.NewRecorder()
+	handler.writeStreamError("movie", streamErr, response)
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("response = status %d Retry-After %q", response.Code, response.Header().Get("Retry-After"))
+	}
+	if body := response.Body.String(); body != "Service Unavailable\n" || strings.Contains(body, "signed-url-secret") {
+		t.Fatalf("unsafe response body = %q", body)
+	}
+}
+
+func TestNormalizeStreamErrorPreservesCustomStatusAndSilencesCancellation(t *testing.T) {
+	existing := customerror.NewArticleNotFoundError(errors.New("article missing"))
+	if got := normalizeStreamError(existing, false); got != existing || got.HTTPStatus() != http.StatusGone {
+		t.Fatalf("custom error was not preserved: %+v", got)
+	}
+
+	canceled := normalizeStreamError(context.Canceled, false)
+	response := httptest.NewRecorder()
+	(&Handler{}).writeStreamError("movie", canceled, response)
+	if response.Code != http.StatusOK || response.Body.Len() != 0 {
+		t.Fatalf("cancellation wrote response status/body = %d/%q", response.Code, response.Body.String())
+	}
 }
 
 func TestIdentityStreamAlwaysRequiresSignature(t *testing.T) {

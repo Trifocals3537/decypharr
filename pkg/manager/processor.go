@@ -488,6 +488,15 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		if providerName == "" {
 			providerName = "unnamed provider"
 		}
+		_logger := db.Logger()
+		if rejectionErr := m.cachedSubmissionRejection(providerName, importRequest.Magnet.InfoHash); rejectionErr != nil {
+			_logger.Warn().
+				Str("Provider", providerName).
+				Str("Hash", importRequest.Magnet.InfoHash).
+				Msg("Skipping provider during content-rejection cooldown")
+			errs = append(errs, fmt.Errorf("%s submission: %w", providerName, rejectionErr))
+			continue
+		}
 		overrideDownloadUncached := false
 
 		if importRequest.DownloadUncached != nil {
@@ -508,7 +517,6 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			Files:            make(map[string]debridTypes.File),
 			DownloadUncached: overrideDownloadUncached,
 		}
-		_logger := db.Logger()
 		_logger.Info().
 			Str("Provider", providerName).
 			Str("Arr", importRequest.Arr.Name).
@@ -521,6 +529,13 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		if err != nil || dbt == nil || dbt.Id == "" {
 			if err == nil {
 				err = fmt.Errorf("provider returned an incomplete submission response")
+			} else {
+				m.recordSubmissionRejection(
+					providerName,
+					importRequest.Magnet.InfoHash,
+					importRequest.Magnet.Name,
+					err,
+				)
 			}
 			errs = append(errs, fmt.Errorf("%s submission: %w", providerName, err))
 			continue
@@ -530,6 +545,12 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 
 		torrent, err := db.CheckStatus(dbt)
 		if err != nil {
+			m.recordSubmissionRejection(
+				providerName,
+				importRequest.Magnet.InfoHash,
+				importRequest.Magnet.Name,
+				err,
+			)
 			rollbackID := dbt.Id
 			if torrent != nil && torrent.Id != "" {
 				rollbackID = torrent.Id

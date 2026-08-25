@@ -307,14 +307,19 @@ func torrentAddErrorStatus(err error) (status int, idempotent bool) {
 		return http.StatusConflict, false
 	case onlyCustomErrorCode(err, "torrent_not_cached"):
 		return http.StatusConflict, false
+	case onlyCustomErrorCode(err, "torrent_content_rejected"):
+		return http.StatusUnprocessableEntity, false
 	default:
 		return http.StatusBadRequest, false
 	}
 }
 
 func writeTorrentAddError(w http.ResponseWriter, err error, status int) {
-	if onlyCustomErrorCode(err, "torrent_not_cached") {
-		w.Header().Set("X-Decypharr-Error-Code", "torrent_not_cached")
+	for _, code := range []string{"torrent_not_cached", "torrent_content_rejected"} {
+		if onlyCustomErrorCode(err, code) {
+			w.Header().Set("X-Decypharr-Error-Code", code)
+			break
+		}
 	}
 	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
 		w.Header().Set("Retry-After", "5")

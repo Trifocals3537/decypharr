@@ -113,6 +113,12 @@ type Manager struct {
 	streamProviderDegraded    atomic.Uint64
 	streamProviderRecoveries  atomic.Uint64
 
+	// Provider-scoped content-policy cooldowns prevent recurring Arr grabs
+	// from re-hitting a provider while preserving fallback to other providers.
+	submissionRejections        *submissionRejectionCache
+	submissionContentRejections atomic.Uint64
+	submissionRejectionHits     atomic.Uint64
+
 	// In-flight queue-processor dispatches, keyed by InfoHash, to prevent
 	// duplicate goroutines from processing the same entry when the scheduler
 	// re-fires before the previous pass has updated the queue row.
@@ -208,6 +214,7 @@ func New() *Manager {
 		streamProviderPreferences: xsync.NewMap[string, streamProviderPreference](),
 		streamProviderWeather:     newStreamProviderWeather(),
 		processingEntries:         xsync.NewMap[string, struct{}](),
+		submissionRejections:      newSubmissionRejectionCache(defaultSubmissionRejectionTTL, defaultSubmissionRejectionCapacity),
 		entryLifecycle:            entryLifecycle,
 	}
 

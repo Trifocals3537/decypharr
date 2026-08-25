@@ -315,6 +315,14 @@ When every eligible provider gives a definite cache miss, the endpoint returns
 (for example, a cache miss followed by a provider outage) are not mislabeled as
 an all-provider cache miss.
 
+When every eligible provider rejects the content permanently, the endpoint
+returns `422 Unprocessable Entity` with
+`X-Decypharr-Error-Code: torrent_content_rejected`. Real-Debrid HTTP 451
+responses use this outcome. Decypharr cools down that provider and info hash
+for 24 hours, so recurring Arr grabs do not repeatedly call the rejecting
+provider; other providers remain eligible. Cache misses and operational
+failures are never placed in this cooldown.
+
 ### POST /api/v2/torrents/delete
 
 Delete torrents (QBit format).
@@ -389,6 +397,10 @@ The authenticated `GET /debug/stats` response exposes a secret-free
 `cdn_traffic` snapshot with active and waiting request counts, adaptive limits,
 and throttle counters grouped by provider. API keys and download-account
 tokens are never included.
+
+The same response includes `torrent_admission`, an aggregate count of content
+rejections, submissions avoided by the bounded cooldown, active cooldowns, and
+the cooldown duration. It does not expose release names or info hashes.
 
 ## Examples
 

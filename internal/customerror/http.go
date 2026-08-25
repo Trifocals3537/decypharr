@@ -54,3 +54,16 @@ func NewTorrentNotCachedError(name string) *Error {
 		false,
 	).Retryable()
 }
+
+// NewTorrentContentRejectedError marks a provider content-policy rejection.
+// It is permanent for this submission, unlike a cache miss or an operational
+// provider failure, and can therefore be cooled down safely by admission.
+func NewTorrentContentRejectedError(name string) *Error {
+	return NewError(
+		fmt.Errorf("torrent %q was rejected by provider content policy", name),
+		http.StatusUnprocessableEntity,
+		"torrent_content_rejected",
+		false,
+		false,
+	).Permanent()
+}

@@ -22,6 +22,7 @@ var storeNames = []string{
 	"repair_runs",
 	"entry_tombstones",
 	"queue_tombstones",
+	"migration_cleanups",
 }
 
 // legacyStoreNames are buckets from the v1 repair system. They are removed
@@ -30,17 +31,18 @@ var legacyStoreNames = []string{"repair_jobs", "repair_keys"}
 
 // Storage handles persistence using HybridStore
 type Storage struct {
-	entries         *hybrid.Store
-	queue           *hybrid.Store
-	entryItems      *hybrid.Store
-	storageState    *hybrid.Store
-	repairState     *hybrid.Store
-	repairRuns      *hybrid.Store
-	entryTombstones *hybrid.Store
-	queueTombstones *hybrid.Store
-	mainEntries     *mainEntryLifecycle
-	dir             string
-	logger          zerolog.Logger
+	entries          *hybrid.Store
+	queue            *hybrid.Store
+	entryItems       *hybrid.Store
+	storageState     *hybrid.Store
+	repairState      *hybrid.Store
+	repairRuns       *hybrid.Store
+	entryTombstones  *hybrid.Store
+	queueTombstones  *hybrid.Store
+	migrationCleanup *hybrid.Store
+	mainEntries      *mainEntryLifecycle
+	dir              string
+	logger           zerolog.Logger
 
 	entryItemsMu        sync.Mutex
 	entryItemsDirty     bool
@@ -48,6 +50,7 @@ type Storage struct {
 	healthCountsMu      sync.Mutex
 	healthCounts        map[HealthStatus]int
 	healthCountsBuiltAt time.Time
+	migrationCleanupMu  sync.Mutex
 }
 
 func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hybrid.Store, error) {
@@ -103,17 +106,18 @@ func NewStorage(dbPath string) (*Storage, error) {
 	}
 
 	s := &Storage{
-		entries:         itemStores["entries"],
-		queue:           itemStores["queue"],
-		entryItems:      itemStores["items"],
-		storageState:    itemStores["storage_state"],
-		repairState:     itemStores["repair_state"],
-		repairRuns:      itemStores["repair_runs"],
-		entryTombstones: itemStores["entry_tombstones"],
-		queueTombstones: itemStores["queue_tombstones"],
-		mainEntries:     newMainEntryLifecycle(),
-		dir:             dbPath,
-		logger:          log,
+		entries:          itemStores["entries"],
+		queue:            itemStores["queue"],
+		entryItems:       itemStores["items"],
+		storageState:     itemStores["storage_state"],
+		repairState:      itemStores["repair_state"],
+		repairRuns:       itemStores["repair_runs"],
+		entryTombstones:  itemStores["entry_tombstones"],
+		queueTombstones:  itemStores["queue_tombstones"],
+		migrationCleanup: itemStores["migration_cleanups"],
+		mainEntries:      newMainEntryLifecycle(),
+		dir:              dbPath,
+		logger:           log,
 	}
 
 	needsEntryItemRecovery, err := s.beginEntryItemSession()
@@ -159,6 +163,7 @@ func (s *Storage) Close() error {
 		s.repairRuns,
 		s.entryTombstones,
 		s.queueTombstones,
+		s.migrationCleanup,
 	}
 	for _, store := range stores {
 		if store == nil {
@@ -186,6 +191,7 @@ func (s *Storage) DiskSize() int64 {
 		s.repairRuns,
 		s.entryTombstones,
 		s.queueTombstones,
+		s.migrationCleanup,
 	} {
 		if store != nil {
 			size += store.DiskSize()

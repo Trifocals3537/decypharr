@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -197,11 +198,6 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 		return false, fmt.Errorf("entry %s cannot be moved", entry.Name)
 	}
 
-	defer func() {
-		// Save to storage
-		_ = f.manager.AddOrUpdate(entry, nil) // No need to refresh mounts
-	}()
-
 	client := f.manager.ProviderClient(debridName)
 	if client == nil {
 		return false, fmt.Errorf("debrid client %s not found", debridName)
@@ -215,16 +211,13 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 			if err := entry.ActivatePlacement(debridName); err == nil {
 				entry.Bad = false
 				entry.UpdatedAt = time.Now()
+				if err := f.manager.AddOrUpdate(entry, nil); err != nil {
+					return false, fmt.Errorf("persist target placement %s: %w", debridName, err)
+				}
 				return true, nil
 			}
 			// Activation failed — fall through to a fresh submit.
 		}
-	}
-
-	// Capture the source provider's torrent ID for post-migration cleanup.
-	var oldID string
-	if source, ok := entry.Providers[entry.ActiveProvider]; ok && source != nil {
-		oldID = source.ID
 	}
 
 	// Construct magnet
@@ -252,34 +245,79 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 
 	newDebridTorrent, err = client.SubmitMagnet(newDebridTorrent)
 	if err != nil {
-		return false, fmt.Errorf("failed to submit magnet: %w", err)
+		submitErr := fmt.Errorf("failed to submit magnet: %w", err)
+		if newDebridTorrent != nil && newDebridTorrent.Id != "" {
+			cleanupErr := f.manager.deleteProviderTorrent(client, newDebridTorrent.Id)
+			if cleanupErr != nil {
+				cleanupErr = fmt.Errorf(
+					"roll back target placement %s/%s: %w",
+					debridName,
+					newDebridTorrent.Id,
+					cleanupErr,
+				)
+			}
+			return false, errors.Join(submitErr, cleanupErr)
+		}
+		return false, submitErr
 	}
 
 	if newDebridTorrent == nil || newDebridTorrent.Id == "" {
 		return false, fmt.Errorf("failed to submit magnet: empty entry")
+	}
+	submittedID := newDebridTorrent.Id
+	rollbackTarget := func(id string, cause error) error {
+		if id == "" {
+			id = submittedID
+		}
+		cleanupErr := f.manager.deleteProviderTorrent(client, id)
+		if cleanupErr != nil {
+			cleanupErr = fmt.Errorf("roll back target placement %s/%s: %w", debridName, id, cleanupErr)
+		}
+		return errors.Join(cause, cleanupErr)
 	}
 
 	// Check status
 	newDebridTorrent.DownloadUncached = false
 	newDebridTorrent, err = client.CheckStatus(newDebridTorrent)
 	if err != nil {
-		// Delete the failed entry
+		rollbackID := submittedID
 		if newDebridTorrent != nil && newDebridTorrent.Id != "" {
-			_ = client.DeleteTorrent(newDebridTorrent.Id)
+			rollbackID = newDebridTorrent.Id
 		}
-		return false, fmt.Errorf("failed to check status: %w", err)
+		return false, rollbackTarget(rollbackID, fmt.Errorf("failed to check status: %w", err))
+	}
+	if newDebridTorrent == nil {
+		return false, rollbackTarget(submittedID, fmt.Errorf("failed to check status: empty entry"))
+	}
+	if newDebridTorrent.Id == "" {
+		return false, rollbackTarget(submittedID, fmt.Errorf("failed to check status: empty torrent ID"))
+	}
+	if newDebridTorrent.Debrid == "" {
+		newDebridTorrent.Debrid = debridName
+	}
+	if newDebridTorrent.Debrid != debridName {
+		return false, rollbackTarget(newDebridTorrent.Id, fmt.Errorf(
+			"target provider mismatch: requested %s, received %s",
+			debridName,
+			newDebridTorrent.Debrid,
+		))
+	}
+	if newDebridTorrent.Status != types.TorrentStatusDownloaded {
+		return false, rollbackTarget(newDebridTorrent.Id, fmt.Errorf(
+			"target placement %s is not downloaded: %s",
+			debridName,
+			newDebridTorrent.Status,
+		))
 	}
 
 	// Verify files have links
 	if len(newDebridTorrent.Files) == 0 {
-		_ = client.DeleteTorrent(newDebridTorrent.Id)
-		return false, fmt.Errorf("no files in entry after re-insertion")
+		return false, rollbackTarget(newDebridTorrent.Id, fmt.Errorf("no files in entry after re-insertion"))
 	}
 
 	for _, f := range newDebridTorrent.GetFiles() {
 		if f.Link == "" && f.Id == "" {
-			_ = client.DeleteTorrent(newDebridTorrent.Id)
-			return false, fmt.Errorf("empty link/id for file %s", f.Name)
+			return false, rollbackTarget(newDebridTorrent.Id, fmt.Errorf("empty link/id for file %s", f.Name))
 		}
 	}
 
@@ -323,11 +361,12 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 	entry.Bad = false
 	entry.UpdatedAt = time.Now()
 
-	// Delete old entry from debrid if different ID
-	if oldID != "" && oldID != newDebridTorrent.Id {
-		go func() {
-			_ = client.DeleteTorrent(oldID)
-		}()
+	// The target must be durable before a migration caller is allowed to clean
+	// up its source placement. MoveTorrent never owns source deletion: repair
+	// callers intentionally retain their prior placement, while migration applies
+	// keep-old policy using the source provider's own client.
+	if err := f.manager.AddOrUpdate(entry, nil); err != nil {
+		return false, fmt.Errorf("persist target placement %s: %w", debridName, err)
 	}
 
 	return true, nil

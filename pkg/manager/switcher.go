@@ -61,9 +61,8 @@ func (m *Manager) executeMigration(job *storage.SwitcherJob, torrent *storage.En
 		Msg("Starting torrent migration")
 	job.Status = storage.SwitcherStatusInProgress
 
-	// GetReader target debrid client
-	targetClient := m.ProviderClient(job.TargetProvider)
-	if targetClient == nil {
+	// Verify the target client still exists before starting provider work.
+	if m.ProviderClient(job.TargetProvider) == nil {
 		job.Status = storage.SwitcherStatusFailed
 		job.Error = fmt.Sprintf("target debrid %s not found", job.TargetProvider)
 		job.CompletedAt = new(time.Now())
@@ -86,23 +85,46 @@ func (m *Manager) executeMigration(job *storage.SwitcherJob, torrent *storage.En
 		return
 	}
 
-	// Handle source placement
-	// This removes the old placement
+	// MoveTorrent has durably activated the target. Source cleanup is a separate
+	// phase owned by the source provider client and controlled by keep-old.
 	if !job.KeepOld {
-		// Archive and optionally delete from source
-		// Find source placement for this debrid
-		var sourcePlacement *storage.ProviderEntry
-		for _, p := range torrent.Providers {
-			if p.Provider == job.SourceProvider {
-				sourcePlacement = p
-				break
+		sourcePlacement := torrent.Providers[job.SourceProvider]
+		if sourcePlacement == nil {
+			// Retain compatibility with older rows whose map key did not match
+			// the configured provider name.
+			for _, placement := range torrent.Providers {
+				if placement != nil && placement.Provider == job.SourceProvider {
+					sourcePlacement = placement
+					break
+				}
 			}
 		}
 
 		if sourcePlacement != nil {
-			torrent.RemoveProvider(job.SourceProvider, func(placement *storage.ProviderEntry) error {
-				return m.RemoveFromProvider(placement)
-			})
+			sourceClient := m.ProviderClient(job.SourceProvider)
+			if sourceClient == nil {
+				job.Status = storage.SwitcherStatusFailed
+				job.Error = fmt.Sprintf("source debrid %s not found after target activation", job.SourceProvider)
+				job.CompletedAt = new(time.Now())
+				m.logger.Error().
+					Str("job_id", job.ID).
+					Str("source", job.SourceProvider).
+					Msg("Target activated, but source client is unavailable")
+				return
+			}
+			if err := m.deleteProviderTorrent(sourceClient, sourcePlacement.ID); err != nil {
+				job.Status = storage.SwitcherStatusFailed
+				job.Error = fmt.Sprintf("failed to remove source placement %s/%s: %v", job.SourceProvider, sourcePlacement.ID, err)
+				job.CompletedAt = new(time.Now())
+				m.logger.Error().
+					Err(err).
+					Str("job_id", job.ID).
+					Str("source", job.SourceProvider).
+					Str("torrent_id", sourcePlacement.ID).
+					Msg("Target activated, but source cleanup failed")
+				return
+			}
+			torrent.RemoveProvider(job.SourceProvider)
 		}
 	}
 

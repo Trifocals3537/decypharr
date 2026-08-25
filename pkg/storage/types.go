@@ -346,12 +346,16 @@ func (e *Entry) ActivatePlacement(debridName string) error {
 		return ErrPlacementNotFound
 	}
 
-	// Find any providerEntry with this debrid name
-	var foundPlacement *ProviderEntry
-	for _, providerEntry := range e.Providers {
-		if providerEntry.Provider == debridName {
-			foundPlacement = providerEntry
-			break
+	// The map key is the configured account identity. Prefer it so two accounts
+	// of the same provider type can never activate one another by accident.
+	foundPlacement := e.Providers[debridName]
+	if foundPlacement == nil {
+		// Retain compatibility with older rows whose key and provider name differ.
+		for _, providerEntry := range e.Providers {
+			if providerEntry != nil && providerEntry.Provider == debridName {
+				foundPlacement = providerEntry
+				break
+			}
 		}
 	}
 
@@ -369,20 +373,22 @@ func (e *Entry) ActivatePlacement(debridName string) error {
 	return nil
 }
 
-// RemoveProvider deletes a debrid torrent from the debrid itself
-func (e *Entry) RemoveProvider(debridName string, cleanup func(providerEntry *ProviderEntry) error) {
+// RemoveProvider removes local placements for one configured provider. Remote
+// cleanup belongs to the manager layer so provider errors cannot be discarded
+// while durable state is removed.
+func (e *Entry) RemoveProvider(debridName string) {
 	if e.Providers == nil {
 		return
 	}
 
 	// Find and remove all placements with this debrid name
 	var keysToDelete []string
-	var placementsToCleanup []*ProviderEntry
 
 	for key, providerEntry := range e.Providers {
-		if providerEntry.Provider == debridName {
+		// Current rows use the configured provider name as both key and value.
+		// Accept either identity so older rows can still be cleaned up safely.
+		if key == debridName || (providerEntry != nil && providerEntry.Provider == debridName) {
 			keysToDelete = append(keysToDelete, key)
-			placementsToCleanup = append(placementsToCleanup, providerEntry)
 		}
 	}
 
@@ -394,13 +400,6 @@ func (e *Entry) RemoveProvider(debridName string, cleanup func(providerEntry *Pr
 	// If the providerEntry is the active providerEntry, find a new active providerEntry
 	if e.ActiveProvider == debridName {
 		e.SwitchToNextProvider()
-	}
-
-	// Call cleanup function for each providerEntry if provided
-	if cleanup != nil {
-		for _, providerEntry := range placementsToCleanup {
-			_ = cleanup(providerEntry)
-		}
 	}
 }
 

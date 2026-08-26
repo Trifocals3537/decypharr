@@ -173,6 +173,8 @@ func TestConcurrentPlaybackDoesNotDuplicateHalfOpenProbe(t *testing.T) {
 		} else {
 			fallbackRequests.Add(1)
 		}
+		w.Header().Set("Content-Length", "4")
+		w.Header().Set("Content-Range", "bytes 0-3/4")
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = w.Write([]byte("data"))
 	}))

@@ -52,6 +52,8 @@ func TestStreamRefreshesRejectedLinkBeforeWritingBytes(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 		case "/new":
 			newRequests.Add(1)
+			w.Header().Set("Content-Length", "4")
+			w.Header().Set("Content-Range", "bytes 0-3/4")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write([]byte("data"))
 		default:
@@ -95,6 +97,8 @@ func TestStreamThrottleRetriesSameLink(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
+		w.Header().Set("Content-Length", "4")
+		w.Header().Set("Content-Range", "bytes 0-3/4")
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = w.Write([]byte("data"))
 	}))
@@ -185,7 +189,7 @@ func TestStreamDoesNotRefreshOrReplayAfterBytesAreWritten(t *testing.T) {
 		requests.Add(1)
 		return &http.Response{
 			StatusCode:    http.StatusPartialContent,
-			Header:        make(http.Header),
+			Header:        http.Header{"Content-Range": []string{"bytes 0-3/4"}},
 			Body:          &failingBody{},
 			ContentLength: 4,
 		}, nil

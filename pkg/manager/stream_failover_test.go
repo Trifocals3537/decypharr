@@ -165,6 +165,8 @@ func TestStreamFailsOverBeforeReadyAndReusesSuccessfulPreference(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		case "/fallback":
 			fallbackRequests.Add(1)
+			w.Header().Set("Content-Length", "4")
+			w.Header().Set("Content-Range", "bytes 0-3/4")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write([]byte("data"))
 		default:
@@ -276,6 +278,7 @@ func TestStreamPreservesRangeAcrossProviderFailover(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		w.Header().Set("Content-Length", "2")
 		w.Header().Set("Content-Range", "bytes 1-2/4")
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = w.Write([]byte("at"))
@@ -319,6 +322,14 @@ func TestStreamFailsOverBeforeCommitOnInvalidUpstreamRange(t *testing.T) {
 			},
 		},
 		{
+			name: "missing content range",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "2")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("at"))
+			},
+		},
+		{
 			name: "mismatched bounds",
 			response: func(w http.ResponseWriter) {
 				w.Header().Set("Content-Range", "bytes 0-1/4")
@@ -343,6 +354,15 @@ func TestStreamFailsOverBeforeCommitOnInvalidUpstreamRange(t *testing.T) {
 				_, _ = w.Write([]byte("at"))
 			},
 		},
+		{
+			name: "known short body",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "1")
+				w.Header().Set("Content-Range", "bytes 1-2/4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("a"))
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -356,6 +376,7 @@ func TestStreamFailsOverBeforeCommitOnInvalidUpstreamRange(t *testing.T) {
 					test.response(w)
 				case "/fallback":
 					fallbackRequests.Add(1)
+					w.Header().Set("Content-Length", "2")
 					w.Header().Set("Content-Range", "bytes 1-2/4")
 					w.WriteHeader(http.StatusPartialContent)
 					_, _ = w.Write([]byte("at"))
@@ -396,6 +417,108 @@ func TestStreamFailsOverBeforeCommitOnInvalidUpstreamRange(t *testing.T) {
 	}
 }
 
+func TestStreamValidatesFullResponseFramingBeforeCommit(t *testing.T) {
+	tests := []struct {
+		name     string
+		response func(http.ResponseWriter)
+	}{
+		{
+			name: "mismatched full range",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Range", "bytes 0-3/99")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("data"))
+			},
+		},
+		{
+			name: "missing full range",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("data"))
+			},
+		},
+		{
+			name: "known short full body",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "3")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("dat"))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/primary":
+					test.response(w)
+				case "/fallback":
+					w.Header().Set("Content-Length", "4")
+					w.Header().Set("Content-Range", "bytes 0-3/4")
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = w.Write([]byte("data"))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+				"primary":  {DownloadLink: server.URL + "/primary"},
+				"fallback": {DownloadLink: server.URL + "/fallback"},
+			}}
+			manager := newStreamFailoverTestManager(links, server.Client(), "primary", "fallback")
+			entry := streamFailoverEntry("primary", "fallback")
+			var output bytes.Buffer
+			readyCalls := 0
+			if err := manager.Stream(context.Background(), entry, "video.mkv", 0, -1, &output, func(*StreamMetadata) error {
+				readyCalls++
+				return nil
+			}, "test"); err != nil {
+				t.Fatalf("Stream() error = %v", err)
+			}
+			if output.String() != "data" || readyCalls != 1 {
+				t.Fatalf("output/ready = %q/%d, want clean full fallback", output.String(), readyCalls)
+			}
+			if got, want := links.callOrder(), []string{"primary", "fallback"}; !slices.Equal(got, want) {
+				t.Fatalf("provider calls = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestStreamPreservesFirstByteRange(t *testing.T) {
+	var gotRange string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		w.Header().Set("Content-Length", "1")
+		w.Header().Set("Content-Range", "bytes 0-0/4")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("d"))
+	}))
+	defer server.Close()
+
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: server.URL},
+	}}
+	manager := newStreamFailoverTestManager(links, server.Client(), "primary")
+	entry := streamFailoverEntry("primary")
+	var output bytes.Buffer
+	var metadata *StreamMetadata
+	if err := manager.Stream(context.Background(), entry, "video.mkv", 0, 0, &output, func(got *StreamMetadata) error {
+		metadata = got
+		return nil
+	}, "test"); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if gotRange != "bytes=0-0" || output.String() != "d" || metadata == nil ||
+		metadata.Header.Get("Content-Range") != "bytes 0-0/4" {
+		t.Fatalf("range/output/metadata = %q/%q/%+v, want first-byte partial response", gotRange, output.String(), metadata)
+	}
+}
+
 func TestStreamUsesFullActiveRecoveryOnlyAfterAlternateFailure(t *testing.T) {
 	var primaryRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -405,6 +528,8 @@ func TestStreamUsesFullActiveRecoveryOnlyAfterAlternateFailure(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
+			w.Header().Set("Content-Length", "4")
+			w.Header().Set("Content-Range", "bytes 0-3/4")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write([]byte("data"))
 		case "/fallback":
@@ -456,7 +581,7 @@ func TestStreamFailsOverWhenBodyFailsBeforeFirstByte(t *testing.T) {
 		}
 		return &http.Response{
 			StatusCode:    http.StatusPartialContent,
-			Header:        make(http.Header),
+			Header:        http.Header{"Content-Range": []string{"bytes 0-3/4"}},
 			Body:          body,
 			ContentLength: 4,
 			Request:       req,
@@ -512,7 +637,7 @@ func TestStreamNeverFailsOverAfterResponseCommitment(t *testing.T) {
 		}
 		return &http.Response{
 			StatusCode:    http.StatusPartialContent,
-			Header:        make(http.Header),
+			Header:        http.Header{"Content-Range": []string{"bytes 0-3/4"}},
 			Body:          body,
 			ContentLength: 4,
 			Request:       req,
@@ -562,6 +687,8 @@ func TestConcurrentStreamFailoverIsRaceSafe(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		w.Header().Set("Content-Length", "4")
+		w.Header().Set("Content-Range", "bytes 0-3/4")
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = w.Write([]byte("data"))
 	}))

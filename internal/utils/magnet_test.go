@@ -2,6 +2,8 @@ package utils
 
 import (
 	"context"
+	"encoding/base32"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -146,6 +148,61 @@ func TestGetMagnetFromUrl_MagnetLink_StripFalse(t *testing.T) {
 
 	checkMagnet(t, magnet, expectedInfoHash, expectedName, expectedLink, expectedTrackerCount, false)
 	t.Logf("Generated magnet link with trackers: %s", magnet.Link)
+}
+
+func TestGetMagnetFromURLContextAcceptsRawInfoHashes(t *testing.T) {
+	t.Parallel()
+
+	const expectedInfoHash = "8a19577fb5f690970ca43a57ff1011ae202244b8"
+	decoded, err := hex.DecodeString(expectedInfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base32Hash := base32.StdEncoding.EncodeToString(decoded)
+
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{name: "uppercase hex", source: "  " + strings.ToUpper(expectedInfoHash) + "  "},
+		{name: "base32", source: strings.ToLower(base32Hash)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			magnet, err := GetMagnetFromURLContext(
+				context.Background(),
+				test.source,
+				false,
+				MaxMetadataFileBytes,
+			)
+			if err != nil {
+				t.Fatalf("GetMagnetFromURLContext failed: %v", err)
+			}
+
+			checkMagnet(
+				t,
+				magnet,
+				expectedInfoHash,
+				"",
+				"magnet:?xt=urn:btih:"+expectedInfoHash,
+				0,
+				false,
+			)
+		})
+	}
+}
+
+func TestGetMagnetFromURLContextRejectsInvalidTorrentSource(t *testing.T) {
+	t.Parallel()
+
+	_, err := GetMagnetFromURLContext(
+		context.Background(),
+		"not-a-torrent-source",
+		false,
+		MaxMetadataFileBytes,
+	)
+	if err == nil || err.Error() != "invalid torrent URL or infohash" {
+		t.Fatalf("expected a generic invalid source error, got %v", err)
+	}
 }
 
 // testMagnetFromHttpTorrent is a helper function for tests that use GetMagnetFromUrl with HTTP torrent links

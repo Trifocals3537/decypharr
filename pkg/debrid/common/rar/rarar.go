@@ -145,6 +145,7 @@ func (f *HttpFile) getFileSizeFromHEAD() (int64, bool, error) {
 			utils.RedactedURL(f.URL),
 		)
 	}
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -157,6 +158,11 @@ func (f *HttpFile) getFileSizeFromHEAD() (int64, bool, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
+		if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+			// The returned length describes a different representation than the
+			// identity-encoded byte ranges used by the archive reader.
+			return 0, false, nil
+		}
 		contentLength := strings.TrimSpace(resp.Header.Get("Content-Length"))
 		if contentLength == "" {
 			return 0, false, nil
@@ -332,6 +338,9 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 			bytesRead, err := io.ReadFull(resp.Body, p)
 			return bytesRead, err
 		case http.StatusOK:
+			if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+				return 0, fmt.Errorf("%w: full response returned content encoding %q", ErrNetworkError, encoding)
+			}
 			// A 200 response normally means the origin ignored Range. Reading
 			// the whole object here can allocate the complete media file and
 			// repeated ReaderAt calls would download it over and over. Accept

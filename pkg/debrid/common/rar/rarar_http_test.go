@@ -44,11 +44,14 @@ func TestHTTPFileReadAtRequiresExactContentRange(t *testing.T) {
 
 func TestHTTPFileSizeFallsBackToStrictRangeProbe(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		headStatus int
+		name         string
+		headStatus   int
+		headLength   string
+		headEncoding string
 	}{
 		{name: "HEAD rejected", headStatus: http.StatusMethodNotAllowed},
 		{name: "HEAD length missing", headStatus: http.StatusOK},
+		{name: "HEAD encoded", headStatus: http.StatusOK, headLength: "7", headEncoding: "gzip"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var headRequests atomic.Int32
@@ -57,6 +60,15 @@ func TestHTTPFileSizeFallsBackToStrictRangeProbe(t *testing.T) {
 				switch r.Method {
 				case http.MethodHead:
 					headRequests.Add(1)
+					if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+						t.Errorf("HEAD Accept-Encoding = %q, want identity", got)
+					}
+					if test.headLength != "" {
+						w.Header().Set("Content-Length", test.headLength)
+					}
+					if test.headEncoding != "" {
+						w.Header().Set("Content-Encoding", test.headEncoding)
+					}
 					w.WriteHeader(test.headStatus)
 				case http.MethodGet:
 					getRequests.Add(1)
@@ -99,6 +111,9 @@ func TestHTTPFileSizeKeepsSuccessfulHEADFastPath(t *testing.T) {
 	var getRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
+			if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+				t.Errorf("HEAD Accept-Encoding = %q, want identity", got)
+			}
 			w.Header().Set("Content-Length", "10")
 			return
 		}
@@ -114,6 +129,26 @@ func TestHTTPFileSizeKeepsSuccessfulHEADFastPath(t *testing.T) {
 	}
 	if size != 10 || getRequests.Load() != 0 {
 		t.Fatalf("size/GET requests = %d/%d, want 10/0", size, getRequests.Load())
+	}
+}
+
+func TestHTTPFileReadAtRejectsEncodedWholeFileResponse(t *testing.T) {
+	const contents = "small"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, contents)
+	}))
+	defer server.Close()
+
+	file := &HttpFile{
+		URL:        server.URL,
+		client:     server.Client(),
+		FileSize:   int64(len(contents)),
+		MaxRetries: 0,
+	}
+	if _, err := file.ReadAt(make([]byte, len(contents)), 0); !errors.Is(err, ErrNetworkError) {
+		t.Fatalf("ReadAt() error = %v, want encoded-response rejection", err)
 	}
 }
 

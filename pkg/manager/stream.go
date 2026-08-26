@@ -388,6 +388,12 @@ func (m *Manager) streamHTTPFromCandidate(
 			}
 		}
 
+		isPartial := expectedLen > 0 && (start > 0 || end < fileSize-1)
+		if integrityErr := validateStreamResponseIntegrity(resp, start, end, fileSize, isPartial); integrityErr != nil {
+			resp.Body.Close()
+			return false, StreamError{Err: integrityErr, Retryable: true}
+		}
+
 		var header http.Header
 		if onReady != nil {
 			header = resp.Header.Clone()
@@ -398,7 +404,6 @@ func (m *Manager) streamHTTPFromCandidate(
 			ContentLength: resp.ContentLength,
 		}
 
-		isPartial := expectedLen > 0 && (start > 0 || end < fileSize-1)
 		if expectedLen > 0 {
 			meta.ContentLength = expectedLen
 			if header != nil {
@@ -616,6 +621,42 @@ func normalizeStreamRange(size, start, end int64) (int64, int64, error) {
 		return 0, 0, fmt.Errorf("invalid byte range %d-%d", start, end)
 	}
 	return start, end, nil
+}
+
+// validateStreamResponseIntegrity rejects upstream representations that cannot
+// safely satisfy the exact bytes requested by a media client. This runs before
+// response headers or body bytes are committed, leaving provider failover safe.
+func validateStreamResponseIntegrity(resp *http.Response, start, end, fileSize int64, partial bool) error {
+	if resp == nil {
+		return fmt.Errorf("upstream returned no response")
+	}
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return fmt.Errorf("upstream returned unexpected content encoding %q", encoding)
+	}
+	if !partial {
+		return nil
+	}
+	if resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("upstream ignored required byte range %d-%d with status %d", start, end, resp.StatusCode)
+	}
+
+	actualStart, actualEnd, actualTotal, err := parseTorrentContentRange(resp.Header.Get("Content-Range"))
+	if err != nil {
+		return fmt.Errorf("invalid upstream Content-Range: %w", err)
+	}
+	if actualStart != start || actualEnd != end {
+		return fmt.Errorf(
+			"upstream Content-Range %d-%d does not match requested range %d-%d",
+			actualStart,
+			actualEnd,
+			start,
+			end,
+		)
+	}
+	if actualTotal != fileSize {
+		return fmt.Errorf("upstream Content-Range total %d does not match file size %d", actualTotal, fileSize)
+	}
+	return nil
 }
 
 func (m *Manager) doRequest(

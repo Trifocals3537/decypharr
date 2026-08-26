@@ -306,6 +306,96 @@ func TestStreamPreservesRangeAcrossProviderFailover(t *testing.T) {
 	}
 }
 
+func TestStreamFailsOverBeforeCommitOnInvalidUpstreamRange(t *testing.T) {
+	tests := []struct {
+		name     string
+		response func(http.ResponseWriter)
+	}{
+		{
+			name: "ignored range",
+			response: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("data"))
+			},
+		},
+		{
+			name: "mismatched bounds",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Range", "bytes 0-1/4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("da"))
+			},
+		},
+		{
+			name: "mismatched total",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Range", "bytes 1-2/99")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("at"))
+			},
+		},
+		{
+			name: "encoded representation",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Encoding", "gzip")
+				w.Header().Set("Content-Range", "bytes 1-2/4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("at"))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var primaryRequests atomic.Int32
+			var fallbackRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/primary":
+					primaryRequests.Add(1)
+					test.response(w)
+				case "/fallback":
+					fallbackRequests.Add(1)
+					w.Header().Set("Content-Range", "bytes 1-2/4")
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = w.Write([]byte("at"))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+				"primary":  {DownloadLink: server.URL + "/primary"},
+				"fallback": {DownloadLink: server.URL + "/fallback"},
+			}}
+			manager := newStreamFailoverTestManager(links, server.Client(), "primary", "fallback")
+			entry := streamFailoverEntry("primary", "fallback")
+			var output bytes.Buffer
+			var metadata *StreamMetadata
+			readyCalls := 0
+			err := manager.Stream(context.Background(), entry, "video.mkv", 1, 2, &output, func(got *StreamMetadata) error {
+				readyCalls++
+				metadata = got
+				return nil
+			}, "test")
+			if err != nil {
+				t.Fatalf("Stream() error = %v", err)
+			}
+			if output.String() != "at" || readyCalls != 1 || metadata == nil ||
+				metadata.Header.Get("Content-Range") != "bytes 1-2/4" {
+				t.Fatalf("output/ready/metadata = %q/%d/%+v, want clean ranged fallback", output.String(), readyCalls, metadata)
+			}
+			if got, want := links.callOrder(), []string{"primary", "fallback"}; !slices.Equal(got, want) {
+				t.Fatalf("provider calls = %v, want %v", got, want)
+			}
+			if primaryRequests.Load() != 1 || fallbackRequests.Load() != 1 {
+				t.Fatalf("primary/fallback requests = %d/%d, want 1/1", primaryRequests.Load(), fallbackRequests.Load())
+			}
+		})
+	}
+}
+
 func TestStreamUsesFullActiveRecoveryOnlyAfterAlternateFailure(t *testing.T) {
 	var primaryRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

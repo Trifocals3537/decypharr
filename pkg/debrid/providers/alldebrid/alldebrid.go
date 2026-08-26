@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -33,6 +34,9 @@ type AllDebrid struct {
 	Profile               *types.Profile `json:"profile"`
 	logger                zerolog.Logger
 	config                config.Debrid
+	restartMu             sync.Mutex
+	restartStates         map[string]magnetRestartState
+	restartNow            func() time.Time
 }
 
 const (
@@ -82,6 +86,8 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*AllDebrid,
 		repairClient:          request.New(repairOpts...),
 		logger:                _log,
 		config:                dc,
+		restartStates:         make(map[string]magnetRestartState),
+		restartNow:            time.Now,
 	}
 	return ad, nil
 }
@@ -408,20 +414,25 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 }
 
 func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
+	_, err := ad.updateTorrent(t)
+	return err
+}
+
+func (ad *AllDebrid) updateTorrent(t *types.Torrent) (int, error) {
 	var res TorrentInfoResponse
 
 	resp, err := ad.doRequest("/magnet/status", map[string]string{"id": t.Id}, &res)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("alldebrid API error: Status: %d", resp.StatusCode)
+		return 0, fmt.Errorf("alldebrid API error: Status: %d", resp.StatusCode)
 	}
 
 	data, err := findMagnet(res.Data.Magnets, t.Id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	status := getAlldebridStatus(data.StatusCode)
 	name := data.Filename
@@ -440,7 +451,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 		t.Progress = 100
 		files, err := ad.flattenFiles(t.Id, data.Files)
 		if err != nil {
-			return err
+			return data.StatusCode, err
 		}
 		t.Files = files
 	} else {
@@ -449,7 +460,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 		}
 		t.Speed = data.DownloadSpeed
 	}
-	return nil
+	return data.StatusCode, nil
 }
 
 func findMagnet(magnets Magnets, torrentId string) (magnetInfo, error) {
@@ -464,13 +475,14 @@ func findMagnet(magnets Magnets, torrentId string) (magnetInfo, error) {
 
 func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 	for {
-		err := ad.UpdateTorrent(torrent)
+		statusCode, err := ad.updateTorrent(torrent)
 
 		if err != nil || torrent == nil {
 			return torrent, err
 		}
 		switch torrent.Status {
 		case types.TorrentStatusDownloaded:
+			ad.clearMagnetRestart(torrent.Id)
 			ad.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
 			return torrent, nil
 		case types.TorrentStatusDownloading:
@@ -479,9 +491,16 @@ func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error)
 			}
 			return torrent, nil
 		case types.TorrentStatusError:
-			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			if statusCode == allDebridStatusNotDownloaded && !torrent.DownloadUncached {
+				return torrent, customerror.NewTorrentNotCachedError(torrent.Name)
+			}
+			if statusCode == allDebridStatusNotDownloaded {
+				return ad.recoverNotDownloadedTorrent(torrent)
+			}
+			ad.clearMagnetRestart(torrent.Id)
+			return torrent, newAllDebridStatusError(torrent.Name, statusCode)
 		default:
-			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			return torrent, newAllDebridStatusError(torrent.Name, statusCode)
 		}
 	}
 }

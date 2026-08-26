@@ -14,6 +14,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
 // handleAPI is the main handler for all SABnzbd API requests
@@ -320,6 +321,7 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 	var downloadedBytes int64
 	resourceLimitFailure := false
 	admissionFailureStatus := 0
+	failures := sabAddFailureSummary{}
 
 	for rawURL := range strings.SplitSeq(urls, "\n") {
 		rawURL = strings.TrimSpace(rawURL)
@@ -333,6 +335,7 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 		)
 		if maxBytes <= 0 {
 			resourceLimitFailure = true
+			failures.record(utils.ErrContentTooLarge)
 			importErrors = append(importErrors, "NZB URLs exceed the aggregate byte limit")
 			continue
 		}
@@ -343,6 +346,7 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 		}
 		downloadedBytes += contentBytes
 		if err != nil {
+			failures.record(err)
 			safeURL := utils.RedactedURL(rawURL)
 			if errors.Is(err, utils.ErrContentTooLarge) {
 				resourceLimitFailure = true
@@ -376,6 +380,10 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 		} else if admissionFailureStatus != 0 {
 			status = admissionFailureStatus
 			setSABRetryAfter(w, status)
+		}
+		if status == http.StatusInternalServerError && failures.allReleaseRejected() {
+			s.writeReleaseRejected(w)
+			return
 		}
 		s.writeError(w, errMsg, status)
 		return
@@ -447,6 +455,7 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 	var uploadedBytes int64
 	resourceLimitFailure := false
 	admissionFailureStatus := 0
+	failures := sabAddFailureSummary{}
 
 	// Try to get multiple files from "name" field
 	if r.MultipartForm != nil && r.MultipartForm.File != nil {
@@ -472,6 +481,7 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 			)
 			if maxBytes <= 0 || fileHeader.Size > maxBytes {
 				resourceLimitFailure = true
+				failures.record(utils.ErrContentTooLarge)
 				importErrors = append(
 					importErrors,
 					fmt.Sprintf("File %s exceeds the upload byte limit", fileHeader.Filename),
@@ -481,6 +491,7 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 
 			content, err := readNZBUpload(fileHeader, maxBytes)
 			if err != nil {
+				failures.record(err)
 				if errors.Is(err, utils.ErrContentTooLarge) {
 					resourceLimitFailure = true
 				}
@@ -495,6 +506,7 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 			// Parse NZB file
 			nzbID, err := s.addNZBFile(ctx, content, fileHeader.Filename, _arr, action)
 			if err != nil {
+				failures.record(err)
 				if status := sabAdmissionErrorStatus(err); status != 0 {
 					admissionFailureStatus = status
 				}
@@ -528,6 +540,10 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 		// Parse NZB file
 		nzbID, err := s.addNZBFile(ctx, content, header.Filename, _arr, action)
 		if err != nil {
+			if isSABReleaseRejection(err) {
+				s.writeReleaseRejected(w)
+				return
+			}
 			status := http.StatusInternalServerError
 			if admissionStatus := sabAdmissionErrorStatus(err); admissionStatus != 0 {
 				status = admissionStatus
@@ -552,6 +568,10 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 		} else if admissionFailureStatus != 0 {
 			status = admissionFailureStatus
 			setSABRetryAfter(w, status)
+		}
+		if status == http.StatusInternalServerError && failures.allReleaseRejected() {
+			s.writeReleaseRejected(w)
+			return
 		}
 		s.writeError(w, errMsg, status)
 		return
@@ -697,6 +717,42 @@ func setSABRetryAfter(w http.ResponseWriter, status int) {
 		status == http.StatusServiceUnavailable {
 		w.Header().Set("Retry-After", "5")
 	}
+}
+
+type sabAddFailureSummary struct {
+	total             int
+	releaseRejections int
+}
+
+func (f *sabAddFailureSummary) record(err error) {
+	if err == nil {
+		return
+	}
+	f.total++
+	if isSABReleaseRejection(err) {
+		f.releaseRejections++
+	}
+}
+
+func (f sabAddFailureSummary) allReleaseRejected() bool {
+	return f.total > 0 && f.releaseRejections == f.total
+}
+
+func isSABReleaseRejection(err error) bool {
+	return errors.Is(err, parser.ErrNZBArticlesUnavailable)
+}
+
+// writeReleaseRejected keeps the SAB HTTP transport healthy while returning
+// no accepted IDs. Sonarr and Radarr map this exact shape to
+// DownloadClientRejectedReleaseException, so automatic searches continue to
+// another candidate instead of parking every remaining result as "download
+// client unavailable".
+func (s *SABnzbd) writeReleaseRejected(w http.ResponseWriter) {
+	utils.JSONResponse(w, AddNZBResponse{
+		Status: true,
+		NzoIds: make([]string, 0),
+		Error:  "NZB rejected because required articles are unavailable",
+	}, http.StatusOK)
 }
 
 func (s *SABnzbd) addNZBURL(

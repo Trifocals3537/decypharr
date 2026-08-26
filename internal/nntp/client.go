@@ -1233,13 +1233,27 @@ func excludeForArticleNotFound(exclusions *providerExclusions, provider config.U
 	exclusions.excludeHost(provider.Host)
 }
 
-// BatchStat checks the availability of many message IDs using NNTP STAT. Each
-// worker holds one repair-bank token for its lifetime, so the total number of
-// concurrent NNTP connections used by all in-flight BatchStat calls never
-// exceeds the bank's capacity. When the client has no bank configured, a small
-// default worker count is used. Does NOT fail-fast: every chunk is processed so
-// the caller sees complete per-segment visibility.
+// BatchStat checks message IDs using NNTP STAT and stops remaining chunks after
+// the first article proven missing from every provider. This is the efficient
+// path for availability gates where any missing sample is terminal.
 func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStatResult, error) {
+	return c.batchStat(ctx, messageIDs, true)
+}
+
+// BatchStatAll checks every message ID and returns complete per-article
+// visibility. It shares the same bounded repair bank as BatchStat, but does not
+// cancel remaining chunks when one article is missing. Admission parsers use
+// this to distinguish an entirely unavailable NZB from one containing a mix of
+// available and unavailable files.
+func (c *Client) BatchStatAll(ctx context.Context, messageIDs []string) (*BatchStatResult, error) {
+	return c.batchStat(ctx, messageIDs, false)
+}
+
+func (c *Client) batchStat(
+	ctx context.Context,
+	messageIDs []string,
+	stopOnMissing bool,
+) (*BatchStatResult, error) {
 	if c.closed.Load() {
 		return nil, errors.New("nntp client is closed")
 	}
@@ -1318,11 +1332,8 @@ func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStat
 			// Per-segment provider failover has already completed inside
 			// this chunk before we get here, so this never short-circuits
 			// failover.
-			for _, r := range results {
-				if !r.Available && IsArticleNotFoundError(r.Error) {
-					bailOnce.Do(cancel)
-					break
-				}
+			if shouldStopBatchStat(stopOnMissing, results) {
+				bailOnce.Do(cancel)
 			}
 		})
 		if err != nil {
@@ -1356,6 +1367,18 @@ func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStat
 		result.ErrorCount++
 	}
 	return result, nil
+}
+
+func shouldStopBatchStat(stopOnMissing bool, results []StatResult) bool {
+	if !stopOnMissing {
+		return false
+	}
+	for _, result := range results {
+		if !result.Available && IsArticleNotFoundError(result.Error) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) batchStatAcrossProviders(ctx context.Context, messageIDs []string) ([]StatResult, error) {

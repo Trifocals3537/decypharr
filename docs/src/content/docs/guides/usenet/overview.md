@@ -224,6 +224,13 @@ Arrs send NZB files to Decypharr via the Sabnzbd API endpoint:
 
 See [Sabnzbd Integration](./sabnzbd/) for details.
 
+If every configured provider reports that a required article is missing during
+NZB admission, Decypharr reports a release rejection through the SAB-compatible
+response. Sonarr and Radarr can then continue to another search result instead
+of treating Decypharr as unavailable. Transient connection, timeout,
+authentication, and server errors remain download-client failures so the Arr
+can retry them later.
+
 ## Troubleshooting
 
 ### Connection Failures

@@ -47,6 +47,7 @@ type contentResult struct {
 	file           nzbparser.NzbFile
 	fileType       storage.NZBFileType
 	actualFilename string
+	err            error
 	fileSize       int64 // decoded size of the part (from yEnc), if available
 	segmentSize    int64 // decoded size of a segment (from yEnc), if available
 	partNumber     int64 // yEnc part number, if available
@@ -142,9 +143,12 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 		Password: raw.Meta["password"],
 	}
 	// Group files by base Name and type
-	fileGroups := p.groupFiles(ctx, raw.Files)
+	fileGroups, detectionErr := p.groupFiles(ctx, raw.Files)
 
 	if len(fileGroups) == 0 {
+		if detectionErr != nil {
+			return nil, nil, detectionErr
+		}
 		return nil, nil, fmt.Errorf("no valid file groups found in NZB")
 	}
 
@@ -160,6 +164,9 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 			return statErr
 		})
 		if err != nil {
+			if nntp.IsArticleNotFoundError(err) {
+				return nil, nil, newArticlesUnavailableError(1, err)
+			}
 			return nil, nil, fmt.Errorf("failed to stat segment %s <%s>: %w", group.ActualFilename, segment.Id, err)
 		}
 		checked = true
@@ -233,7 +240,7 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 	return nzb, nil
 }
 
-func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) map[string]*FileGroup {
+func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) (map[string]*FileGroup, error) {
 	// Assign XML document order as Number for files with uniform Number values.
 	// This preserves upload order for obfuscated archives where the subject
 	// line doesn't contain file number patterns like [X/Y].
@@ -278,7 +285,25 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) ma
 		}
 	}
 
-	unknownResults := p.batchDetectContentTypes(ctx, unknownFiles)
+	detectionFailures := articleProbeFailures{}
+	// Obfuscated releases can contain hundreds of files whose subject names do
+	// not reveal a type. A complete, connection-reusing STAT pass is much
+	// cheaper than attempting a header fetch with provider failover for every
+	// missing article. Only use it when no filename-classified content exists;
+	// ordinary releases retain the existing fast path.
+	if len(allFiles) == 0 && len(unknownFiles) > 0 {
+		var availabilityFailures articleProbeFailures
+		var availabilityErr error
+		unknownFiles, availabilityFailures, availabilityErr =
+			p.filterUnavailableUnknownFiles(ctx, unknownFiles)
+		if availabilityErr != nil {
+			return nil, availabilityErr
+		}
+		detectionFailures.merge(availabilityFailures)
+	}
+
+	unknownResults, contentFailures := p.batchDetectContentTypes(ctx, unknownFiles)
+	detectionFailures.merge(contentFailures)
 
 	// Add unknown results
 	allFiles = append(allFiles, unknownResults...)
@@ -289,7 +314,53 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) ma
 	// each RAR volume gets its own group. This merges them back together.
 	groups = p.mergeObfuscatedRarGroups(groups)
 
-	return groups
+	if len(groups) == 0 {
+		return groups, detectionFailures.unavailableError()
+	}
+	return groups, nil
+}
+
+func (p *NZBParser) filterUnavailableUnknownFiles(
+	ctx context.Context,
+	files []nzbparser.NzbFile,
+) ([]nzbparser.NzbFile, articleProbeFailures, error) {
+	messageIDs := make([]string, 0, len(files))
+	candidates := make([]nzbparser.NzbFile, 0, len(files))
+	for _, file := range files {
+		if len(file.Segments) == 0 {
+			continue
+		}
+		messageIDs = append(messageIDs, file.Segments[0].Id)
+		candidates = append(candidates, file)
+	}
+	if len(messageIDs) == 0 {
+		return files, articleProbeFailures{}, nil
+	}
+
+	result, err := p.manager.BatchStatAll(ctx, messageIDs)
+	if err != nil {
+		return nil, articleProbeFailures{}, fmt.Errorf("preflight unknown NZB articles: %w", err)
+	}
+	if result == nil || len(result.Results) != len(candidates) {
+		return nil, articleProbeFailures{}, fmt.Errorf("preflight unknown NZB articles returned incomplete results")
+	}
+
+	available := make([]nzbparser.NzbFile, 0, len(candidates))
+	failures := articleProbeFailures{}
+	for i, stat := range result.Results {
+		switch {
+		case stat.Available:
+			available = append(available, candidates[i])
+		case nntp.IsArticleNotFoundError(stat.Error):
+			failures.add(stat.Error)
+		default:
+			// A transient or ambiguous STAT result must not reject the release.
+			// Retain the file so the established header-fetch path gets a chance
+			// to recover through its normal provider failover.
+			available = append(available, candidates[i])
+		}
+	}
+	return available, failures, nil
 }
 
 // mergeObfuscatedRarGroups detects and merges RAR FileGroups that likely belong
@@ -364,9 +435,12 @@ func (p *NZBParser) mergeObfuscatedRarGroups(groups map[string]*FileGroup) map[s
 }
 
 // Batch process unknown files in parallel
-func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []nzbparser.NzbFile) []contentResult {
+func (p *NZBParser) batchDetectContentTypes(
+	ctx context.Context,
+	unknownFiles []nzbparser.NzbFile,
+) ([]contentResult, articleProbeFailures) {
 	if len(unknownFiles) == 0 {
-		return nil
+		return nil, articleProbeFailures{}
 	}
 
 	// Use up to maxConcurrent workers — same budget as the rest of the parser.
@@ -390,16 +464,25 @@ func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []
 			file:           *f,
 			fileType:       detectedType,
 			actualFilename: actualFilename,
+			err:            err,
 		}
 	})
 
 	processed := make([]contentResult, 0, len(mapped))
+	failures := articleProbeFailures{}
 	for _, r := range mapped {
 		if r.fileType != storage.NZBFileTypeUnknown {
+			r.err = nil
 			processed = append(processed, r)
+		} else {
+			if r.err == nil {
+				failures.add(errFileTypeUndetected)
+			} else {
+				failures.add(r.err)
+			}
 		}
 	}
-	return processed
+	return processed, failures
 }
 
 // Group already processed files (fast)

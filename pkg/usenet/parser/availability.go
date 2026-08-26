@@ -68,17 +68,10 @@ func (e *articlesUnavailableError) Error() string {
 	)
 }
 
-func (e *articlesUnavailableError) Unwrap() []error {
-	return []error{ErrNZBArticlesUnavailable, e.cause}
+func (e *articlesUnavailableError) Is(target error) bool {
+	return target == ErrNZBArticlesUnavailable
 }
 
-func newArticlesUnavailableError(count int, cause error) error {
-	failures := articleProbeFailures{}
-	if count <= 0 {
-		count = 1
-	}
-	failures.count = count
-	failures.allArticlesMissing = true
-	failures.first = cause
-	return failures.unavailableError()
+func (e *articlesUnavailableError) Unwrap() error {
+	return e.cause
 }

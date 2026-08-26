@@ -152,28 +152,17 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 		return nil, nil, fmt.Errorf("no valid file groups found in NZB")
 	}
 
-	// Stat the first segment to confirm connectivity
-	checked := false
-	for _, group := range fileGroups {
-		if len(group.Files) == 0 || len(group.Files[0].Segments) == 0 {
-			continue
-		}
-		segment := group.Files[0].Segments[0]
-		err = p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
-			_, _, statErr := conn.Stat(segment.Id)
+	// Confirm connectivity using representative segments. Map iteration order is
+	// deliberately irrelevant: a missing article in one group must not reject a
+	// partially available release when another group can still be reached.
+	err = probeFileGroupConnectivity(fileGroups, func(messageID string) error {
+		return p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
+			_, _, statErr := conn.Stat(messageID)
 			return statErr
 		})
-		if err != nil {
-			if nntp.IsArticleNotFoundError(err) {
-				return nil, nil, newArticlesUnavailableError(1, err)
-			}
-			return nil, nil, fmt.Errorf("failed to stat segment %s <%s>: %w", group.ActualFilename, segment.Id, err)
-		}
-		checked = true
-		break
-	}
-	if !checked {
-		return nil, nil, fmt.Errorf("no segments available to stat in NZB")
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 
 	nzb.ID = uuid.New().String()
@@ -183,6 +172,37 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 		nzb.Name = nzb.ID
 	}
 	return nzb, fileGroups, nil
+}
+
+func probeFileGroupConnectivity(
+	fileGroups map[string]*FileGroup,
+	stat func(messageID string) error,
+) error {
+	failures := articleProbeFailures{}
+	for _, group := range fileGroups {
+		if len(group.Files) == 0 || len(group.Files[0].Segments) == 0 {
+			continue
+		}
+		segment := group.Files[0].Segments[0]
+		err := stat(segment.Id)
+		if err == nil {
+			return nil
+		}
+		if nntp.IsArticleNotFoundError(err) {
+			failures.add(err)
+			continue
+		}
+		return fmt.Errorf(
+			"failed to stat segment %s <%s>: %w",
+			group.ActualFilename,
+			segment.Id,
+			err,
+		)
+	}
+	if unavailableErr := failures.unavailableError(); unavailableErr != nil {
+		return unavailableErr
+	}
+	return fmt.Errorf("no segments available to stat in NZB")
 }
 
 func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[string]*FileGroup) (result *storage.NZB, err error) {

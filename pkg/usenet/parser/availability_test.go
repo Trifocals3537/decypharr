@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tensai75/nzbparser"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 )
 
@@ -32,9 +33,54 @@ func TestArticleProbeFailuresClassifiesOnlyUniformMissingArticles(t *testing.T) 
 	if !nntp.IsArticleNotFoundError(err) {
 		t.Fatalf("expected the first NNTP cause to remain discoverable, got %v", err)
 	}
+	if !nntp.IsArticleNotFoundError(errors.Unwrap(err)) {
+		t.Fatalf("expected standard unwrapping to expose the NNTP cause, got %v", err)
+	}
 	if message := err.Error(); !strings.Contains(message, ErrNZBArticlesUnavailable.Error()) ||
 		strings.Contains(message, "%!") {
 		t.Fatalf("malformed unavailable-article error: %q", message)
+	}
+}
+
+func TestProbeFileGroupConnectivityAcceptsPartialAvailability(t *testing.T) {
+	t.Parallel()
+
+	groups := map[string]*FileGroup{
+		"missing": testConnectivityGroup("missing-id"),
+		"present": testConnectivityGroup("present-id"),
+	}
+	err := probeFileGroupConnectivity(groups, func(messageID string) error {
+		if messageID == "missing-id" {
+			return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("partially available NZB was rejected: %v", err)
+	}
+}
+
+func TestProbeFileGroupConnectivityRejectsOnlyUniformMissingArticles(t *testing.T) {
+	t.Parallel()
+
+	groups := map[string]*FileGroup{
+		"first":  testConnectivityGroup("first-id"),
+		"second": testConnectivityGroup("second-id"),
+	}
+	err := probeFileGroupConnectivity(groups, func(string) error {
+		return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}
+	})
+	if !errors.Is(err, ErrNZBArticlesUnavailable) {
+		t.Fatalf("uniformly missing NZB was not rejected: %v", err)
+	}
+}
+
+func testConnectivityGroup(messageID string) *FileGroup {
+	return &FileGroup{
+		ActualFilename: messageID,
+		Files: []nzbparser.NzbFile{{
+			Segments: nzbparser.NzbSegments{{Id: messageID}},
+		}},
 	}
 }
 

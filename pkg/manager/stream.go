@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -120,6 +121,20 @@ type StreamMetadata struct {
 	ContentLength int64
 }
 
+// streamRangePlan keeps the client's logical file range separate from the
+// upstream resource range. They differ for stored files exposed from inside a
+// RAR archive: clients address the extracted file from zero, while the CDN must
+// receive the file's absolute archive offsets.
+type streamRangePlan struct {
+	logicalStart  int64
+	logicalEnd    int64
+	logicalSize   int64
+	upstreamStart int64
+	upstreamEnd   int64
+	expectedLen   int64
+	rooted        bool
+}
+
 // StreamReadyFunc allows callers to copy headers/status before streaming begins.
 type StreamReadyFunc func(*StreamMetadata) error
 
@@ -204,7 +219,10 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		return fmt.Errorf("file not found in entry: %s", filename)
 	}
 
-	expectedLen := end - start + 1
+	rangePlan, err := buildStreamRangePlan(file, start, end)
+	if err != nil {
+		return retry.Unrecoverable(fmt.Errorf("invalid stream mapping for %s: %w", filename, err))
+	}
 
 	// Link validation and body transfer both inherit playback priority. This
 	// lets a seek get ahead of queued bulk downloads without bypassing the
@@ -254,10 +272,7 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			torrent,
 			candidate,
 			filename,
-			file.Size,
-			start,
-			end,
-			expectedLen,
+			rangePlan,
 			writer,
 			onReady,
 			buf,
@@ -318,7 +333,7 @@ func (m *Manager) streamHTTPFromCandidate(
 	original *storage.Entry,
 	candidate streamCandidate,
 	filename string,
-	fileSize, start, end, expectedLen int64,
+	rangePlan streamRangePlan,
 	writer io.Writer,
 	onReady StreamReadyFunc,
 	buf []byte,
@@ -338,7 +353,14 @@ func (m *Manager) streamHTTPFromCandidate(
 		if hasFallback {
 			connectionAttempts = 1
 		}
-		resp, reqErr := m.doRequest(ctx, downloadLink, candidate.provider, start, end, connectionAttempts)
+		resp, reqErr := m.doRequest(
+			ctx,
+			downloadLink,
+			candidate.provider,
+			rangePlan.upstreamStart,
+			rangePlan.upstreamEnd,
+			connectionAttempts,
+		)
 		if reqErr != nil {
 			// Connection retries happen inside doRequest and never receive body
 			// bytes, so returning here cannot replay caller-visible data.
@@ -388,8 +410,24 @@ func (m *Manager) streamHTTPFromCandidate(
 			}
 		}
 
-		isPartial := expectedLen > 0 && (start > 0 || end < fileSize-1)
-		if integrityErr := validateStreamResponseIntegrity(resp, start, end, fileSize, expectedLen, isPartial); integrityErr != nil {
+		expectedUpstreamTotal := downloadLink.Size
+		if expectedUpstreamTotal <= 0 && !rangePlan.rooted {
+			expectedUpstreamTotal = rangePlan.logicalSize
+		}
+		logicalPartial := rangePlan.logicalStart > 0 || rangePlan.logicalEnd < rangePlan.logicalSize-1
+		requirePartial := logicalPartial || rangePlan.rooted
+		if expectedUpstreamTotal > 0 {
+			requirePartial = logicalPartial ||
+				rangePlan.upstreamStart > 0 || rangePlan.upstreamEnd < expectedUpstreamTotal-1
+		}
+		if integrityErr := validateStreamResponseIntegrity(
+			resp,
+			rangePlan.upstreamStart,
+			rangePlan.upstreamEnd,
+			expectedUpstreamTotal,
+			rangePlan.expectedLen,
+			requirePartial,
+		); integrityErr != nil {
 			resp.Body.Close()
 			return false, StreamError{Err: integrityErr, Retryable: true}
 		}
@@ -401,19 +439,27 @@ func (m *Manager) streamHTTPFromCandidate(
 		meta := &StreamMetadata{
 			Header:        header,
 			StatusCode:    resp.StatusCode,
-			ContentLength: resp.ContentLength,
+			ContentLength: rangePlan.expectedLen,
 		}
 
-		if expectedLen > 0 {
-			meta.ContentLength = expectedLen
+		if rangePlan.expectedLen > 0 {
 			if header != nil {
-				header["Content-Length"] = []string{strconv.FormatInt(expectedLen, 10)}
+				header["Content-Length"] = []string{strconv.FormatInt(rangePlan.expectedLen, 10)}
 			}
 		}
-		if isPartial && resp.StatusCode == http.StatusOK {
+		if logicalPartial {
 			meta.StatusCode = http.StatusPartialContent
 			if header != nil {
-				header["Content-Range"] = []string{buildContentRange(start, end, fileSize)}
+				header["Content-Range"] = []string{buildContentRange(
+					rangePlan.logicalStart,
+					rangePlan.logicalEnd,
+					rangePlan.logicalSize,
+				)}
+			}
+		} else {
+			meta.StatusCode = http.StatusOK
+			if header != nil {
+				header.Del("Content-Range")
 			}
 		}
 
@@ -422,8 +468,8 @@ func (m *Manager) streamHTTPFromCandidate(
 		// provider switch is safe. Once ready is reported or a writer is touched,
 		// this attempt is irrevocably committed and will never be replayed.
 		reader := io.Reader(resp.Body)
-		if expectedLen > 0 {
-			reader = io.LimitReader(resp.Body, expectedLen)
+		if rangePlan.expectedLen > 0 {
+			reader = io.LimitReader(resp.Body, rangePlan.expectedLen)
 		}
 		var firstByte [1]byte
 		firstN, firstErr := io.ReadFull(reader, firstByte[:])
@@ -459,7 +505,7 @@ func (m *Manager) streamHTTPFromCandidate(
 		}
 		resp.Body.Close()
 
-		if expectedLen > 0 && written < expectedLen && copyErr == nil {
+		if rangePlan.expectedLen > 0 && written < rangePlan.expectedLen && copyErr == nil {
 			copyErr = io.ErrUnexpectedEOF
 		}
 
@@ -623,10 +669,45 @@ func normalizeStreamRange(size, start, end int64) (int64, int64, error) {
 	return start, end, nil
 }
 
+func buildStreamRangePlan(file *storage.File, start, end int64) (streamRangePlan, error) {
+	if file == nil {
+		return streamRangePlan{}, errors.New("file metadata is missing")
+	}
+	plan := streamRangePlan{
+		logicalStart:  start,
+		logicalEnd:    end,
+		logicalSize:   file.Size,
+		upstreamStart: start,
+		upstreamEnd:   end,
+		expectedLen:   end - start + 1,
+	}
+	if file.ByteRange == nil {
+		return plan, nil
+	}
+
+	rangeStart, rangeEnd := file.ByteRange[0], file.ByteRange[1]
+	if rangeStart < 0 || rangeEnd < rangeStart || rangeEnd-rangeStart == math.MaxInt64 {
+		return streamRangePlan{}, fmt.Errorf("invalid rooted byte range %d-%d", rangeStart, rangeEnd)
+	}
+	rangeSize := rangeEnd - rangeStart + 1
+	if rangeSize != file.Size {
+		return streamRangePlan{}, fmt.Errorf(
+			"rooted byte range size %d does not match logical file size %d",
+			rangeSize,
+			file.Size,
+		)
+	}
+
+	plan.upstreamStart = rangeStart + start
+	plan.upstreamEnd = rangeStart + end
+	plan.rooted = true
+	return plan, nil
+}
+
 // validateStreamResponseIntegrity rejects upstream representations that cannot
 // safely satisfy the exact bytes requested by a media client. This runs before
 // response headers or body bytes are committed, leaving provider failover safe.
-func validateStreamResponseIntegrity(resp *http.Response, start, end, fileSize, expectedLen int64, partial bool) error {
+func validateStreamResponseIntegrity(resp *http.Response, start, end, expectedTotal, expectedLen int64, partial bool) error {
 	if resp == nil {
 		return fmt.Errorf("upstream returned no response")
 	}
@@ -650,8 +731,11 @@ func validateStreamResponseIntegrity(resp *http.Response, start, end, fileSize, 
 				end,
 			)
 		}
-		if actualTotal != fileSize {
-			return fmt.Errorf("upstream Content-Range total %d does not match file size %d", actualTotal, fileSize)
+		if expectedTotal > 0 && actualTotal != expectedTotal {
+			return fmt.Errorf("upstream Content-Range total %d does not match expected size %d", actualTotal, expectedTotal)
+		}
+		if expectedTotal <= 0 && actualTotal >= 0 && actualTotal <= end {
+			return fmt.Errorf("upstream Content-Range total %d does not contain requested end %d", actualTotal, end)
 		}
 	}
 	if expectedLen > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedLen {

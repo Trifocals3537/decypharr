@@ -32,6 +32,42 @@ func identityRequest(method, target, infohash, fileID string) *http.Request {
 	return request.WithContext(ctx)
 }
 
+func TestGetRangeReturnsLogicalClientRanges(t *testing.T) {
+	tests := []struct {
+		name              string
+		header            string
+		wantStart         int64
+		wantEnd           int64
+		wantErrorContains string
+	}{
+		{name: "full file", wantStart: 0, wantEnd: -1},
+		{name: "single range", header: "bytes=1-2", wantStart: 1, wantEnd: 2},
+		{name: "suffix range", header: "bytes=-2", wantStart: 2, wantEnd: 3},
+		{name: "unsatisfiable", header: "bytes=9-10", wantErrorContains: "not satisfiable"},
+		{name: "malformed", header: "bytes=invalid", wantErrorContains: "invalid range"},
+		{name: "multiple ranges", header: "bytes=0-0,2-2", wantErrorContains: "multiple ranges"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/movie.mkv", nil)
+			if test.header != "" {
+				request.Header.Set("Range", test.header)
+			}
+			start, end, err := getRange(4, request)
+			if test.wantErrorContains != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErrorContains) {
+					t.Fatalf("getRange() = %d-%d, %v; want error containing %q", start, end, err, test.wantErrorContains)
+				}
+				return
+			}
+			if err != nil || start != test.wantStart || end != test.wantEnd {
+				t.Fatalf("getRange() = %d-%d, %v; want %d-%d", start, end, err, test.wantStart, test.wantEnd)
+			}
+		})
+	}
+}
+
 func TestNormalizeStreamErrorUsesRetryableProviderSemantics(t *testing.T) {
 	providerErr := manager.StreamError{
 		Err:       link.NewRetryableError(errors.New("signed-url-secret"), "503"),

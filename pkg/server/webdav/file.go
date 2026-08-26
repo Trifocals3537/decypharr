@@ -4,16 +4,24 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
-func getDownloadByteRange(info *manager.FileInfo) *[2]int64 {
-	return info.ByteRange()
-}
-
 func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w http.ResponseWriter, r *http.Request) error {
-	start, end := h.getRange(info, r)
+	start, end, err := getRange(info.Size(), r)
+	if err != nil {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size()))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return customerror.NewError(
+			fmt.Errorf("invalid or unsupported byte range: %w", err),
+			http.StatusRequestedRangeNotSatisfiable,
+			"stream.invalid_range",
+			true,
+			true,
+		).Permanent()
+	}
 
 	// Extract client identifier from User-Agent header
 	client := r.UserAgent()
@@ -27,7 +35,7 @@ func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w
 	}
 
 	headersWritten := false
-	err := h.manager.Stream(r.Context(), entry, info.Name(), start, end, w, func(meta *manager.StreamMetadata) error {
+	err = h.manager.Stream(r.Context(), entry, info.Name(), start, end, w, func(meta *manager.StreamMetadata) error {
 		if err := h.handleSuccessfulResponse(w, meta, start, end); err != nil {
 			return err
 		}
@@ -72,27 +80,22 @@ func (h *Handler) handleSuccessfulResponse(w http.ResponseWriter, meta *manager.
 	return nil
 }
 
-func (h *Handler) getRange(info *manager.FileInfo, r *http.Request) (int64, int64) {
+func getRange(size int64, r *http.Request) (int64, int64, error) {
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
-		if byteRange := getDownloadByteRange(info); byteRange != nil {
-			return byteRange[0], byteRange[1]
-		}
 		// Signal downstream streaming code to serve the entire file
-		return 0, -1
+		return 0, -1, nil
 	}
 
-	ranges, err := parseRange(rangeHeader, info.Size())
-	if err != nil || len(ranges) != 1 {
-		return 0, 0
+	ranges, err := parseRange(rangeHeader, size)
+	if err != nil {
+		return 0, 0, err
 	}
-
-	byteRange := getDownloadByteRange(info)
-	start, end := ranges[0].start, ranges[0].end
-
-	if byteRange != nil {
-		start += byteRange[0]
-		end += byteRange[0]
+	if len(ranges) == 0 {
+		return 0, 0, fmt.Errorf("range is not satisfiable for a %d-byte file", size)
 	}
-	return start, end
+	if len(ranges) > 1 {
+		return 0, 0, fmt.Errorf("multiple ranges are not supported")
+	}
+	return ranges[0].start, ranges[0].end, nil
 }

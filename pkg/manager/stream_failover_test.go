@@ -519,6 +519,123 @@ func TestStreamPreservesFirstByteRange(t *testing.T) {
 	}
 }
 
+func TestRootedStreamTranslatesLogicalPartialRange(t *testing.T) {
+	var gotRange string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		w.Header().Set("Content-Length", "2")
+		w.Header().Set("Content-Range", "bytes 11-12/100")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("at"))
+	}))
+	defer server.Close()
+
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: server.URL, Size: 100},
+	}}
+	manager := newStreamFailoverTestManager(links, server.Client(), "primary")
+	entry := streamFailoverEntry("primary")
+	entry.Files["video.mkv"].ByteRange = &[2]int64{10, 13}
+
+	var output bytes.Buffer
+	var metadata *StreamMetadata
+	if err := manager.Stream(context.Background(), entry, "video.mkv", 1, 2, &output, func(got *StreamMetadata) error {
+		metadata = got
+		return nil
+	}, "test"); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if gotRange != "bytes=11-12" || output.String() != "at" {
+		t.Fatalf("upstream range/output = %q/%q, want bytes=11-12/at", gotRange, output.String())
+	}
+	if metadata == nil || metadata.StatusCode != http.StatusPartialContent || metadata.ContentLength != 2 ||
+		metadata.Header.Get("Content-Range") != "bytes 1-2/4" {
+		t.Fatalf("client metadata = %+v, want logical partial response", metadata)
+	}
+}
+
+func TestRootedStreamMapsFullLogicalFileToPartialUpstream(t *testing.T) {
+	var gotRange string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		w.Header().Set("Content-Length", "4")
+		w.Header().Set("Content-Range", "bytes 10-13/100")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer server.Close()
+
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: server.URL, Size: 100},
+	}}
+	manager := newStreamFailoverTestManager(links, server.Client(), "primary")
+	entry := streamFailoverEntry("primary")
+	entry.Files["video.mkv"].ByteRange = &[2]int64{10, 13}
+
+	var output bytes.Buffer
+	var metadata *StreamMetadata
+	if err := manager.Stream(context.Background(), entry, "video.mkv", 0, -1, &output, func(got *StreamMetadata) error {
+		metadata = got
+		return nil
+	}, "test"); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if gotRange != "bytes=10-13" || output.String() != "data" {
+		t.Fatalf("upstream range/output = %q/%q, want bytes=10-13/data", gotRange, output.String())
+	}
+	if metadata == nil || metadata.StatusCode != http.StatusOK || metadata.ContentLength != 4 ||
+		metadata.Header.Get("Content-Range") != "" {
+		t.Fatalf("client metadata = %+v, want full logical response without archive offsets", metadata)
+	}
+}
+
+func TestRootedStreamAcceptsWildcardTotalWhenUpstreamSizeIsUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		w.Header().Set("Content-Range", "bytes 11-12/*")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("at"))
+	}))
+	defer server.Close()
+
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: server.URL},
+	}}
+	manager := newStreamFailoverTestManager(links, server.Client(), "primary")
+	entry := streamFailoverEntry("primary")
+	entry.Files["video.mkv"].ByteRange = &[2]int64{10, 13}
+
+	var output bytes.Buffer
+	if err := manager.Stream(context.Background(), entry, "video.mkv", 1, 2, &output, nil, "test"); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if output.String() != "at" {
+		t.Fatalf("output = %q, want at", output.String())
+	}
+}
+
+func TestRootedStreamRejectsInconsistentStoredRangeBeforeLinkLookup(t *testing.T) {
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: "https://primary.example/file", Size: 100},
+	}}
+	manager := newStreamFailoverTestManager(links, http.DefaultClient, "primary")
+	entry := streamFailoverEntry("primary")
+	entry.Files["video.mkv"].ByteRange = &[2]int64{10, 12}
+
+	var output bytes.Buffer
+	readyCalls := 0
+	err := manager.Stream(context.Background(), entry, "video.mkv", 0, -1, &output, func(*StreamMetadata) error {
+		readyCalls++
+		return nil
+	}, "test")
+	if err == nil || !strings.Contains(err.Error(), "rooted byte range size 3 does not match logical file size 4") {
+		t.Fatalf("Stream() error = %v, want rooted size mismatch", err)
+	}
+	if output.Len() != 0 || readyCalls != 0 || len(links.callOrder()) != 0 {
+		t.Fatalf("output/ready/link calls = %d/%d/%v, want 0/0/none", output.Len(), readyCalls, links.callOrder())
+	}
+}
+
 func TestStreamUsesFullActiveRecoveryOnlyAfterAlternateFailure(t *testing.T) {
 	var primaryRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

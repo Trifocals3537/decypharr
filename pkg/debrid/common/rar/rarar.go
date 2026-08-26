@@ -35,6 +35,9 @@ var (
 	BlockEnd    = byte(0x7B)
 
 	// FlagDirectory Header flags
+	FlagSplitBefore    = 0x01
+	FlagSplitAfter     = 0x02
+	FlagPassword       = 0x04
 	FlagDirectory      = 0xE0
 	FlagHasHighSize    = 0x100
 	FlagHasUnicodeName = 0x200
@@ -48,6 +51,8 @@ var (
 	ErrNetworkError                 = errors.New("network error")
 	ErrRangeRequestsNotSupported    = errors.New("server does not support range requests")
 	ErrCompressionNotSupported      = errors.New("compression method not supported")
+	ErrEncryptionNotSupported       = errors.New("encrypted RAR entries are not supported")
+	ErrMultiVolumeNotSupported      = errors.New("multi-volume RAR entries are not supported")
 	ErrDirectoryExtractNotSupported = errors.New("directory extract not supported")
 )
 
@@ -57,10 +62,6 @@ func (f *File) Name() string {
 		return f.Path[i+1:]
 	}
 	return f.Path
-}
-
-func (f *File) ByteRange() *[2]int64 {
-	return &[2]int64{f.DataOffset, f.DataOffset + f.CompressedSize - 1}
 }
 
 func NewHttpFile(url string) (*HttpFile, error) {
@@ -697,6 +698,9 @@ func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, erro
 		Method:         method,
 		CRC:            fileCRC,
 		IsDirectory:    isDirectory,
+		Encrypted:      headFlags&FlagPassword != 0,
+		SplitBefore:    headFlags&FlagSplitBefore != 0,
+		SplitAfter:     headFlags&FlagSplitAfter != 0,
 		DataOffset:     dataOffset,
 		NextOffset:     nextOffset,
 	}, nil
@@ -716,14 +720,10 @@ func (r *Reader) GetFiles() ([]*File, error) {
 
 // ExtractFile extracts a file from the archive
 func (r *Reader) ExtractFile(file *File) ([]byte, error) {
-	if file.IsDirectory {
-		return nil, ErrDirectoryExtractNotSupported
+	byteRange, err := file.StreamByteRange()
+	if err != nil {
+		return nil, err
 	}
 
-	// Only support "Store" method
-	if file.Method != 0x30 { // 0x30 = "Store"
-		return nil, ErrCompressionNotSupported
-	}
-
-	return r.readBytes(file.DataOffset, int(file.CompressedSize))
+	return r.readBytes(byteRange[0], int(byteRange[1]-byteRange[0]+1))
 }

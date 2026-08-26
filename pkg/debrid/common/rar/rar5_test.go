@@ -222,12 +222,15 @@ func TestRAR5RejectsCorruptHeaderBeforeMappingOffsets(t *testing.T) {
 	}
 }
 
-func TestReaderStillSupportsRAR3StoredArchives(t *testing.T) {
-	const name = "video.mkv"
-	payload := []byte("legacy-media")
+func setRAR3HeaderCRC(header []byte) {
+	binary.LittleEndian.PutUint16(header[:2], uint16(crc32.ChecksumIEEE(header[2:])&0xffff))
+}
+
+func buildRAR3StoredArchive(name string, payload []byte) (archive []byte, fileHeaderOffset int) {
 	mainHeader := make([]byte, 13)
 	mainHeader[2] = BlockHeader
 	binary.LittleEndian.PutUint16(mainHeader[5:7], uint16(len(mainHeader)))
+	setRAR3HeaderCRC(mainHeader)
 	fileHeader := make([]byte, 32+len(name))
 	fileHeader[2] = BlockFile
 	binary.LittleEndian.PutUint16(fileHeader[3:5], uint16(FlagHasData))
@@ -237,15 +240,25 @@ func TestReaderStillSupportsRAR3StoredArchives(t *testing.T) {
 	fileHeader[25] = MethodStore
 	binary.LittleEndian.PutUint16(fileHeader[26:28], uint16(len(name)))
 	copy(fileHeader[32:], name)
+	setRAR3HeaderCRC(fileHeader)
 	endHeader := make([]byte, 7)
 	endHeader[2] = BlockEnd
 	binary.LittleEndian.PutUint16(endHeader[5:7], uint16(len(endHeader)))
+	setRAR3HeaderCRC(endHeader)
 
-	archive := append([]byte{}, Rar3Marker...)
+	archive = append([]byte{}, Rar3Marker...)
 	archive = append(archive, mainHeader...)
+	fileHeaderOffset = len(archive)
 	archive = append(archive, fileHeader...)
 	archive = append(archive, payload...)
 	archive = append(archive, endHeader...)
+	return archive, fileHeaderOffset
+}
+
+func TestReaderStillSupportsRAR3StoredArchives(t *testing.T) {
+	const name = "video.mkv"
+	payload := []byte("legacy-media")
+	archive, _ := buildRAR3StoredArchive(name, payload)
 	server := newRangeServer(t, archive)
 
 	file := &HttpFile{
@@ -268,6 +281,85 @@ func TestReaderStillSupportsRAR3StoredArchives(t *testing.T) {
 	extracted, err := reader.ExtractFile(files[0])
 	if err != nil || string(extracted) != string(payload) {
 		t.Fatalf("ExtractFile() = %q, %v; want %q", extracted, err, payload)
+	}
+}
+
+func TestRAR3RejectsCorruptHeadersAndAcceptsExactLegacyEOF(t *testing.T) {
+	t.Run("corrupt main header", func(t *testing.T) {
+		archive, _ := buildRAR3StoredArchive("video.mkv", []byte("media"))
+		archive[len(Rar3Marker)] ^= 0xff
+		server := newRangeServer(t, archive)
+		_, err := newReader(&HttpFile{
+			URL: server.URL, client: &http.Client{Timeout: time.Second},
+			FileSize: int64(len(archive)), MaxRetries: 0,
+		})
+		if !errors.Is(err, ErrInvalidFormat) || !strings.Contains(err.Error(), "CRC mismatch") {
+			t.Fatalf("newReader() error = %v, want invalid CRC", err)
+		}
+	})
+
+	t.Run("corrupt file header", func(t *testing.T) {
+		archive, fileHeaderOffset := buildRAR3StoredArchive("video.mkv", []byte("media"))
+		archive[fileHeaderOffset] ^= 0xff
+		server := newRangeServer(t, archive)
+		reader, err := newReader(&HttpFile{
+			URL: server.URL, client: &http.Client{Timeout: time.Second},
+			FileSize: int64(len(archive)), MaxRetries: 0,
+		})
+		if err != nil {
+			t.Fatalf("newReader() error = %v", err)
+		}
+		if _, err := reader.GetFiles(); !errors.Is(err, ErrInvalidFormat) || !strings.Contains(err.Error(), "CRC mismatch") {
+			t.Fatalf("GetFiles() error = %v, want invalid CRC", err)
+		}
+	})
+
+	t.Run("exact EOF without end marker", func(t *testing.T) {
+		archive, _ := buildRAR3StoredArchive("video.mkv", []byte("media"))
+		archive = archive[:len(archive)-7]
+		server := newRangeServer(t, archive)
+		reader, err := newReader(&HttpFile{
+			URL: server.URL, client: &http.Client{Timeout: time.Second},
+			FileSize: int64(len(archive)), MaxRetries: 0,
+		})
+		if err != nil {
+			t.Fatalf("newReader() error = %v", err)
+		}
+		files, err := reader.GetFiles()
+		if err != nil || len(files) != 1 || files[0].Path != "video.mkv" {
+			t.Fatalf("GetFiles() = %#v, %v; want valid legacy EOF", files, err)
+		}
+	})
+}
+
+func TestRAR3SkipsLongBlockDataUsingAddSizeField(t *testing.T) {
+	archive, fileHeaderOffset := buildRAR3StoredArchive("video.mkv", []byte("media"))
+	serviceHeader := make([]byte, 15)
+	serviceHeader[2] = 0x7a
+	binary.LittleEndian.PutUint16(serviceHeader[3:5], uint16(FlagHasData))
+	binary.LittleEndian.PutUint16(serviceHeader[5:7], uint16(len(serviceHeader)))
+	binary.LittleEndian.PutUint32(serviceHeader[7:11], 3)
+	copy(serviceHeader[11:], []byte{0xff, 0xff, 0xff, 0xff})
+	setRAR3HeaderCRC(serviceHeader)
+	withService := append([]byte{}, archive[:fileHeaderOffset]...)
+	withService = append(withService, serviceHeader...)
+	withService = append(withService, []byte("svc")...)
+	withService = append(withService, archive[fileHeaderOffset:]...)
+	server := newRangeServer(t, withService)
+
+	reader, err := newReader(&HttpFile{
+		URL: server.URL, client: &http.Client{Timeout: time.Second},
+		FileSize: int64(len(withService)), MaxRetries: 0,
+	})
+	if err != nil {
+		t.Fatalf("newReader() error = %v", err)
+	}
+	files, err := reader.GetFiles()
+	if err != nil {
+		t.Fatalf("GetFiles() error = %v", err)
+	}
+	if len(files) != 1 || files[0].Path != "video.mkv" {
+		t.Fatalf("GetFiles() = %#v, want video.mkv", files)
 	}
 }
 

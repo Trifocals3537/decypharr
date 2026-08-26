@@ -9,7 +9,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -304,6 +306,40 @@ func validateContentRange(header string, wantStart, wantEnd, wantTotal int64) er
 	return nil
 }
 
+func validateRAR3Header(header []byte) error {
+	if len(header) < 7 {
+		return fmt.Errorf("%w: RAR3 header is shorter than 7 bytes", ErrInvalidFormat)
+	}
+	headerSize := int(binary.LittleEndian.Uint16(header[5:7]))
+	if headerSize < 7 || headerSize != len(header) {
+		return fmt.Errorf(
+			"%w: RAR3 header size %d does not match %d bytes read",
+			ErrInvalidFormat,
+			headerSize,
+			len(header),
+		)
+	}
+	// Legacy authenticity/signature headers have inconsistent CRCs in real
+	// archives, and old-service headers can cover bytes outside HeadSize.
+	// They do not describe streamable file data, so retain UnRAR-compatible
+	// tolerance while still validating their declared sizes and data bounds.
+	switch header[2] {
+	case 0x76, 0x77, 0x79:
+		return nil
+	}
+	wantCRC := binary.LittleEndian.Uint16(header[:2])
+	gotCRC := uint16(crc32.ChecksumIEEE(header[2:]) & 0xffff)
+	if gotCRC != wantCRC {
+		return fmt.Errorf(
+			"%w: RAR3 header CRC mismatch (got %04x, want %04x)",
+			ErrInvalidFormat,
+			gotCRC,
+			wantCRC,
+		)
+	}
+	return nil
+}
+
 // NewReader creates a reader for stored entries in RAR 3/4 or RAR 5 archives.
 func NewReader(url string) (*Reader, error) {
 	file, err := NewHttpFile(url)
@@ -345,10 +381,19 @@ func newReader(file *HttpFile) (*Reader, error) {
 		return nil, ErrInvalidFormat
 	}
 
-	headType := headerData[2]
 	headSize := int(binary.LittleEndian.Uint16(headerData[5:7]))
+	if headSize < 13 || int64(headSize) > file.FileSize-pos {
+		return nil, ErrInvalidFormat
+	}
+	headerData, err = reader.readBytes(pos, headSize)
+	if err != nil || len(headerData) != headSize {
+		return nil, ErrInvalidFormat
+	}
+	if err := validateRAR3Header(headerData); err != nil {
+		return nil, fmt.Errorf("validate RAR3 archive header: %w", err)
+	}
 
-	if headType != BlockHeader {
+	if headerData[2] != BlockHeader {
 		return nil, ErrInvalidFormat
 	}
 
@@ -511,7 +556,41 @@ func decodeUnicode(asciiStr string, unicodeData []byte) string {
 	return string(result)
 }
 
-// readFiles reads all file entries in the archive
+func (r *Reader) readRAR3Header(position int64) ([]byte, error) {
+	if r.File == nil || position < 0 || position >= r.File.FileSize {
+		return nil, fmt.Errorf("%w: RAR3 header offset %d is outside archive", ErrInvalidFormat, position)
+	}
+	shortHeader, err := r.readBytes(position, 7)
+	if err != nil {
+		return nil, err
+	}
+	if len(shortHeader) != 7 {
+		return nil, fmt.Errorf("%w: truncated RAR3 block header", ErrInvalidFormat)
+	}
+	headerSize := int(binary.LittleEndian.Uint16(shortHeader[5:7]))
+	if headerSize < 7 || int64(headerSize) > r.File.FileSize-position {
+		return nil, fmt.Errorf("%w: invalid RAR3 header size %d", ErrInvalidFormat, headerSize)
+	}
+
+	header := make([]byte, headerSize)
+	copy(header, shortHeader)
+	if remaining := headerSize - len(shortHeader); remaining > 0 {
+		rest, err := r.readBytes(position+int64(len(shortHeader)), remaining)
+		if err != nil {
+			return nil, err
+		}
+		if len(rest) != remaining {
+			return nil, fmt.Errorf("%w: truncated RAR3 block header", ErrInvalidFormat)
+		}
+		copy(header[len(shortHeader):], rest)
+	}
+	if err := validateRAR3Header(header); err != nil {
+		return nil, err
+	}
+	return header, nil
+}
+
+// readFiles reads all file entries in the archive.
 func (r *Reader) readFiles() error {
 	if r.Version == 5 {
 		return r.readFilesRAR5()
@@ -523,115 +602,56 @@ func (r *Reader) readFiles() error {
 	// NewReader already validated the archive header and stored where it ends.
 	pos := r.HeaderEndPos
 
-	// Process all blocks until BlockEnd or EOF.
-	for {
-		var headerData []byte
-		err := retry.Do(
-			func() error {
-				var readErr error
-				headerData, readErr = r.readBytes(pos, 7)
-				if readErr != nil {
-					if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, ErrNetworkError) {
-						return retry.Unrecoverable(fmt.Errorf("error reading block header: %w", readErr))
-					}
-					return readErr
-				}
-				if len(headerData) < 7 {
-					return fmt.Errorf("incomplete block header")
-				}
-				return nil
-			},
-			retry.Attempts(4),
-			retry.Delay(config.DefaultRetryDelay),
-			retry.MaxDelay(config.DefaultRetryDelayMax),
-			retry.DelayType(retry.BackOffDelay),
-			retry.LastErrorOnly(true),
-		)
-		if err != nil || len(headerData) < 7 {
-			// EOF or unrecoverable read error — stop iteration.
-			break
+	// Process validated blocks until the required end header.
+	for pos < r.File.FileSize {
+		headerData, err := r.readRAR3Header(pos)
+		if err != nil {
+			return fmt.Errorf("read RAR3 block at offset %d: %w", pos, err)
 		}
-
 		headType := headerData[2]
 		headFlags := int(binary.LittleEndian.Uint16(headerData[3:5]))
 		headSize := int(binary.LittleEndian.Uint16(headerData[5:7]))
 
 		if headType == BlockEnd {
-			break
+			return nil
 		}
 
 		if headType == BlockFile {
-			var completeHeader []byte
-			err = retry.Do(
-				func() error {
-					var readErr error
-					completeHeader, readErr = r.readBytes(pos, headSize)
-					if readErr != nil {
-						return readErr
-					}
-					if len(completeHeader) < headSize {
-						return fmt.Errorf("incomplete header data")
-					}
-					return nil
-				},
-				retry.Attempts(4),
-				retry.Delay(config.DefaultRetryDelay),
-				retry.MaxDelay(config.DefaultRetryDelayMax),
-				retry.DelayType(retry.BackOffDelay),
-				retry.LastErrorOnly(true),
-			)
+			fileInfo, err := r.parseFileHeader(headerData, pos)
 			if err != nil {
-				return fmt.Errorf("failed to read complete file header after retries: %w", err)
+				return fmt.Errorf("parse RAR3 file header at offset %d: %w", pos, err)
 			}
-
-			fileInfo, err := r.parseFileHeader(completeHeader, pos)
-			if err == nil && fileInfo != nil {
-				r.Files = append(r.Files, fileInfo)
-				pos = fileInfo.NextOffset
-			} else {
-				pos += int64(headSize)
+			if fileInfo.NextOffset <= pos || fileInfo.NextOffset > r.File.FileSize {
+				return fmt.Errorf("%w: invalid RAR3 next file offset %d", ErrInvalidFormat, fileInfo.NextOffset)
 			}
-		} else {
-			// Skip non-file block
-			pos += int64(headSize)
-
-			// Skip data if present
-			if headFlags&FlagHasData != 0 {
-				var sizeData []byte
-				err = retry.Do(
-					func() error {
-						var readErr error
-						sizeData, readErr = r.readBytes(pos-4, 4)
-						if readErr != nil {
-							return readErr
-						}
-						if len(sizeData) < 4 {
-							return fmt.Errorf("incomplete size data")
-						}
-						return nil
-					},
-					retry.Attempts(4),
-					retry.Delay(config.DefaultRetryDelay),
-					retry.MaxDelay(config.DefaultRetryDelayMax),
-					retry.DelayType(retry.BackOffDelay),
-					retry.LastErrorOnly(true),
-				)
-				if err != nil {
-					return fmt.Errorf("failed to read data size after retries: %w", err)
-				}
-				dataSize := int64(binary.LittleEndian.Uint32(sizeData))
-				pos += dataSize
-			}
+			r.Files = append(r.Files, fileInfo)
+			pos = fileInfo.NextOffset
+			continue
 		}
+
+		dataSize := int64(0)
+		if headFlags&FlagHasData != 0 {
+			if headSize < 11 {
+				return fmt.Errorf("%w: RAR3 long block header is shorter than 11 bytes", ErrInvalidFormat)
+			}
+			dataSize = int64(binary.LittleEndian.Uint32(headerData[7:11]))
+		}
+		nextOffset := pos + int64(headSize)
+		if dataSize > r.File.FileSize-nextOffset {
+			return fmt.Errorf("%w: RAR3 block data extends beyond archive", ErrInvalidFormat)
+		}
+		pos = nextOffset + dataSize
 	}
 
+	// RAR 2.x and 3.x archives are allowed to end exactly after the last
+	// complete block without an explicit end-of-archive header.
 	return nil
 }
 
 // parseFileHeader parses a file header and returns file info
 func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, error) {
 	if len(headerData) < 7 {
-		return nil, fmt.Errorf("header data too short")
+		return nil, fmt.Errorf("%w: RAR3 header data is too short", ErrInvalidFormat)
 	}
 
 	headType := headerData[2]
@@ -639,24 +659,27 @@ func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, erro
 	headSize := int(binary.LittleEndian.Uint16(headerData[5:7]))
 
 	if headType != BlockFile {
-		return nil, fmt.Errorf("not a file block")
+		return nil, fmt.Errorf("%w: RAR3 block is not a file header", ErrInvalidFormat)
+	}
+	if headSize != len(headerData) {
+		return nil, fmt.Errorf("%w: RAR3 file header size mismatch", ErrInvalidFormat)
 	}
 
 	// Check if we have enough data
 	if len(headerData) < 32 {
-		return nil, fmt.Errorf("file header too short")
+		return nil, fmt.Errorf("%w: RAR3 file header is shorter than 32 bytes", ErrInvalidFormat)
 	}
 
 	// Parse basic file header fields
 	packSize := binary.LittleEndian.Uint32(headerData[7:11])
 	unpackSize := binary.LittleEndian.Uint32(headerData[11:15])
-	// fileOS := headerData[15]
+	fileOS := headerData[15]
 	fileCRC := binary.LittleEndian.Uint32(headerData[16:20])
 	// fileTime := binary.LittleEndian.Uint32(headerData[20:24])
 	// unpVer := headerData[24]
 	method := headerData[25]
 	nameSize := binary.LittleEndian.Uint16(headerData[26:28])
-	// fileAttr := binary.LittleEndian.Uint32(headerData[28:32])
+	fileAttr := binary.LittleEndian.Uint32(headerData[28:32])
 
 	// Handle high pack/unp sizes
 	highPackSize := uint32(0)
@@ -665,64 +688,90 @@ func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, erro
 	offset := 32 // Start after basic header fields
 
 	if headFlags&FlagHasHighSize != 0 {
-		if offset+8 <= len(headerData) {
-			highPackSize = binary.LittleEndian.Uint32(headerData[offset : offset+4])
-			highUnpSize = binary.LittleEndian.Uint32(headerData[offset+4 : offset+8])
+		if offset+8 > len(headerData) {
+			return nil, fmt.Errorf("%w: truncated RAR3 high-size fields", ErrInvalidFormat)
 		}
+		highPackSize = binary.LittleEndian.Uint32(headerData[offset : offset+4])
+		highUnpSize = binary.LittleEndian.Uint32(headerData[offset+4 : offset+8])
 		offset += 8
 	}
 
 	// Calculate actual sizes
-	fullPackSize := int64(packSize) + (int64(highPackSize) << 32)
-	fullUnpSize := int64(unpackSize) + (int64(highUnpSize) << 32)
+	if unpackSize == math.MaxUint32 && (headFlags&FlagHasHighSize == 0 || highUnpSize == math.MaxUint32) {
+		return nil, fmt.Errorf("%w: RAR3 unpacked size is unknown", ErrInvalidFormat)
+	}
+	fullPackSizeUnsigned := uint64(packSize) | uint64(highPackSize)<<32
+	fullUnpSizeUnsigned := uint64(unpackSize) | uint64(highUnpSize)<<32
+	if fullPackSizeUnsigned > math.MaxInt64 || fullUnpSizeUnsigned > math.MaxInt64 {
+		return nil, fmt.Errorf("%w: RAR3 file size overflows", ErrInvalidFormat)
+	}
+	fullPackSize := int64(fullPackSizeUnsigned)
+	fullUnpSize := int64(fullUnpSizeUnsigned)
 
 	// Read filename
+	if nameSize == 0 || int(nameSize) > len(headerData)-offset {
+		return nil, fmt.Errorf("%w: invalid RAR3 file name size %d", ErrInvalidFormat, nameSize)
+	}
+	fileNameBytes := headerData[offset : offset+int(nameSize)]
 	var fileName string
-	if offset+int(nameSize) <= len(headerData) {
-		fileNameBytes := headerData[offset : offset+int(nameSize)]
 
-		if headFlags&FlagHasUnicodeName != 0 {
-			before, after, ok := bytes.Cut(fileNameBytes, []byte{0})
-			if ok {
-				// Try UTF-8 first
-				asciiPart := before
-				if utf8.Valid(asciiPart) {
-					fileName = string(asciiPart)
-				} else {
-					// Fall back to custom decoder
-					asciiStr := string(asciiPart)
-					unicodePart := after
-					fileName = decodeUnicode(asciiStr, unicodePart)
-				}
+	if headFlags&FlagHasUnicodeName != 0 {
+		before, after, ok := bytes.Cut(fileNameBytes, []byte{0})
+		if ok {
+			// Try UTF-8 first
+			asciiPart := before
+			if utf8.Valid(asciiPart) {
+				fileName = string(asciiPart)
 			} else {
-				// No null byte
-				if utf8.Valid(fileNameBytes) {
-					fileName = string(fileNameBytes)
-				} else {
-					fileName = string(fileNameBytes) // Last resort
-				}
+				// Fall back to custom decoder
+				asciiStr := string(asciiPart)
+				unicodePart := after
+				fileName = decodeUnicode(asciiStr, unicodePart)
 			}
 		} else {
-			// Non-Unicode filename
+			// No null byte
 			if utf8.Valid(fileNameBytes) {
 				fileName = string(fileNameBytes)
 			} else {
-				fileName = string(fileNameBytes) // Fallback
+				fileName = string(fileNameBytes) // Last resort
 			}
 		}
 	} else {
-		fileName = fmt.Sprintf("UnknownFile%d", len(r.Files))
+		// Non-Unicode filename
+		if utf8.Valid(fileNameBytes) {
+			fileName = string(fileNameBytes)
+		} else {
+			fileName = string(fileNameBytes) // Fallback
+		}
+	}
+	if fileName == "" || strings.IndexByte(fileName, 0) >= 0 {
+		return nil, fmt.Errorf("%w: invalid RAR3 file name", ErrInvalidFormat)
 	}
 
 	isDirectory := (headFlags & FlagDirectory) == FlagDirectory
+	isRedirected := fileOS == 3 && fileAttr&0xF000 == 0xA000
 
 	// Calculate data offsets
+	if position < 0 || int64(headSize) > math.MaxInt64-position {
+		return nil, fmt.Errorf("%w: RAR3 file header offset overflows", ErrInvalidFormat)
+	}
 	dataOffset := position + int64(headSize)
+	if !isDirectory && fullPackSize > 0 && headFlags&FlagHasData == 0 {
+		return nil, fmt.Errorf("%w: RAR3 file data flag is missing", ErrInvalidFormat)
+	}
+	if isDirectory && fullPackSize != 0 {
+		return nil, fmt.Errorf("%w: RAR3 directory has packed data", ErrInvalidFormat)
+	}
+	if fullPackSize > math.MaxInt64-dataOffset {
+		return nil, fmt.Errorf("%w: RAR3 file data offset overflows", ErrInvalidFormat)
+	}
 	nextOffset := dataOffset
 
-	// Only add data size if it's not a directory and has data
-	if !isDirectory && headFlags&FlagHasData != 0 {
+	if !isDirectory {
 		nextOffset += fullPackSize
+	}
+	if r.File != nil && nextOffset > r.File.FileSize {
+		return nil, fmt.Errorf("%w: RAR3 file data extends beyond archive", ErrInvalidFormat)
 	}
 
 	return &File{
@@ -733,6 +782,7 @@ func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, erro
 		CRC:            fileCRC,
 		IsDirectory:    isDirectory,
 		Encrypted:      headFlags&FlagPassword != 0,
+		Redirected:     isRedirected,
 		SplitBefore:    headFlags&FlagSplitBefore != 0,
 		SplitAfter:     headFlags&FlagSplitAfter != 0,
 		DataOffset:     dataOffset,

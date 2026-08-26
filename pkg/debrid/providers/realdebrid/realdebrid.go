@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/customerror"
+	"github.com/sirrobot01/decypharr/internal/providertraffic"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
@@ -53,7 +54,11 @@ type RealDebrid struct {
 	retries            int
 }
 
-func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid, error) {
+func New(
+	dc config.Debrid,
+	ratelimits map[string]ratelimit.Limiter,
+	trafficControllers ...*providertraffic.Controller,
+) (*RealDebrid, error) {
 	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", dc.APIKey),
 	}
@@ -68,6 +73,17 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 	}
 
 	cfg := config.Get()
+	var traffic *providertraffic.Controller
+	if len(trafficControllers) > 0 {
+		traffic = trafficControllers[0]
+	}
+	if traffic == nil {
+		traffic = providertraffic.New(providertraffic.Options{})
+	}
+	trafficProvider := strings.TrimSpace(dc.Provider)
+	if trafficProvider == "" {
+		trafficProvider = "realdebrid"
+	}
 
 	opts := []request.ClientOption{
 		request.WithHeaders(headers),
@@ -75,6 +91,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 		request.WithRateLimiter(ratelimits["main"]),
 		request.WithRetryableStatus(http.StatusTooManyRequests),
 		request.WithProxy(dc.Proxy),
+		request.WithProviderTraffic(traffic, trafficProvider, dc.APIKey),
 	}
 
 	repairOpts := []request.ClientOption{
@@ -84,12 +101,15 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 		request.WithRetryableStatus(429),
 		request.WithRateLimiter(ratelimits["repair"]),
 		request.WithProxy(dc.Proxy),
+		request.WithProviderTraffic(traffic, trafficProvider, dc.APIKey),
 	}
+	accountConfig := dc
+	accountConfig.Provider = trafficProvider
 
 	r := &RealDebrid{
 		Host:                  "https://api.real-debrid.com/rest/1.0",
 		APIKey:                dc.APIKey,
-		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
+		accountsManager:       account.NewManager(accountConfig, ratelimits["download"], _log, traffic),
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                request.New(opts...),
 		repairClient:          request.New(repairOpts...),

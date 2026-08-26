@@ -59,7 +59,7 @@ func (m *Manager) createClient(dc config.Debrid) (debrid.Client, error) {
 
 	switch dc.Provider {
 	case "realdebrid":
-		client, err = realdebrid.New(dc, rateLimits)
+		client, err = realdebrid.New(dc, rateLimits, m.providerTraffic)
 	case "alldebrid":
 		client, err = alldebrid.New(dc, rateLimits)
 	case "torbox":

@@ -62,6 +62,28 @@ func TestControllerGeneralBudgetIsPerEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerAccountBudgetIsSharedAcrossEndpoints(t *testing.T) {
+	controller := New(Options{Capabilities: func(string) Capabilities {
+		return Capabilities{
+			AccountAPIBudget: RateBudget{Requests: 1, Period: 40 * time.Millisecond, Burst: 1},
+		}
+	}})
+	first := Identity{ProviderType: "realdebrid", AccountToken: "first-secret"}
+	second := Identity{ProviderType: "realdebrid", AccountToken: "second-secret"}
+	if err := controller.WaitEndpoint(context.Background(), first, OperationAPI, "GET /first"); err != nil {
+		t.Fatal(err)
+	}
+
+	blockedCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := controller.WaitEndpoint(blockedCtx, first, OperationAPI, "GET /second"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second endpoint error = %v, want shared-account deadline", err)
+	}
+	if err := controller.WaitEndpoint(context.Background(), second, OperationAPI, "GET /second"); err != nil {
+		t.Fatalf("independent account inherited first account's budget: %v", err)
+	}
+}
+
 func TestControllerBurstStillHonorsRollingWindowCeiling(t *testing.T) {
 	controller := New(Options{Capabilities: func(string) Capabilities {
 		return Capabilities{

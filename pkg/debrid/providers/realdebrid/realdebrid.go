@@ -37,6 +37,17 @@ const (
 	realDebridDownloadListMaxPages    = realDebridDownloadListMaxItems/realDebridDownloadListPageSize + 1
 )
 
+var realDebridRARSafeNameReplacer = strings.NewReplacer(
+	"|", "_",
+	"\"", "_",
+	"\\", "_",
+	"?", "_",
+	"*", "_",
+	":", "_",
+	"<", "_",
+	">", "_",
+)
+
 type RealDebrid struct {
 	Host string `json:"host"`
 
@@ -350,6 +361,73 @@ func (r *RealDebrid) handleRarFallback(t *types.Torrent, data torrentInfo) map[s
 	return files
 }
 
+func mapStoredRARFiles(
+	selectedFiles []types.File,
+	rarFiles []*rar.File,
+	archiveLink string,
+	generated time.Time,
+) (map[string]types.File, error) {
+	if len(selectedFiles) == 0 {
+		return nil, fmt.Errorf("RAR mapping has no selected files")
+	}
+
+	selectedBySafeName := make(map[string]int, len(selectedFiles))
+	for index := range selectedFiles {
+		name := path.Base(strings.ReplaceAll(selectedFiles[index].Name, `\`, "/"))
+		safeName := realDebridRARSafeNameReplacer.Replace(name)
+		if safeName == "" {
+			return nil, fmt.Errorf("RAR selected file %d has an empty basename", index)
+		}
+		if _, exists := selectedBySafeName[safeName]; exists {
+			return nil, fmt.Errorf("RAR contains ambiguous selected basename %q", name)
+		}
+		selectedBySafeName[safeName] = index
+	}
+
+	mapped := make([]types.File, 0, len(selectedFiles))
+	matchedByIndex := make(map[int]string, len(selectedFiles))
+	for _, rarFile := range rarFiles {
+		if rarFile == nil || rarFile.IsDirectory {
+			continue
+		}
+		rarName := path.Base(strings.ReplaceAll(rarFile.Name(), `\`, "/"))
+		index, exists := selectedBySafeName[rarName]
+		if !exists {
+			continue
+		}
+		if previous, duplicate := matchedByIndex[index]; duplicate {
+			return nil, fmt.Errorf(
+				"RAR selected file %q matches multiple archive entries %q and %q",
+				selectedFiles[index].Name,
+				previous,
+				rarFile.Path,
+			)
+		}
+		byteRange, err := rarFile.StreamByteRange()
+		if err != nil {
+			return nil, fmt.Errorf("RAR entry %q is not directly streamable: %w", rarFile.Path, err)
+		}
+
+		file := selectedFiles[index]
+		file.Size = rarFile.Size
+		file.IsRar = true
+		file.ByteRange = byteRange
+		file.Link = archiveLink
+		file.Generated = generated
+		mapped = append(mapped, file)
+		matchedByIndex[index] = rarFile.Path
+	}
+
+	if len(mapped) == 0 {
+		return nil, fmt.Errorf("RAR contains no directly streamable selected files")
+	}
+	if len(mapped) != len(selectedFiles) {
+		return nil, fmt.Errorf("RAR matched %d of %d selected files", len(mapped), len(selectedFiles))
+	}
+
+	return types.FilesByLogicalName(mapped)
+}
+
 // handleRarArchive processes RAR archives with multiple files
 func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, selectedFiles []types.File) (map[string]types.File, error) {
 	// This will block if 2 RAR operations are already in progress
@@ -387,49 +465,11 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 		return r.handleRarFallback(t, data), nil
 	}
 
-	// Create lookup map for faster matching
-	fileMap := make(map[string]*types.File)
-	for i := range selectedFiles {
-		// RD converts special chars to '_' for RAR file paths
-		safeName := strings.NewReplacer("|", "_", "\"", "_", "\\", "_", "?", "_", "*", "_", ":", "_", "<", "_", ">", "_").Replace(selectedFiles[i].Name)
-		if _, exists := fileMap[safeName]; exists {
-			return nil, fmt.Errorf(
-				"realdebrid RAR contains ambiguous selected basename %q",
-				selectedFiles[i].Name,
-			)
-		}
-		fileMap[safeName] = &selectedFiles[i]
-	}
-
-	now := time.Now()
-	matchedFiles := make([]types.File, 0, len(selectedFiles))
-
-	for _, rarFile := range rarFiles {
-		rarName := path.Base(strings.ReplaceAll(rarFile.Name(), `\`, "/"))
-		if file, exists := fileMap[rarName]; exists {
-			file.IsRar = true
-			file.ByteRange = rarFile.ByteRange()
-			file.Link = data.Links[0]
-			file.Generated = now
-			matchedFiles = append(matchedFiles, *file)
-		} else if !rarFile.IsDirectory {
-			r.logger.Warn().Msgf("RAR file %s not found in torrent files", rarFile.Name())
-		}
-	}
-	if len(matchedFiles) == 0 {
-		r.logger.Warn().Msgf("No valid files found in RAR archive for torrent: %s", t.Name)
-		return r.handleRarFallback(t, data), nil
-	}
-	if len(matchedFiles) != len(selectedFiles) {
-		return nil, fmt.Errorf(
-			"realdebrid RAR matched %d of %d selected files",
-			len(matchedFiles),
-			len(selectedFiles),
-		)
-	}
-	files, err := types.FilesByLogicalName(matchedFiles)
+	files, err := mapStoredRARFiles(selectedFiles, rarFiles, data.Links[0], time.Now())
 	if err != nil {
-		return nil, err
+		r.logger.Warn().Err(err).
+			Msgf("RAR archive is not directly streamable: %s. Falling back to single file representation.", t.Name)
+		return r.handleRarFallback(t, data), nil
 	}
 	r.logger.Info().Msgf("Unpacked RAR archive for torrent: %s with %d files", t.Name, len(files))
 	return files, nil

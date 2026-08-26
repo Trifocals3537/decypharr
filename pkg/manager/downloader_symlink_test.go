@@ -39,7 +39,7 @@ func TestCreateTorrentSymlinksKeepsExistingDestinationCompatibility(t *testing.T
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
 
-	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	downloader := &Downloader{dest: downloadRoot, relativeLinks: true, logger: zerolog.Nop()}
 	files := []*storage.File{{Name: fileName}}
 	paths, err := downloader.createSymlinksWhenMountFilesAppear(context.Background(), entry, files, mountPath, symlinkDir)
 	if err != nil {
@@ -110,5 +110,104 @@ func TestCreateUsenetSymlinksSkipsMatchingDirectoryName(t *testing.T) {
 	}
 	if info.IsDir() {
 		t.Fatal("symlink target is a directory, want a regular file")
+	}
+}
+
+func TestCreateUsenetSymlinksCanUseRelativeTargets(t *testing.T) {
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	entry := normalNZBEntry(downloadRoot)
+	fileName := "Show S01E01.mkv"
+	target := filepath.Join(mountPath, fileName)
+	if err := os.WriteFile(target, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireSymlinkCapability(t, target, downloadRoot)
+	symlinkDir, _, err := claimUsenetEntryDirectory(downloadRoot, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, relativeLinks: true, logger: zerolog.Nop()}
+	paths, err := downloader.createSymlinksWhenMountFilesAppear(
+		context.Background(),
+		entry,
+		[]*storage.File{{Name: fileName}},
+		mountPath,
+		symlinkDir,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("created %d symlinks, want 1", len(paths))
+	}
+	stored, err := os.Readlink(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(stored) {
+		t.Fatalf("symlink target = %q, want relative", stored)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(paths[0]), stored))
+	if !sameFilesystemPath(resolved, target) {
+		t.Fatalf("relative symlink resolves to %q, want %q", resolved, target)
+	}
+}
+
+func TestCreateOwnedTorrentSymlinkCanUseRelativeTarget(t *testing.T) {
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	entry := &storage.Entry{
+		InfoHash: "relative-torrent-symlink",
+		Name:     "release",
+		Protocol: config.ProtocolTorrent,
+		SavePath: downloadRoot,
+		Files: map[string]*storage.File{
+			"nested/movie.mkv": {Name: "nested/movie.mkv"},
+		},
+	}
+	if _, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{}); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(mountPath, "nested", "movie.mkv")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireSymlinkCapability(t, target, downloadRoot)
+
+	linkPath, err := createOwnedTorrentSymlink(
+		downloadRoot,
+		entry,
+		"nested/movie.mkv",
+		target,
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(stored) {
+		t.Fatalf("symlink target = %q, want relative", stored)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), stored))
+	if !sameFilesystemPath(resolved, target) {
+		t.Fatalf("relative symlink resolves to %q, want %q", resolved, target)
+	}
+}
+
+func requireSymlinkCapability(t *testing.T, target, directory string) {
+	t.Helper()
+	probe := filepath.Join(directory, "relative-symlink-capability-probe")
+	if err := os.Symlink(target, probe); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatalf("remove symlink capability probe: %v", err)
 	}
 }

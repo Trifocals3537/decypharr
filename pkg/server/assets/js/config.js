@@ -269,7 +269,7 @@ class ConfigManager {
         const fields = [
             'remove_stalled_after', 'nzb_user_agent', 'download_folder',
             'refresh_interval', 'max_active_downloads', 'skip_pre_cache',
-            'always_rm_tracker_urls', 'default_download_action'
+            'always_rm_tracker_urls', 'relative_symlinks', 'default_download_action'
         ];
 
         fields.forEach(field => {
@@ -1264,6 +1264,7 @@ class ConfigManager {
             max_active_downloads: parseInt(document.querySelector('[name="max_active_downloads"]').value) || 5,
             skip_pre_cache: document.querySelector('[name="skip_pre_cache"]').checked,
             always_rm_tracker_urls: document.querySelector('[name="always_rm_tracker_urls"]').checked,
+            relative_symlinks: document.querySelector('[name="relative_symlinks"]').checked,
             folder_naming: document.querySelector('[name="folder_naming"]')?.value || "",
             disable_webdav: document.querySelector('[name="disable_webdav"]').checked,
             refresh_dirs: document.querySelector('[name="refresh_dirs"]')?.value || "",

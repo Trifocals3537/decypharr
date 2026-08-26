@@ -290,6 +290,15 @@ func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
 	}
 }
 
+func TestRelativeSymlinksEnvironmentOverride(t *testing.T) {
+	t.Setenv("DECYPHARR_RELATIVE_SYMLINKS", "true")
+	cfg := &Config{}
+	cfg.applyEnvOverrides()
+	if !cfg.RelativeSymlinks {
+		t.Fatal("RelativeSymlinks = false, want environment override enabled")
+	}
+}
+
 func TestFirstLoadAppliesBindAddressEnvironmentOverride(t *testing.T) {
 	previousPath := GetMainPath()
 	configDir := t.TempDir()

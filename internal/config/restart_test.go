@@ -2,6 +2,14 @@ package config
 
 import "testing"
 
+func TestRequiresRestartTreatsRelativeSymlinksAsHot(t *testing.T) {
+	current := &Config{}
+	updated := &Config{RelativeSymlinks: true}
+	if current.RequiresRestart(updated) {
+		t.Fatal("relative symlink setting triggered a restart")
+	}
+}
+
 func TestRequiresRestartIgnoresInactiveMountSettings(t *testing.T) {
 	tests := []struct {
 		name    string

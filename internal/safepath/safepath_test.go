@@ -283,6 +283,37 @@ func TestSymlinkAllowsOutsideTargetButKeepsLinkUnderRoot(t *testing.T) {
 	assertSafePathContents(t, regularPath, "keep")
 }
 
+func TestSymlinkAcceptsEquivalentAbsoluteAndRelativeTargets(t *testing.T) {
+	root := t.TempDir()
+	linksDir := filepath.Join(root, "category", "release")
+	if err := os.MkdirAll(linksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "mounted.mkv")
+	if err := os.WriteFile(target, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(linksDir, "episode.mkv")
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	relativeTarget, err := filepath.Rel(linksDir, target)
+	if err != nil {
+		t.Skipf("relative symlinks unavailable for this layout: %v", err)
+	}
+
+	if err := Symlink(root, relativeTarget, linkPath); err != nil {
+		t.Fatalf("equivalent relative target rejected: %v", err)
+	}
+	stored, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != target {
+		t.Fatalf("existing absolute link was rewritten to %q", stored)
+	}
+}
+
 func TestSymlinkRejectsOutsideParent(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

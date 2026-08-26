@@ -130,6 +130,17 @@ Set in `config.json`:
 }
 ```
 
+### Relative symlinks
+
+Enable **Settings → Downloader → Relative Symlinks** when the mount and download
+trees keep the same relative layout in every environment that needs to follow the
+links. New Torrent and Usenet links will then store relative targets, which can make
+the library portable between a container and its host or across mount-root changes.
+Absolute links remain the default, and existing links that already resolve to the
+correct file are left unchanged.
+
+The equivalent environment setting is `DECYPHARR_RELATIVE_SYMLINKS=true`.
+
 ## Queue Cleanup
 
 Sonarr/Radarr queues often get stuck on releases that can't import automatically — failed

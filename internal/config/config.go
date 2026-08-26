@@ -275,6 +275,7 @@ type Config struct {
 	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
 	SkipMultiSeason       bool                     `json:"skip_multi_season,omitempty"`
 	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
+	RelativeSymlinks      bool                     `json:"relative_symlinks,omitempty"`
 	Categories            []string                 `json:"categories,omitempty"`
 	FolderNaming          WebDavFolderNaming       `json:"folder_naming,omitempty"`
 	CustomFolders         map[string]CustomFolders `json:"custom_folders,omitempty"`
@@ -888,6 +889,7 @@ func clearHotFields(c *Config) {
 	c.SkipPreCache = false
 	c.SkipMultiSeason = false
 	c.AlwaysRmTrackerUrls = false
+	c.RelativeSymlinks = false
 	c.Categories = nil
 	c.FolderNaming = ""
 	c.CustomFolders = nil

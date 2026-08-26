@@ -361,6 +361,85 @@ func (r *RealDebrid) handleRarFallback(t *types.Torrent, data torrentInfo) map[s
 	return files
 }
 
+type rarPathIndexNode struct {
+	children   map[string]*rarPathIndexNode
+	matchCount int
+	matchIndex int
+}
+
+func normalizeRARMatchPath(providerPath, fallbackName string) ([]string, error) {
+	value := strings.TrimSpace(providerPath)
+	if value == "" {
+		value = strings.TrimSpace(fallbackName)
+	}
+	if value == "" {
+		return nil, fmt.Errorf("path is empty")
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return nil, fmt.Errorf("path contains a NUL byte")
+	}
+
+	value = strings.ReplaceAll(value, `\`, "/")
+	value = strings.TrimLeft(value, "/")
+	clean := path.Clean(value)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return nil, fmt.Errorf("path traverses outside the archive")
+	}
+
+	parts := strings.Split(clean, "/")
+	for index := range parts {
+		// Real-Debrid replaces filesystem-reserved characters when it exposes
+		// archive members. Apply the same transform to both sides and use a
+		// portable key so path matching agrees with the logical file map.
+		parts[index] = strings.ToLower(strings.TrimRight(
+			realDebridRARSafeNameReplacer.Replace(parts[index]),
+			" .",
+		))
+		if parts[index] == "" {
+			return nil, fmt.Errorf("path contains an empty portable component")
+		}
+	}
+	return parts, nil
+}
+
+func addRARMatchPath(root *rarPathIndexNode, parts []string, index int) {
+	node := root
+	for partIndex := len(parts) - 1; partIndex >= 0; partIndex-- {
+		if node.children == nil {
+			node.children = make(map[string]*rarPathIndexNode)
+		}
+		child := node.children[parts[partIndex]]
+		if child == nil {
+			child = &rarPathIndexNode{matchIndex: index}
+			node.children[parts[partIndex]] = child
+		}
+		child.matchCount++
+		if child.matchCount > 1 {
+			child.matchIndex = -1
+		}
+		node = child
+	}
+}
+
+func findUniqueRARMatch(root *rarPathIndexNode, parts []string) (index int, matched bool, ambiguous bool) {
+	node := root
+	var deepest *rarPathIndexNode
+	for partIndex := len(parts) - 1; partIndex >= 0; partIndex-- {
+		node = node.children[parts[partIndex]]
+		if node == nil {
+			break
+		}
+		deepest = node
+	}
+	if deepest == nil {
+		return 0, false, false
+	}
+	if deepest.matchCount != 1 || deepest.matchIndex < 0 {
+		return 0, false, true
+	}
+	return deepest.matchIndex, true, false
+}
+
 func mapStoredRARFiles(
 	selectedFiles []types.File,
 	rarFiles []*rar.File,
@@ -371,51 +450,64 @@ func mapStoredRARFiles(
 		return nil, fmt.Errorf("RAR mapping has no selected files")
 	}
 
-	selectedBySafeName := make(map[string]int, len(selectedFiles))
-	for index := range selectedFiles {
-		name := path.Base(strings.ReplaceAll(selectedFiles[index].Name, `\`, "/"))
-		safeName := realDebridRARSafeNameReplacer.Replace(name)
-		if safeName == "" {
-			return nil, fmt.Errorf("RAR selected file %d has an empty basename", index)
-		}
-		if _, exists := selectedBySafeName[safeName]; exists {
-			return nil, fmt.Errorf("RAR contains ambiguous selected basename %q", name)
-		}
-		selectedBySafeName[safeName] = index
-	}
-
-	mapped := make([]types.File, 0, len(selectedFiles))
-	matchedByIndex := make(map[int]string, len(selectedFiles))
+	archiveIndex := &rarPathIndexNode{}
+	archiveFiles := make([]*rar.File, 0, len(rarFiles))
 	for _, rarFile := range rarFiles {
 		if rarFile == nil || rarFile.IsDirectory {
 			continue
 		}
-		rarName := path.Base(strings.ReplaceAll(rarFile.Name(), `\`, "/"))
-		index, exists := selectedBySafeName[rarName]
-		if !exists {
-			continue
+		parts, err := normalizeRARMatchPath(rarFile.Path, rarFile.Name())
+		if err != nil {
+			return nil, fmt.Errorf("RAR entry %q has an invalid path: %w", rarFile.Path, err)
 		}
-		if previous, duplicate := matchedByIndex[index]; duplicate {
+		index := len(archiveFiles)
+		archiveFiles = append(archiveFiles, rarFile)
+		addRARMatchPath(archiveIndex, parts, index)
+	}
+	if len(archiveFiles) == 0 {
+		return nil, fmt.Errorf("RAR contains no file entries")
+	}
+
+	mapped := make([]types.File, 0, len(selectedFiles))
+	matchedArchiveFiles := make(map[int]int, len(selectedFiles))
+	for selectedIndex := range selectedFiles {
+		parts, err := normalizeRARMatchPath(selectedFiles[selectedIndex].Path, selectedFiles[selectedIndex].Name)
+		if err != nil {
+			return nil, fmt.Errorf("RAR selected file %d has an invalid path: %w", selectedIndex, err)
+		}
+		archiveFileIndex, matched, ambiguous := findUniqueRARMatch(archiveIndex, parts)
+		if ambiguous {
 			return nil, fmt.Errorf(
-				"RAR selected file %q matches multiple archive entries %q and %q",
-				selectedFiles[index].Name,
-				previous,
-				rarFile.Path,
+				"RAR selected file %q has an ambiguous archive path match",
+				selectedFiles[selectedIndex].Path,
 			)
 		}
+		if !matched {
+			continue
+		}
+		if previousSelected, duplicate := matchedArchiveFiles[archiveFileIndex]; duplicate {
+			return nil, fmt.Errorf(
+				"RAR selected files %q and %q resolve to the same archive entry %q",
+				selectedFiles[previousSelected].Path,
+				selectedFiles[selectedIndex].Path,
+				archiveFiles[archiveFileIndex].Path,
+			)
+		}
+
+		rarFile := archiveFiles[archiveFileIndex]
 		byteRange, err := rarFile.StreamByteRange()
 		if err != nil {
 			return nil, fmt.Errorf("RAR entry %q is not directly streamable: %w", rarFile.Path, err)
 		}
 
-		file := selectedFiles[index]
+		file := selectedFiles[selectedIndex]
 		file.Size = rarFile.Size
 		file.IsRar = true
 		file.ByteRange = byteRange
 		file.Link = archiveLink
 		file.Generated = generated
 		mapped = append(mapped, file)
-		matchedByIndex[index] = rarFile.Path
+		matchedArchiveFiles[archiveFileIndex] = selectedIndex
 	}
 
 	if len(mapped) == 0 {

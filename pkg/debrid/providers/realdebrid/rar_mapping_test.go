@@ -72,13 +72,13 @@ func TestMapStoredRARFilesFailsClosedOnUnsafeMappings(t *testing.T) {
 			name:          "duplicate archive basename",
 			selected:      []types.File{{Name: "video.mkv"}},
 			rarFiles:      []*rar.File{storedRARFile("one/video.mkv", 10, 4), storedRARFile("two/video.mkv", 20, 4)},
-			wantSubstring: "matches multiple archive entries",
+			wantSubstring: "ambiguous archive path match",
 		},
 		{
 			name:          "ambiguous selected safe basename",
 			selected:      []types.File{{Name: "Video?.mkv"}, {Name: "Video*.mkv"}},
 			rarFiles:      []*rar.File{storedRARFile("Video_.mkv", 10, 4)},
-			wantSubstring: "ambiguous selected basename",
+			wantSubstring: "same archive entry",
 		},
 		{
 			name:          "no selected match",
@@ -99,6 +99,82 @@ func TestMapStoredRARFilesFailsClosedOnUnsafeMappings(t *testing.T) {
 			}
 			if test.wantSubstring != "" && !strings.Contains(err.Error(), test.wantSubstring) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantSubstring)
+			}
+		})
+	}
+}
+
+func TestMapStoredRARFilesUsesDeepestUniquePathSuffix(t *testing.T) {
+	selected := []types.File{
+		{
+			TorrentId: "torrent", Id: "1", Name: "Episode.mkv",
+			Path: "Release/Season 01/Episode.mkv", Size: 999,
+		},
+		{
+			TorrentId: "torrent", Id: "2", Name: "Episode.mkv",
+			Path: "Release/Season 02/Episode.mkv", Size: 999,
+		},
+	}
+	rars := []*rar.File{
+		storedRARFile("Archive/Season 02/Episode.mkv", 20, 4),
+		storedRARFile("Archive/Season 01/Episode.mkv", 10, 4),
+		storedRARFile("Extras/Episode.mkv", 30, 4),
+	}
+
+	files, err := mapStoredRARFiles(selected, rars, "restricted", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := map[string][2]int64{
+		"Release/Season 01/Episode.mkv": {10, 13},
+		"Release/Season 02/Episode.mkv": {20, 23},
+	}
+	if len(files) != len(wants) {
+		t.Fatalf("mapped files = %#v, want %d", files, len(wants))
+	}
+	for name, wantRange := range wants {
+		file, exists := files[name]
+		if !exists || file.ByteRange == nil || *file.ByteRange != wantRange || file.Name != name {
+			t.Fatalf("mapped file %q = %#v, exists=%v", name, file, exists)
+		}
+	}
+}
+
+func TestMapStoredRARFilesRejectsUnsafeOrConflictingPaths(t *testing.T) {
+	tests := []struct {
+		name      string
+		selected  []types.File
+		rarFiles  []*rar.File
+		wantError string
+	}{
+		{
+			name:      "selected traversal",
+			selected:  []types.File{{Name: "video.mkv", Path: "../video.mkv"}},
+			rarFiles:  []*rar.File{storedRARFile("video.mkv", 10, 4)},
+			wantError: "traverses outside",
+		},
+		{
+			name:      "archive traversal",
+			selected:  []types.File{{Name: "video.mkv"}},
+			rarFiles:  []*rar.File{storedRARFile("../video.mkv", 10, 4)},
+			wantError: "traverses outside",
+		},
+		{
+			name: "duplicate selected route",
+			selected: []types.File{
+				{Name: "video.mkv", Path: "Release/video.mkv"},
+				{Name: "video.mkv", Path: "release/VIDEO.MKV"},
+			},
+			rarFiles:  []*rar.File{storedRARFile("release/video.mkv", 10, 4)},
+			wantError: "same archive entry",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			files, err := mapStoredRARFiles(test.selected, test.rarFiles, "restricted", time.Time{})
+			if err == nil || files != nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("mapStoredRARFiles() = %#v, %v; want %q", files, err, test.wantError)
 			}
 		})
 	}

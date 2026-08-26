@@ -121,9 +121,17 @@ func lifecycleDownloadLink(url string) types.DownloadLink {
 		Filename:     "video.mkv",
 		Link:         "restricted-link",
 		DownloadLink: url,
+		Size:         4,
 		Generated:    time.Now(),
 		ExpiresAt:    time.Now().Add(time.Hour),
 	}
+}
+
+func writeValidLinkProbe(w http.ResponseWriter) {
+	w.Header().Set("Content-Length", "1")
+	w.Header().Set("Content-Range", "bytes 0-0/4")
+	w.WriteHeader(http.StatusPartialContent)
+	_, _ = w.Write([]byte("d"))
 }
 
 func newLifecycleService(client *lifecycleTestClient, httpClient *http.Client, retries int) *Service {
@@ -137,13 +145,13 @@ func TestGetLinkOwnerCancellationDoesNotCancelSharedResolution(t *testing.T) {
 	releaseRequest := make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(releaseRequest) })
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if heads.Add(1) == 1 {
+		if probes.Add(1) == 1 {
 			close(requestStarted)
 		}
 		<-releaseRequest
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -180,8 +188,8 @@ func TestGetLinkOwnerCancellationDoesNotCancelSharedResolution(t *testing.T) {
 		t.Fatalf("joined GetLink() completed before shared request was released: %+v", result)
 	default:
 	}
-	if fetches, _ := client.counts(); fetches != 1 || heads.Load() != 1 {
-		t.Fatalf("provider fetches/HEADs = %d/%d, want one shared operation", fetches, heads.Load())
+	if fetches, _ := client.counts(); fetches != 1 || probes.Load() != 1 {
+		t.Fatalf("provider fetches/range probes = %d/%d, want one shared operation", fetches, probes.Load())
 	}
 
 	releaseOnce.Do(func() { close(releaseRequest) })
@@ -196,13 +204,13 @@ func TestRefreshOwnerCancellationDoesNotCancelSharedRegeneration(t *testing.T) {
 	releaseRequest := make(chan struct{})
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(releaseRequest) })
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if heads.Add(1) == 1 {
+		if probes.Add(1) == 1 {
 			close(requestStarted)
 		}
 		<-releaseRequest
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -242,8 +250,8 @@ func TestRefreshOwnerCancellationDoesNotCancelSharedRegeneration(t *testing.T) {
 	default:
 	}
 	fetches, invalidations := client.counts()
-	if fetches != 1 || invalidations != 1 || heads.Load() != 1 {
-		t.Fatalf("provider fetches/invalidations/HEADs = %d/%d/%d, want one shared regeneration", fetches, invalidations, heads.Load())
+	if fetches != 1 || invalidations != 1 || probes.Load() != 1 {
+		t.Fatalf("provider fetches/invalidations/range probes = %d/%d/%d, want one shared regeneration", fetches, invalidations, probes.Load())
 	}
 
 	releaseOnce.Do(func() { close(releaseRequest) })
@@ -287,7 +295,7 @@ func TestWithoutRepairNeverMutatesAlternatePlacement(t *testing.T) {
 
 func TestReadOnlyProbePreservesFullActiveRepairRecovery(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -331,13 +339,13 @@ func TestReadOnlyProbePreservesFullActiveRepairRecovery(t *testing.T) {
 }
 
 func TestFailFastValidationSkipsRetryDelay(t *testing.T) {
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if heads.Add(1) == 1 {
+		if probes.Add(1) == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -353,19 +361,19 @@ func TestFailFastValidationSkipsRetryDelay(t *testing.T) {
 	if err == nil {
 		t.Fatal("GetLink() succeeded, want first-attempt transient failure")
 	}
-	if heads.Load() != 1 || waits.Load() != 0 {
-		t.Fatalf("HEAD requests/waits = %d/%d, want 1/0", heads.Load(), waits.Load())
+	if probes.Load() != 1 || waits.Load() != 0 {
+		t.Fatalf("range probes/waits = %d/%d, want 1/0", probes.Load(), waits.Load())
 	}
 }
 
 func TestTransientValidationFailureIsNotSticky(t *testing.T) {
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if heads.Add(1) == 1 {
+		if probes.Add(1) == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -382,20 +390,20 @@ func TestTransientValidationFailureIsNotSticky(t *testing.T) {
 	if _, err := service.GetLink(context.Background(), entry, "video.mkv"); err != nil {
 		t.Fatalf("memoized GetLink() error = %v", err)
 	}
-	if got := heads.Load(); got != 2 {
-		t.Fatalf("HEAD requests = %d, want 2", got)
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("range probes = %d, want 2", got)
 	}
 }
 
 func TestThrottleBacksOffWithoutGeneratingAnotherLink(t *testing.T) {
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if heads.Add(1) == 1 {
+		if probes.Add(1) == 1 {
 			w.Header().Set("Retry-After", "3")
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -425,7 +433,7 @@ func TestRejectedLinkRefreshesOnceAndValidatesReplacement(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -448,9 +456,9 @@ func TestRejectedLinkRefreshesOnceAndValidatesReplacement(t *testing.T) {
 }
 
 func TestRejectedReplacementStartsRefreshCooldown(t *testing.T) {
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		heads.Add(1)
+		probes.Add(1)
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
@@ -487,8 +495,8 @@ func TestRejectedReplacementStartsRefreshCooldown(t *testing.T) {
 	if fetches != 2 || invalidations != 1 {
 		t.Fatalf("provider fetches/invalidations = %d/%d, want bounded 2/1", fetches, invalidations)
 	}
-	if got := heads.Load(); got != 4 {
-		t.Fatalf("HEAD requests = %d, want 4 so the cached CDN URL remains probeable", got)
+	if got := probes.Load(); got != 4 {
+		t.Fatalf("range probes = %d, want 4 so the cached CDN URL remains probeable", got)
 	}
 }
 
@@ -496,7 +504,11 @@ func TestRefreshCooldownClearsWhenCachedLinkRecovers(t *testing.T) {
 	var status atomic.Int32
 	status.Store(http.StatusForbidden)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(int(status.Load()))
+		if got := int(status.Load()); got != http.StatusOK {
+			w.WriteHeader(got)
+			return
+		}
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -576,18 +588,18 @@ func TestGetLinkAndRefreshShareOneProviderRegeneration(t *testing.T) {
 	replacementStarted := make(chan struct{})
 	releaseReplacement := make(chan struct{})
 	var startOnce sync.Once
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		heads.Add(1)
+		probes.Add(1)
 		switch r.URL.Path {
 		case "/old":
 			w.WriteHeader(http.StatusForbidden)
 		case "/replacement":
 			startOnce.Do(func() { close(replacementStarted) })
 			<-releaseReplacement
-			w.WriteHeader(http.StatusOK)
+			writeValidLinkProbe(w)
 		default:
-			w.WriteHeader(http.StatusOK)
+			writeValidLinkProbe(w)
 		}
 	}))
 	defer server.Close()
@@ -621,8 +633,8 @@ func TestGetLinkAndRefreshShareOneProviderRegeneration(t *testing.T) {
 		t.Fatalf("concurrent links = %q / %q, want shared replacement", first.link.DownloadLink, secondLink.DownloadLink)
 	}
 	fetches, invalidations := client.counts()
-	if fetches != 2 || invalidations != 1 || heads.Load() != 2 {
-		t.Fatalf("provider fetches/invalidations/HEADs = %d/%d/%d, want 2/1/2", fetches, invalidations, heads.Load())
+	if fetches != 2 || invalidations != 1 || probes.Load() != 2 {
+		t.Fatalf("provider fetches/invalidations/range probes = %d/%d/%d, want 2/1/2", fetches, invalidations, probes.Load())
 	}
 }
 
@@ -725,15 +737,15 @@ func TestRefreshBackoffDelayCapsAtMaximum(t *testing.T) {
 	}
 }
 
-func TestValidationFallsBackToOneByteGetWhenHeadUnsupported(t *testing.T) {
+func TestValidationUsesOneByteRangeProbe(t *testing.T) {
 	var methods []string
+	var encoding string
+	var cacheControl string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		methods = append(methods, r.Method+":"+r.Header.Get("Range"))
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.WriteHeader(http.StatusPartialContent)
+		encoding = r.Header.Get("Accept-Encoding")
+		cacheControl = r.Header.Get("Cache-Control")
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -742,17 +754,127 @@ func TestValidationFallsBackToOneByteGetWhenHeadUnsupported(t *testing.T) {
 	if _, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv"); err != nil {
 		t.Fatalf("GetLink() error = %v", err)
 	}
-	want := []string{"HEAD:", "GET:bytes=0-0"}
+	want := []string{"GET:bytes=0-0"}
 	if fmt.Sprint(methods) != fmt.Sprint(want) {
 		t.Fatalf("requests = %v, want %v", methods, want)
+	}
+	if encoding != "identity" {
+		t.Fatalf("Accept-Encoding = %q, want identity", encoding)
+	}
+	if cacheControl != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", cacheControl)
+	}
+}
+
+func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
+	tests := []struct {
+		name     string
+		response func(http.ResponseWriter)
+		code     string
+	}{
+		{
+			name: "ignored range",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "4")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("data"))
+			},
+			code: "range_probe_status",
+		},
+		{
+			name: "missing content range",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "1")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("d"))
+			},
+			code: "range_probe_content_range",
+		},
+		{
+			name: "wrong bounds",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "1")
+				w.Header().Set("Content-Range", "bytes 1-1/4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("a"))
+			},
+			code: "range_probe_content_range",
+		},
+		{
+			name: "wrong total",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "1")
+				w.Header().Set("Content-Range", "bytes 0-0/99")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("d"))
+			},
+			code: "range_probe_content_range",
+		},
+		{
+			name: "wrong content length",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Length", "2")
+				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("dd"))
+			},
+			code: "range_probe_content_length",
+		},
+		{
+			name: "empty chunked body",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.WriteHeader(http.StatusPartialContent)
+				w.(http.Flusher).Flush()
+			},
+			code: "range_probe_body_length",
+		},
+		{
+			name: "overlong chunked body",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.WriteHeader(http.StatusPartialContent)
+				w.(http.Flusher).Flush()
+				_, _ = w.Write([]byte("dd"))
+			},
+			code: "range_probe_body_length",
+		},
+		{
+			name: "encoded representation",
+			response: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Encoding", "gzip")
+				w.Header().Set("Content-Length", "1")
+				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("d"))
+			},
+			code: "range_probe_encoding",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				test.response(w)
+			}))
+			defer server.Close()
+
+			service := newLifecycleService(&lifecycleTestClient{}, server.Client(), 0)
+			link := lifecycleDownloadLink(server.URL)
+			err := service.validateLink(context.Background(), &link)
+			linkErr := GetLinkError(err)
+			if linkErr == nil || linkErr.Code != test.code || !linkErr.ShouldRefetch() {
+				t.Fatalf("validateLink() error = %v, want refetchable %s", err, test.code)
+			}
+		})
 	}
 }
 
 func TestRegeneratedLinkWithSameURLIsRevalidated(t *testing.T) {
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		heads.Add(1)
-		w.WriteHeader(http.StatusOK)
+		probes.Add(1)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -770,8 +892,8 @@ func TestRegeneratedLinkWithSameURLIsRevalidated(t *testing.T) {
 	if _, err := service.GetLink(context.Background(), entry, "video.mkv"); err != nil {
 		t.Fatalf("second GetLink() error = %v", err)
 	}
-	if got := heads.Load(); got != 2 {
-		t.Fatalf("HEAD requests = %d, want 2 for two link generations", got)
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("range probes = %d, want 2 for two link generations", got)
 	}
 }
 
@@ -784,9 +906,9 @@ func TestAccountFailureStartsRetryableCooldownWhenNoAlternateExists(t *testing.T
 		config.SetConfigPath(previousPath)
 	})
 
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		heads.Add(1)
+		probes.Add(1)
 		w.Header().Set("X-Error", "bandwidth_exceeded")
 		w.Header().Set("Retry-After", "120")
 		w.WriteHeader(http.StatusForbidden)
@@ -809,8 +931,8 @@ func TestAccountFailureStartsRetryableCooldownWhenNoAlternateExists(t *testing.T
 	if linkErr := GetLinkError(err); linkErr == nil || linkErr.Code != "account_cooldown" || !linkErr.ShouldBackoff() || linkErr.RetryAfter < 119*time.Second {
 		t.Fatalf("error = %v, want throttled account cooldown honoring Retry-After", err)
 	}
-	if heads.Load() != 1 {
-		t.Fatalf("HEAD requests = %d, want 1 without recursive fallback", heads.Load())
+	if probes.Load() != 1 {
+		t.Fatalf("range probes = %d, want 1 without recursive fallback", probes.Load())
 	}
 	accountState := accounts.All()[0].RecoveryStatus(time.Now())
 	if accountState.State != account.StateTemporarilySuspended || accounts.All()[0].Disabled.Load() {
@@ -827,15 +949,15 @@ func TestAccountFailureMovesToAlternateAccount(t *testing.T) {
 		config.SetConfigPath(previousPath)
 	})
 
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		heads.Add(1)
+		probes.Add(1)
 		if r.URL.Path == "/first" {
 			w.Header().Set("X-Error", "bandwidth_exceeded")
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -859,8 +981,8 @@ func TestAccountFailureMovesToAlternateAccount(t *testing.T) {
 	if got.Token != "second-token" {
 		t.Fatalf("link token = %q, want alternate account", got.Token)
 	}
-	if heads.Load() != 2 || len(accounts.Active()) != 1 || accounts.Active()[0].Token != "second-token" {
-		t.Fatalf("HEAD requests/active accounts = %d/%v, want 2/[second-token]", heads.Load(), accounts.Active())
+	if probes.Load() != 2 || len(accounts.Active()) != 1 || accounts.Active()[0].Token != "second-token" {
+		t.Fatalf("range probes/active accounts = %d/%v, want 2/[second-token]", probes.Load(), accounts.Active())
 	}
 	firstAccount, _ := accounts.GetAccount("first-token")
 	if status := firstAccount.RecoveryStatus(time.Now()); status.State != account.StateTemporarilySuspended || firstAccount.Disabled.Load() {
@@ -877,10 +999,10 @@ func TestSuccessfulValidatedProbeRecoversSuspendedAccount(t *testing.T) {
 		config.SetConfigPath(previousPath)
 	})
 
-	var heads atomic.Int32
+	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		heads.Add(1)
-		w.WriteHeader(http.StatusOK)
+		probes.Add(1)
+		writeValidLinkProbe(w)
 	}))
 	defer server.Close()
 
@@ -911,8 +1033,8 @@ func TestSuccessfulValidatedProbeRecoversSuspendedAccount(t *testing.T) {
 	if _, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv"); err != nil {
 		t.Fatalf("GetLink() error = %v", err)
 	}
-	if heads.Load() != 1 {
-		t.Fatalf("HEAD requests = %d, want 1 fresh half-open validation", heads.Load())
+	if probes.Load() != 1 {
+		t.Fatalf("range probes = %d, want 1 fresh half-open validation", probes.Load())
 	}
 	if recovered := testAccount.RecoveryStatus(time.Now()); recovered.State != account.StateActive || len(accounts.Active()) != 1 {
 		t.Fatalf("recovered account status/active = %+v/%d", recovered, len(accounts.Active()))

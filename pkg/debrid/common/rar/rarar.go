@@ -119,43 +119,14 @@ func (f *HttpFile) doWithRetry(operation func() (any, error)) (any, error) {
 // getFileSize gets the total file size from the server
 func (f *HttpFile) getFileSize() (int64, error) {
 	result, err := f.doWithRetry(func() (any, error) {
-		req, err := http.NewRequest(http.MethodHead, f.URL, nil)
+		size, found, err := f.getFileSizeFromHEAD()
 		if err != nil {
-			return int64(0), fmt.Errorf(
-				"%w: create request for %s",
-				ErrNetworkError,
-				utils.RedactedURL(f.URL),
-			)
+			return int64(0), err
 		}
-
-		resp, err := f.client.Do(req)
-		if err != nil {
-			return int64(0), fmt.Errorf(
-				"%w: request to %s failed",
-				ErrNetworkError,
-				utils.RedactedURL(f.URL),
-			)
+		if found {
+			return size, nil
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return int64(0), fmt.Errorf("%w: unexpected status code: %d", ErrNetworkError, resp.StatusCode)
-		}
-
-		contentLength := resp.Header.Get("Content-Length")
-		if contentLength == "" {
-			return int64(0), fmt.Errorf("%w: content length not provided", ErrNetworkError)
-		}
-
-		size, err := strconv.ParseInt(contentLength, 10, 64)
-		if err != nil {
-			return int64(0), fmt.Errorf("%w: %v", ErrNetworkError, err)
-		}
-		if size <= 0 {
-			return int64(0), fmt.Errorf("%w: invalid content length", ErrNetworkError)
-		}
-
-		return size, nil
+		return f.getFileSizeFromRange()
 	})
 
 	if err != nil {
@@ -163,6 +134,128 @@ func (f *HttpFile) getFileSize() (int64, error) {
 	}
 
 	return result.(int64), nil
+}
+
+func (f *HttpFile) getFileSizeFromHEAD() (int64, bool, error) {
+	req, err := http.NewRequest(http.MethodHead, f.URL, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"%w: create HEAD request for %s",
+			ErrNetworkError,
+			utils.RedactedURL(f.URL),
+		)
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"%w: HEAD request to %s failed",
+			ErrNetworkError,
+			utils.RedactedURL(f.URL),
+		)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		contentLength := strings.TrimSpace(resp.Header.Get("Content-Length"))
+		if contentLength == "" {
+			return 0, false, nil
+		}
+		size, parseErr := strconv.ParseInt(contentLength, 10, 64)
+		if parseErr == nil && size > 0 {
+			return size, true, nil
+		}
+		// A malformed or unusable HEAD length is not authoritative. A strict
+		// one-byte range response can still provide the representation size.
+		return 0, false, nil
+	}
+
+	if isRetryableHTTPStatus(resp.StatusCode) {
+		return 0, false, fmt.Errorf(
+			"%w: HEAD request returned status %d",
+			ErrNetworkError,
+			resp.StatusCode,
+		)
+	}
+	// Some signed and CDN-backed URLs intentionally reject HEAD while still
+	// supporting ranged GETs. Probe that capability instead of rejecting the
+	// archive solely because HEAD was unavailable.
+	return 0, false, nil
+}
+
+func (f *HttpFile) getFileSizeFromRange() (int64, error) {
+	req, err := http.NewRequest(http.MethodGet, f.URL, nil)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: create range size probe for %s",
+			ErrNetworkError,
+			utils.RedactedURL(f.URL),
+		)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("Accept-Encoding", "identity")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: range size probe to %s failed",
+			ErrNetworkError,
+			utils.RedactedURL(f.URL),
+		)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+			return 0, fmt.Errorf("%w: range size probe returned content encoding %q", ErrNetworkError, encoding)
+		}
+		start, end, total, err := parseContentRange(resp.Header.Get("Content-Range"))
+		if err != nil {
+			return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
+		}
+		if start != 0 || end != 0 || total <= 0 {
+			return 0, fmt.Errorf(
+				"%w: range size probe returned %d-%d/%d, want 0-0 with a positive total",
+				ErrNetworkError,
+				start,
+				end,
+				total,
+			)
+		}
+		if resp.ContentLength >= 0 && resp.ContentLength != 1 {
+			return 0, fmt.Errorf(
+				"%w: range size probe body length %d, want 1",
+				ErrNetworkError,
+				resp.ContentLength,
+			)
+		}
+		probe, err := io.ReadAll(io.LimitReader(resp.Body, 2))
+		if err != nil {
+			return 0, fmt.Errorf("%w: read range size probe: %v", ErrNetworkError, err)
+		}
+		if len(probe) != 1 {
+			return 0, fmt.Errorf("%w: range size probe returned %d body bytes, want 1", ErrNetworkError, len(probe))
+		}
+		return total, nil
+	case http.StatusOK:
+		// The origin ignored Range. Closing immediately keeps this fallback
+		// bounded instead of downloading an entire archive just to learn its size.
+		return 0, ErrRangeRequestsNotSupported
+	default:
+		return 0, fmt.Errorf(
+			"%w: range size probe returned status %d",
+			ErrNetworkError,
+			resp.StatusCode,
+		)
+	}
+}
+
+func isRetryableHTTPStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
 }
 
 // ReadAt implements the io.ReaderAt interface
@@ -201,6 +294,7 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 			)
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, end))
+		req.Header.Set("Accept-Encoding", "identity")
 
 		// Make the request
 		resp, err := f.client.Do(req)
@@ -216,6 +310,9 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 		// Handle response
 		switch resp.StatusCode {
 		case http.StatusPartialContent:
+			if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+				return 0, fmt.Errorf("%w: partial response returned content encoding %q", ErrNetworkError, encoding)
+			}
 			if err := validateContentRange(
 				resp.Header.Get("Content-Range"),
 				off,
@@ -267,30 +364,9 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 }
 
 func validateContentRange(header string, wantStart, wantEnd, wantTotal int64) error {
-	const prefix = "bytes "
-	if !strings.HasPrefix(header, prefix) {
-		return fmt.Errorf("missing or invalid Content-Range")
-	}
-	value := strings.TrimPrefix(header, prefix)
-	if strings.Count(value, "/") != 1 {
-		return fmt.Errorf("invalid Content-Range")
-	}
-	rangePart, totalPart, _ := strings.Cut(value, "/")
-	if strings.Count(rangePart, "-") != 1 || totalPart == "*" {
-		return fmt.Errorf("invalid Content-Range")
-	}
-	startPart, endPart, _ := strings.Cut(rangePart, "-")
-	start, err := strconv.ParseInt(startPart, 10, 64)
+	start, end, total, err := parseContentRange(header)
 	if err != nil {
-		return fmt.Errorf("invalid Content-Range start")
-	}
-	end, err := strconv.ParseInt(endPart, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid Content-Range end")
-	}
-	total, err := strconv.ParseInt(totalPart, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid Content-Range total")
+		return err
 	}
 	if start != wantStart || end != wantEnd || total != wantTotal {
 		return fmt.Errorf(
@@ -304,6 +380,38 @@ func validateContentRange(header string, wantStart, wantEnd, wantTotal int64) er
 		)
 	}
 	return nil
+}
+
+func parseContentRange(header string) (int64, int64, int64, error) {
+	fields := strings.Fields(strings.TrimSpace(header))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return 0, 0, 0, fmt.Errorf("missing or invalid Content-Range")
+	}
+	value := fields[1]
+	if strings.Count(value, "/") != 1 {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	rangePart, totalPart, _ := strings.Cut(value, "/")
+	if strings.Count(rangePart, "-") != 1 || totalPart == "*" {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	startPart, endPart, _ := strings.Cut(rangePart, "-")
+	start, err := strconv.ParseInt(startPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range start")
+	}
+	end, err := strconv.ParseInt(endPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range end")
+	}
+	total, err := strconv.ParseInt(totalPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range total")
+	}
+	if start < 0 || end < start || total <= end {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range bounds")
+	}
+	return start, end, total, nil
 }
 
 func validateRAR3Header(header []byte) error {

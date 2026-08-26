@@ -17,7 +17,10 @@ func TestHTTPFileReadAtRequiresExactContentRange(t *testing.T) {
 		if got := r.Header.Get("Range"); got != "bytes=3-6" {
 			t.Errorf("Range = %q, want bytes=3-6", got)
 		}
-		w.Header().Set("Content-Range", "bytes 3-6/10")
+		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", got)
+		}
+		w.Header().Set("Content-Range", "Bytes 3-6/10")
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = io.WriteString(w, contents[3:7])
 	}))
@@ -36,6 +39,124 @@ func TestHTTPFileReadAtRequiresExactContentRange(t *testing.T) {
 	}
 	if n != len(buffer) || string(buffer) != "3456" {
 		t.Fatalf("ReadAt = %d, %q", n, buffer)
+	}
+}
+
+func TestHTTPFileSizeFallsBackToStrictRangeProbe(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		headStatus int
+	}{
+		{name: "HEAD rejected", headStatus: http.StatusMethodNotAllowed},
+		{name: "HEAD length missing", headStatus: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var headRequests atomic.Int32
+			var getRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodHead:
+					headRequests.Add(1)
+					w.WriteHeader(test.headStatus)
+				case http.MethodGet:
+					getRequests.Add(1)
+					if got := r.Header.Get("Range"); got != "bytes=0-0" {
+						t.Errorf("Range = %q, want bytes=0-0", got)
+					}
+					if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+						t.Errorf("Accept-Encoding = %q, want identity", got)
+					}
+					w.Header().Set("Content-Length", "1")
+					w.Header().Set("Content-Range", "Bytes 0-0/10")
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = io.WriteString(w, "0")
+				default:
+					t.Errorf("method = %s, want HEAD or GET", r.Method)
+				}
+			}))
+			defer server.Close()
+
+			file := &HttpFile{
+				URL:        server.URL,
+				client:     server.Client(),
+				MaxRetries: 0,
+			}
+			size, err := file.getFileSize()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if size != 10 {
+				t.Fatalf("getFileSize() = %d, want 10", size)
+			}
+			if headRequests.Load() != 1 || getRequests.Load() != 1 {
+				t.Fatalf("HEAD/GET requests = %d/%d, want 1/1", headRequests.Load(), getRequests.Load())
+			}
+		})
+	}
+}
+
+func TestHTTPFileSizeKeepsSuccessfulHEADFastPath(t *testing.T) {
+	var getRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", "10")
+			return
+		}
+		getRequests.Add(1)
+		http.Error(w, "unexpected GET", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	file := &HttpFile{URL: server.URL, client: server.Client(), MaxRetries: 0}
+	size, err := file.getFileSize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != 10 || getRequests.Load() != 0 {
+		t.Fatalf("size/GET requests = %d/%d, want 10/0", size, getRequests.Load())
+	}
+}
+
+func TestHTTPFileSizeRejectsInvalidRangeProbe(t *testing.T) {
+	for _, contentRange := range []string{
+		"bytes 0-1/10",
+		"bytes 0-0/*",
+		"bytes 0-0/0",
+	} {
+		t.Run(contentRange, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				w.Header().Set("Content-Range", contentRange)
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = io.WriteString(w, "0")
+			}))
+			defer server.Close()
+
+			file := &HttpFile{URL: server.URL, client: server.Client(), MaxRetries: 0}
+			if _, err := file.getFileSize(); !errors.Is(err, ErrNetworkError) {
+				t.Fatalf("getFileSize() error = %v, want network integrity error", err)
+			}
+		})
+	}
+}
+
+func TestHTTPFileSizeRejectsIgnoredRangeWithoutReadingArchive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, strings.Repeat("x", 1<<20))
+	}))
+	defer server.Close()
+
+	file := &HttpFile{URL: server.URL, client: server.Client(), MaxRetries: 0}
+	if _, err := file.getFileSize(); !errors.Is(err, ErrRangeRequestsNotSupported) {
+		t.Fatalf("getFileSize() error = %v, want unsupported ranges", err)
 	}
 }
 

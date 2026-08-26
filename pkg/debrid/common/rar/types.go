@@ -17,6 +17,7 @@ type File struct {
 	CRC            uint32
 	IsDirectory    bool
 	Encrypted      bool
+	Redirected     bool
 	SplitBefore    bool
 	SplitAfter     bool
 	DataOffset     int64
@@ -35,6 +36,9 @@ func (f *File) StreamByteRange() (*[2]int64, error) {
 	}
 	if f.Encrypted {
 		return nil, ErrEncryptionNotSupported
+	}
+	if f.Redirected {
+		return nil, ErrRedirectionNotSupported
 	}
 	if f.SplitBefore || f.SplitAfter {
 		return nil, ErrMultiVolumeNotSupported
@@ -79,11 +83,12 @@ type HttpFile struct {
 	MaxRetries int
 }
 
-// Reader reads RAR3 format archives
+// Reader reads stored entries from RAR 3/4 and RAR 5 archives.
 type Reader struct {
 	File         *HttpFile
 	ChunkSize    int
 	Marker       int64
+	Version      int
 	HeaderEndPos int64 // Position after the archive header
 	Files        []*File
 }

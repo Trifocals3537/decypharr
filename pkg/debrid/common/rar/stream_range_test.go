@@ -54,6 +54,13 @@ func TestStreamByteRangeValidatesDirectlyStreamableEntries(t *testing.T) {
 			wantErr: ErrEncryptionNotSupported,
 		},
 		{
+			name: "redirected file",
+			file: &File{
+				Size: 4, CompressedSize: 4, Method: MethodStore, DataOffset: 10, Redirected: true,
+			},
+			wantErr: ErrRedirectionNotSupported,
+		},
+		{
 			name: "split file",
 			file: &File{
 				Size: 4, CompressedSize: 4, Method: MethodStore, DataOffset: 10, SplitAfter: true,

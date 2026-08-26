@@ -1,5 +1,6 @@
-// Source: https://github.com/eliasbenb/RARAR.py
-// Note that this code only translates the original Python for RAR3 (not RAR5) support.
+// RAR 3/4 support started as a translation of
+// https://github.com/eliasbenb/RARAR.py. RAR 5 support follows RARLAB's
+// published block format and intentionally exposes stored entries only.
 
 package rar
 
@@ -27,8 +28,9 @@ var (
 	HttpChunkSize    = 32768
 	MaxSearchSize    = 1 << 20 // 1MB
 
-	// Rar3Marker RAR marker and block types
+	// RAR markers and RAR 3/4 block types.
 	Rar3Marker  = []byte{0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00}
+	Rar5Marker  = []byte{0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00}
 	BlockFile   = byte(0x74)
 	BlockHeader = byte(0x73)
 	BlockMarker = byte(0x72)
@@ -52,6 +54,7 @@ var (
 	ErrRangeRequestsNotSupported    = errors.New("server does not support range requests")
 	ErrCompressionNotSupported      = errors.New("compression method not supported")
 	ErrEncryptionNotSupported       = errors.New("encrypted RAR entries are not supported")
+	ErrRedirectionNotSupported      = errors.New("redirected RAR entries are not supported")
 	ErrMultiVolumeNotSupported      = errors.New("multi-volume RAR entries are not supported")
 	ErrDirectoryExtractNotSupported = errors.New("directory extract not supported")
 )
@@ -301,13 +304,16 @@ func validateContentRange(header string, wantStart, wantEnd, wantTotal int64) er
 	return nil
 }
 
-// NewReader creates a new RAR3 reader
+// NewReader creates a reader for stored entries in RAR 3/4 or RAR 5 archives.
 func NewReader(url string) (*Reader, error) {
 	file, err := NewHttpFile(url)
 	if err != nil {
 		return nil, err
 	}
+	return newReader(file)
+}
 
+func newReader(file *HttpFile) (*Reader, error) {
 	reader := &Reader{
 		File:      file,
 		ChunkSize: HttpChunkSize,
@@ -315,11 +321,19 @@ func NewReader(url string) (*Reader, error) {
 	}
 
 	// Find RAR marker
-	marker, err := reader.findMarker()
+	marker, version, err := reader.findMarker()
 	if err != nil {
 		return nil, err
 	}
 	reader.Marker = marker
+	reader.Version = version
+	if version == 5 {
+		if err := reader.initializeRAR5(); err != nil {
+			return nil, err
+		}
+		return reader, nil
+	}
+
 	pos := reader.Marker + int64(len(Rar3Marker)) // Skip marker block
 
 	headerData, err := reader.readBytes(pos, 7)
@@ -364,22 +378,22 @@ func (r *Reader) readBytes(start int64, length int) ([]byte, error) {
 	return data, nil
 }
 
-// findMarker finds the RAR marker in the file
-func (r *Reader) findMarker() (int64, error) {
+// findMarker finds the first RAR marker in the SFX search window.
+func (r *Reader) findMarker() (int64, int, error) {
 	// First try to find marker in the first chunk
 	firstChunkSize := 8192 // 8KB
 	chunk, err := r.readBytes(0, firstChunkSize)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
-	markerPos := bytes.Index(chunk, Rar3Marker)
-	if markerPos != -1 {
-		return int64(markerPos), nil
+	markerPos, version := findMarkerInBytes(chunk)
+	if markerPos >= 0 {
+		return int64(markerPos), version, nil
 	}
 
 	// If not found, continue searching
-	position := int64(firstChunkSize - len(Rar3Marker) + 1)
+	position := int64(firstChunkSize - len(Rar5Marker) + 1)
 	maxSearch := int64(MaxSearchSize)
 
 	for position < maxSearch {
@@ -389,16 +403,29 @@ func (r *Reader) findMarker() (int64, error) {
 			break
 		}
 
-		markerPos := bytes.Index(chunk, Rar3Marker)
-		if markerPos != -1 {
-			return position + int64(markerPos), nil
+		markerPos, version = findMarkerInBytes(chunk)
+		if markerPos >= 0 {
+			return position + int64(markerPos), version, nil
 		}
 
 		// Move forward by chunk size minus the marker length
-		position += int64(max(1, len(chunk)-len(Rar3Marker)+1))
+		position += int64(max(1, len(chunk)-len(Rar5Marker)+1))
 	}
 
-	return 0, ErrMarkerNotFound
+	return 0, 0, ErrMarkerNotFound
+}
+
+func findMarkerInBytes(data []byte) (int, int) {
+	rar3 := bytes.Index(data, Rar3Marker)
+	rar5 := bytes.Index(data, Rar5Marker)
+	switch {
+	case rar3 < 0 && rar5 < 0:
+		return -1, 0
+	case rar5 >= 0 && (rar3 < 0 || rar5 < rar3):
+		return rar5, 5
+	default:
+		return rar3, 3
+	}
 }
 
 // decodeUnicode decodes RAR3 Unicode encoding
@@ -486,6 +513,13 @@ func decodeUnicode(asciiStr string, unicodeData []byte) string {
 
 // readFiles reads all file entries in the archive
 func (r *Reader) readFiles() error {
+	if r.Version == 5 {
+		return r.readFilesRAR5()
+	}
+	if r.Version != 3 {
+		return fmt.Errorf("%w: unsupported RAR version %d", ErrInvalidFormat, r.Version)
+	}
+
 	// NewReader already validated the archive header and stored where it ends.
 	pos := r.HeaderEndPos
 

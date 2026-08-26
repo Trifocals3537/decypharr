@@ -589,6 +589,31 @@ func TestRootedStreamMapsFullLogicalFileToPartialUpstream(t *testing.T) {
 	}
 }
 
+func TestRootedStreamAcceptsWildcardTotalWhenUpstreamSizeIsUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		w.Header().Set("Content-Range", "bytes 11-12/*")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("at"))
+	}))
+	defer server.Close()
+
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: server.URL},
+	}}
+	manager := newStreamFailoverTestManager(links, server.Client(), "primary")
+	entry := streamFailoverEntry("primary")
+	entry.Files["video.mkv"].ByteRange = &[2]int64{10, 13}
+
+	var output bytes.Buffer
+	if err := manager.Stream(context.Background(), entry, "video.mkv", 1, 2, &output, nil, "test"); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if output.String() != "at" {
+		t.Fatalf("output = %q, want at", output.String())
+	}
+}
+
 func TestRootedStreamRejectsInconsistentStoredRangeBeforeLinkLookup(t *testing.T) {
 	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
 		"primary": {DownloadLink: "https://primary.example/file", Size: 100},

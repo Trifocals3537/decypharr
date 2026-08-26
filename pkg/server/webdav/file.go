@@ -91,7 +91,10 @@ func getRange(size int64, r *http.Request) (int64, int64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	if len(ranges) != 1 {
+	if len(ranges) == 0 {
+		return 0, 0, fmt.Errorf("range is not satisfiable for a %d-byte file", size)
+	}
+	if len(ranges) > 1 {
 		return 0, 0, fmt.Errorf("multiple ranges are not supported")
 	}
 	return ranges[0].start, ranges[0].end, nil

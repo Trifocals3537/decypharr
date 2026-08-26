@@ -734,7 +734,7 @@ func validateStreamResponseIntegrity(resp *http.Response, start, end, expectedTo
 		if expectedTotal > 0 && actualTotal != expectedTotal {
 			return fmt.Errorf("upstream Content-Range total %d does not match expected size %d", actualTotal, expectedTotal)
 		}
-		if expectedTotal <= 0 && actualTotal <= end {
+		if expectedTotal <= 0 && actualTotal >= 0 && actualTotal <= end {
 			return fmt.Errorf("upstream Content-Range total %d does not contain requested end %d", actualTotal, end)
 		}
 	}

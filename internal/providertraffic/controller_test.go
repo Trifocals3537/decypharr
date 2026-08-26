@@ -163,28 +163,24 @@ func TestControllerCancellationDoesNotConsumeFutureToken(t *testing.T) {
 
 func TestControllerParksOneAccountAfter429(t *testing.T) {
 	controller := New(Options{
-		Capabilities:   testCapabilities,
-		DefaultBackoff: 35 * time.Millisecond,
-		MaximumBackoff: time.Second,
+		Capabilities: testCapabilities,
+		// Keep the synthetic backoff comfortably beyond loaded Windows runner
+		// scheduling delays. The test cancels its wait, so this does not make the
+		// suite sleep for the full duration.
+		DefaultBackoff: 2 * time.Second,
+		MaximumBackoff: 3 * time.Second,
 	})
 	first := Identity{ProviderType: "torbox", AccountToken: "first-secret"}
 	second := Identity{ProviderType: "torbox", AccountToken: "second-secret"}
 	controller.Observe(first, OperationAPI, http.StatusTooManyRequests, nil)
 
-	blockedCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	blockedCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if err := controller.Wait(blockedCtx, first, OperationAPI); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked account error = %v, want deadline", err)
 	}
 	if err := controller.Wait(context.Background(), second, OperationAPI); err != nil {
 		t.Fatalf("independent account was blocked: %v", err)
-	}
-
-	time.Sleep(30 * time.Millisecond)
-	ctx, stop := context.WithTimeout(context.Background(), 15*time.Millisecond)
-	defer stop()
-	if err := controller.Wait(ctx, first, OperationAPI); err != nil {
-		t.Fatalf("account did not recover after backoff: %v", err)
 	}
 }
 

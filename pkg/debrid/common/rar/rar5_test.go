@@ -222,6 +222,18 @@ func TestRAR5RejectsCorruptHeaderBeforeMappingOffsets(t *testing.T) {
 	}
 }
 
+func TestValidateRAR3HeaderMatchesUnRARCRC15Vector(t *testing.T) {
+	// Common RAR 2.x/3.x archive header. Its stored 0x90cf HEAD_CRC is the
+	// low 16 bits of the finalized IEEE CRC32 over the remaining 11 bytes.
+	header := []byte{
+		0xcf, 0x90, 0x73, 0x00, 0x00, 0x0d, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	if err := validateRAR3Header(header); err != nil {
+		t.Fatalf("validateRAR3Header() error = %v", err)
+	}
+}
+
 func setRAR3HeaderCRC(header []byte) {
 	binary.LittleEndian.PutUint16(header[:2], uint16(crc32.ChecksumIEEE(header[2:])&0xffff))
 }

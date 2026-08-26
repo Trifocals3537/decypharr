@@ -328,6 +328,9 @@ func validateRAR3Header(header []byte) error {
 		return nil
 	}
 	wantCRC := binary.LittleEndian.Uint16(header[:2])
+	// UnRAR's RawRead::GetCRC15 finalizes the standard IEEE CRC32 over the
+	// header bytes after HEAD_CRC, then compares its low 16 bits. Despite the
+	// historical method name, this is not a separate CRC-16 algorithm.
 	gotCRC := uint16(crc32.ChecksumIEEE(header[2:]) & 0xffff)
 	if gotCRC != wantCRC {
 		return fmt.Errorf(

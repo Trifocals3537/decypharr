@@ -495,7 +495,10 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		if resp.StatusCode == 509 {
+		switch resp.StatusCode {
+		case http.StatusUnavailableForLegalReasons:
+			return nil, customerror.NewTorrentContentRejectedError(t.Name)
+		case 509:
 			return nil, customerror.TooManyActiveDownloadsError
 		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -526,6 +529,9 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 
 	case 509:
 		return nil, customerror.TooManyActiveDownloadsError
+
+	case http.StatusUnavailableForLegalReasons:
+		return nil, customerror.NewTorrentContentRejectedError(t.Name)
 
 	default:
 		return nil, fmt.Errorf("realdebrid API error: Status: %d", resp.StatusCode)
@@ -633,6 +639,9 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 			return t, err
 		}
 
+		if resp.StatusCode == http.StatusUnavailableForLegalReasons {
+			return t, customerror.NewTorrentContentRejectedError(t.Name)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return t, fmt.Errorf("realdebrid API error: Status: %d", resp.StatusCode)
 		}
@@ -674,7 +683,10 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 			}
 
 			if selectResp.StatusCode != http.StatusNoContent {
-				if selectResp.StatusCode == 509 {
+				switch selectResp.StatusCode {
+				case http.StatusUnavailableForLegalReasons:
+					return t, customerror.NewTorrentContentRejectedError(t.Name)
+				case 509:
 					return nil, customerror.TooManyActiveDownloadsError
 				}
 				return t, fmt.Errorf("realdebrid API error: Status: %d", selectResp.StatusCode)

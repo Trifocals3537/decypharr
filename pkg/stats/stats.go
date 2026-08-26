@@ -152,6 +152,7 @@ func (c *Collector) collect() *Snapshot {
 	}
 	snap.CDNTraffic = c.mgr.CDNTrafficStats()
 	snap.StreamFailover = c.mgr.StreamFailoverStats()
+	snap.TorrentAdmission = c.mgr.TorrentAdmissionStats()
 
 	// --- Storage ---
 	torrentCount, err := c.mgr.GetTorrentsCount()

@@ -45,9 +45,22 @@ func TestTorrentAddErrorStatus(t *testing.T) {
 			status: http.StatusConflict,
 		},
 		{
+			name:   "typed content rejection",
+			err:    customerror.NewTorrentContentRejectedError("Release"),
+			status: http.StatusUnprocessableEntity,
+		},
+		{
 			name: "mixed provider failures stay generic",
 			err: errors.Join(
 				customerror.NewTorrentNotCachedError("Release"),
+				errors.New("provider unavailable"),
+			),
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "mixed content rejection and outage stay generic",
+			err: errors.Join(
+				customerror.NewTorrentContentRejectedError("Release"),
 				errors.New("provider unavailable"),
 			),
 			status: http.StatusBadRequest,
@@ -99,6 +112,34 @@ func TestWriteTorrentAddErrorDoesNotMislabelMixedFailures(t *testing.T) {
 
 	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "" {
 		t.Fatalf("X-Decypharr-Error-Code = %q, want empty", got)
+	}
+}
+
+func TestWriteTorrentAddErrorDoesNotMislabelMixedContentFailures(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	err := errors.Join(
+		customerror.NewTorrentContentRejectedError("Release"),
+		errors.New("provider unavailable"),
+	)
+
+	writeTorrentAddError(recorder, err, http.StatusBadRequest)
+
+	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "" {
+		t.Fatalf("X-Decypharr-Error-Code = %q, want empty", got)
+	}
+}
+
+func TestWriteTorrentAddErrorExposesContentRejectionCode(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	err := customerror.NewTorrentContentRejectedError("Release")
+
+	writeTorrentAddError(recorder, err, http.StatusUnprocessableEntity)
+
+	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "torrent_content_rejected" {
+		t.Fatalf("X-Decypharr-Error-Code = %q, want torrent_content_rejected", got)
+	}
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnprocessableEntity)
 	}
 }
 

@@ -60,3 +60,19 @@ func TestTorrentNotCachedErrorIsRetryableConflict(t *testing.T) {
 		t.Fatalf("error = %q, want release name", err.Error())
 	}
 }
+
+func TestTorrentContentRejectedErrorIsPermanentUnprocessableEntity(t *testing.T) {
+	err := NewTorrentContentRejectedError("Release")
+	if err.HTTPStatus() != http.StatusUnprocessableEntity {
+		t.Errorf("HTTPStatus() = %d, want %d", err.HTTPStatus(), http.StatusUnprocessableEntity)
+	}
+	if err.Code != "torrent_content_rejected" {
+		t.Errorf("Code = %q, want torrent_content_rejected", err.Code)
+	}
+	if !err.IsPermanent() || err.IsRetryable() {
+		t.Fatal("content rejection must be permanent and non-retryable")
+	}
+	if !strings.Contains(err.Error(), "Release") {
+		t.Fatalf("error = %q, want release name", err.Error())
+	}
+}

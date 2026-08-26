@@ -34,6 +34,21 @@ type lifecycleTestClient struct {
 	accounts      *account.Manager
 }
 
+type doneObservedContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newDoneObservedContext(ctx context.Context) *doneObservedContext {
+	return &doneObservedContext{Context: ctx, observed: make(chan struct{})}
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
+}
+
 func (c *lifecycleTestClient) GetDownloadLink(_ string, file *types.File) (types.DownloadLink, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -115,6 +130,127 @@ func newLifecycleService(client *lifecycleTestClient, httpClient *http.Client, r
 	clients := xsync.NewMap[string, debrid.Client]()
 	clients.Store("test", client)
 	return New(clients, nil, nil, nil, httpClient, retries, zerolog.Nop())
+}
+
+func TestGetLinkOwnerCancellationDoesNotCancelSharedResolution(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseRequest) })
+	var heads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if heads.Add(1) == 1 {
+			close(requestStarted)
+		}
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &lifecycleTestClient{links: []types.DownloadLink{lifecycleDownloadLink(server.URL)}}
+	service := newLifecycleService(client, server.Client(), 0)
+	entry := lifecycleTestEntry()
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, err := service.GetLink(ownerCtx, entry, "video.mkv")
+		ownerResult <- err
+	}()
+	<-requestStarted
+
+	cancelOwner()
+	if err := <-ownerResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("owner GetLink() error = %v, want context cancellation", err)
+	}
+
+	type result struct {
+		link types.DownloadLink
+		err  error
+	}
+	waiterCtx := newDoneObservedContext(context.Background())
+	waiterResult := make(chan result, 1)
+	go func() {
+		link, err := service.GetLink(waiterCtx, entry, "video.mkv")
+		waiterResult <- result{link: link, err: err}
+	}()
+	<-waiterCtx.observed
+
+	select {
+	case result := <-waiterResult:
+		t.Fatalf("joined GetLink() completed before shared request was released: %+v", result)
+	default:
+	}
+	if fetches, _ := client.counts(); fetches != 1 || heads.Load() != 1 {
+		t.Fatalf("provider fetches/HEADs = %d/%d, want one shared operation", fetches, heads.Load())
+	}
+
+	releaseOnce.Do(func() { close(releaseRequest) })
+	waiter := <-waiterResult
+	if waiter.err != nil || waiter.link.DownloadLink != server.URL {
+		t.Fatalf("joined GetLink() = %q, %v; want shared success", waiter.link.DownloadLink, waiter.err)
+	}
+}
+
+func TestRefreshOwnerCancellationDoesNotCancelSharedRegeneration(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseRequest) })
+	var heads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if heads.Add(1) == 1 {
+			close(requestStarted)
+		}
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	rejected := lifecycleDownloadLink("https://cdn.example/rejected")
+	replacement := lifecycleDownloadLink(server.URL)
+	client := &lifecycleTestClient{cacheLinks: true, links: []types.DownloadLink{replacement}}
+	service := newLifecycleService(client, server.Client(), 0)
+	entry := lifecycleTestEntry()
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, err := service.Refresh(ownerCtx, entry, rejected)
+		ownerResult <- err
+	}()
+	<-requestStarted
+
+	cancelOwner()
+	if err := <-ownerResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("owner Refresh() error = %v, want context cancellation", err)
+	}
+
+	type result struct {
+		link types.DownloadLink
+		err  error
+	}
+	waiterCtx := newDoneObservedContext(context.Background())
+	waiterResult := make(chan result, 1)
+	go func() {
+		link, err := service.Refresh(waiterCtx, entry, rejected)
+		waiterResult <- result{link: link, err: err}
+	}()
+	<-waiterCtx.observed
+
+	select {
+	case result := <-waiterResult:
+		t.Fatalf("joined Refresh() completed before shared request was released: %+v", result)
+	default:
+	}
+	fetches, invalidations := client.counts()
+	if fetches != 1 || invalidations != 1 || heads.Load() != 1 {
+		t.Fatalf("provider fetches/invalidations/HEADs = %d/%d/%d, want one shared regeneration", fetches, invalidations, heads.Load())
+	}
+
+	releaseOnce.Do(func() { close(releaseRequest) })
+	waiter := <-waiterResult
+	if waiter.err != nil || waiter.link.DownloadLink != replacement.DownloadLink {
+		t.Fatalf("joined Refresh() = %q, %v; want shared replacement", waiter.link.DownloadLink, waiter.err)
+	}
 }
 
 func TestWithoutRepairNeverMutatesAlternatePlacement(t *testing.T) {

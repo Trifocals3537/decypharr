@@ -104,8 +104,10 @@ func GetMagnetFromUrl(url string, rmTrackerUrls bool) (*Magnet, error) {
 	)
 }
 
-// GetMagnetFromURLContext resolves either a magnet URI or an HTTP(S) torrent
-// document with caller cancellation and a strict download ceiling.
+// GetMagnetFromURLContext resolves a magnet URI, a raw v1 infohash, or an
+// HTTP(S) torrent document with caller cancellation and a strict download
+// ceiling. Raw hashes are converted to tracker-free magnets; metadata and the
+// display name are resolved by the selected provider after submission.
 func GetMagnetFromURLContext(
 	ctx context.Context,
 	rawURL string,
@@ -116,6 +118,7 @@ func GetMagnetFromURLContext(
 		return nil, fmt.Errorf("metadata byte limit must be between 1 and %d", MaxMetadataFileBytes)
 	}
 
+	rawURL = strings.TrimSpace(rawURL)
 	lowerURL := strings.ToLower(rawURL)
 	switch {
 	case strings.HasPrefix(lowerURL, "magnet:"):
@@ -127,7 +130,14 @@ func GetMagnetFromURLContext(
 		strings.HasPrefix(lowerURL, "https://"):
 		return openMagnetHTTPURL(ctx, rawURL, rmTrackerUrls, maxBytes)
 	default:
-		return nil, fmt.Errorf("invalid torrent URL")
+		infoHash, err := processInfoHash(rawURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid torrent URL or infohash")
+		}
+		return &Magnet{
+			InfoHash: infoHash,
+			Link:     "magnet:?xt=urn:btih:" + infoHash,
+		}, nil
 	}
 }
 

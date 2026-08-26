@@ -99,18 +99,23 @@ Add torrent or NZB.
 ```bash
 curl -X POST \
   -H "Authorization: Bearer TOKEN" \
-  -F "file=@file.torrent" \
+  -F "files=@file.torrent" \
   http://localhost:8282/api/add
 ```
 
-Or with URL:
+Or with a magnet link, torrent URL, 40-character hex infohash, or 32-character
+base32 infohash:
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer TOKEN" \
-  -d '{"url": "magnet:?xt=..."}' \
+  -F "urls=8a19577fb5f690970ca43a57ff1011ae202244b8" \
   http://localhost:8282/api/add
 ```
+
+Separate multiple `urls` values with newlines. Raw infohash imports are
+converted to tracker-free magnets; the provider supplies the torrent name and
+metadata after submission.
 
 ### DELETE /api/torrents
 

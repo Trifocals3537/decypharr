@@ -29,6 +29,14 @@ func providerTestController(budget providertraffic.RateBudget) *providertraffic.
 	})
 }
 
+func providerTestAccountController(budget providertraffic.RateBudget) *providertraffic.Controller {
+	return providertraffic.New(providertraffic.Options{
+		Capabilities: func(string) providertraffic.Capabilities {
+			return providertraffic.Capabilities{AccountAPIBudget: budget}
+		},
+	})
+}
+
 func TestProviderTrafficTransportBudgetsEveryPhysicalAttempt(t *testing.T) {
 	controller := providerTestController(providertraffic.RateBudget{
 		Requests: 1, Period: 35 * time.Millisecond, Burst: 1,
@@ -69,6 +77,40 @@ func TestProviderTrafficTransportBudgetsEveryPhysicalAttempt(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("base calls = %d, want 2", got)
+	}
+}
+
+func TestProviderTrafficTransportSharesAccountBudgetAcrossClients(t *testing.T) {
+	controller := providerTestAccountController(providertraffic.RateBudget{
+		Requests: 1, Period: 40 * time.Millisecond, Burst: 1,
+	})
+	base := providerRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}, nil
+	})
+	identity := providertraffic.Identity{ProviderType: "test-provider", AccountToken: "shared-secret"}
+	mainClient := &providerTrafficTransport{base: base, controller: controller, identity: identity}
+	downloadClient := &providerTrafficTransport{base: base, controller: controller, identity: identity}
+
+	mainRequest, err := http.NewRequest(http.MethodGet, "https://api.example.test/main", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mainClient.RoundTrip(mainRequest); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	downloadRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.example.test/download", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := downloadClient.RoundTrip(downloadRequest); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second client error = %v, want shared-account deadline", err)
 	}
 }
 

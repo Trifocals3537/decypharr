@@ -55,6 +55,41 @@ func TestTorBoxCapabilitiesMatchDocumentedContracts(t *testing.T) {
 	}
 }
 
+func TestRealDebridCapabilitiesMatchDocumentedAccountContract(t *testing.T) {
+	capabilities := For("realdebrid")
+	if capabilities.AccountAPIBudget.Requests != 250 ||
+		capabilities.AccountAPIBudget.Period != time.Minute ||
+		capabilities.AccountAPIBudget.Burst != 20 {
+		t.Fatalf("account API budget = %+v", capabilities.AccountAPIBudget)
+	}
+	if capabilities.APIBudget.valid() {
+		t.Fatalf("Real-Debrid API budget must be account-wide, got endpoint budget %+v", capabilities.APIBudget)
+	}
+}
+
+func TestClassifyRealDebridAPIWithoutCountingCDNTraffic(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want Operation
+	}{
+		{name: "api", raw: "https://api.real-debrid.com/rest/1.0/torrents?auth_token=secret", want: OperationAPI},
+		{name: "restricted link", raw: "https://real-debrid.com/d/ABCDEFGHIJKLM", want: OperationNone},
+		{name: "cdn", raw: "https://example.download.real-debrid.com/d/private", want: OperationNone},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := url.Parse(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ClassifyURL("realdebrid", parsed); got != test.want {
+				t.Fatalf("ClassifyURL() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRequestOperationCannotReclassifyTorBoxCDN(t *testing.T) {
 	ctx := WithOperation(context.Background(), OperationCreateTorrentUncached)
 	request, err := http.NewRequestWithContext(

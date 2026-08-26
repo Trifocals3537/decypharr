@@ -131,6 +131,7 @@ func (l *rateLimiter) backoff(until time.Time) {
 }
 
 type accountState struct {
+	accountAPI   *rateLimiter
 	endpoints    map[string]*rateLimiter
 	operations   map[Operation]*rateLimiter
 	blockedUntil time.Time
@@ -193,7 +194,9 @@ func (c *Controller) WaitEndpoint(
 
 	capabilities := c.capabilities(identity.ProviderType)
 	operationBudget := capabilities.budgetFor(operation)
-	if !capabilities.APIBudget.valid() && !operationBudget.valid() {
+	if !capabilities.AccountAPIBudget.valid() &&
+		!capabilities.APIBudget.valid() &&
+		!operationBudget.valid() {
 		return nil
 	}
 
@@ -224,6 +227,22 @@ func (c *Controller) WaitEndpoint(
 		if err := limiter.wait(ctx); err != nil {
 			return err
 		}
+	}
+	if capabilities.AccountAPIBudget.valid() {
+		c.mu.Lock()
+		limiter := state.accountAPI
+		if limiter == nil {
+			limiter = newRateLimiter(capabilities.AccountAPIBudget)
+			limiter.backoff(state.blockedUntil)
+			state.accountAPI = limiter
+		}
+		c.mu.Unlock()
+		if err := limiter.wait(ctx); err != nil {
+			return err
+		}
+	}
+	if !capabilities.APIBudget.valid() {
+		return nil
 	}
 
 	endpoint = strings.TrimSpace(endpoint)
@@ -259,7 +278,9 @@ func (c *Controller) Observe(identity Identity, operation Operation, statusCode 
 		return
 	}
 	capabilities := c.capabilities(identity.ProviderType)
-	if !capabilities.APIBudget.valid() && !capabilities.budgetFor(operation).valid() {
+	if !capabilities.AccountAPIBudget.valid() &&
+		!capabilities.APIBudget.valid() &&
+		!capabilities.budgetFor(operation).valid() {
 		return
 	}
 
@@ -278,6 +299,9 @@ func (c *Controller) Observe(identity Identity, operation Operation, statusCode 
 		state.blockedUntil = until
 	}
 	state.lastUsed = time.Now()
+	if state.accountAPI != nil {
+		state.accountAPI.backoff(state.blockedUntil)
+	}
 	for _, limiter := range state.endpoints {
 		limiter.backoff(state.blockedUntil)
 	}

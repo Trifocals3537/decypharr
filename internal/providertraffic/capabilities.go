@@ -36,6 +36,7 @@ func (b RateBudget) valid() bool {
 // of an individual Decypharr installation. Zero values mean unknown/unlimited.
 // User-configured rate limits remain additional, potentially tighter guards.
 type Capabilities struct {
+	AccountAPIBudget            RateBudget // shared by every API client using one account token
 	APIBudget                   RateBudget // applied independently per endpoint
 	UncachedTorrentCreateBudget RateBudget
 	UsenetCreateBudget          RateBudget
@@ -48,6 +49,15 @@ type Capabilities struct {
 // For returns the conservative built-in contract for a provider type.
 func For(providerType string) Capabilities {
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
+	case "realdebrid":
+		// Real-Debrid documents one 250 request/minute allowance for the whole
+		// API. Keep a modest burst below the short addMagnet bursts observed to
+		// trigger misleading provider errors while preserving over four requests
+		// per second of sustained throughput.
+		// https://api.real-debrid.com/
+		return Capabilities{
+			AccountAPIBudget: RateBudget{Requests: 250, Period: time.Minute, Burst: 20},
+		}
 	case "torbox":
 		// API budgets: https://support.torbox.app/en/articles/13726368-api-rate-limits
 		// Link guidance: https://support.torbox.app/en/articles/15315517-why-are-my-download-links-not-working
@@ -121,11 +131,19 @@ func ClassifyURL(providerType string, requestURL *url.URL) Operation {
 	if requestURL == nil {
 		return OperationNone
 	}
-	if !strings.EqualFold(strings.TrimSpace(providerType), "torbox") {
-		return OperationAPI
-	}
-	if !strings.EqualFold(requestURL.Hostname(), "api.torbox.app") {
+	providerType = strings.ToLower(strings.TrimSpace(providerType))
+	switch providerType {
+	case "realdebrid":
+		if strings.EqualFold(requestURL.Hostname(), "api.real-debrid.com") {
+			return OperationAPI
+		}
 		return OperationNone
+	case "torbox":
+		if !strings.EqualFold(requestURL.Hostname(), "api.torbox.app") {
+			return OperationNone
+		}
+	default:
+		return OperationAPI
 	}
 
 	requestPath := strings.ToLower(strings.TrimSuffix(requestURL.EscapedPath(), "/"))

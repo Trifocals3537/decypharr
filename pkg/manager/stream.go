@@ -389,7 +389,7 @@ func (m *Manager) streamHTTPFromCandidate(
 		}
 
 		isPartial := expectedLen > 0 && (start > 0 || end < fileSize-1)
-		if integrityErr := validateStreamResponseIntegrity(resp, start, end, fileSize, isPartial); integrityErr != nil {
+		if integrityErr := validateStreamResponseIntegrity(resp, start, end, fileSize, expectedLen, isPartial); integrityErr != nil {
 			resp.Body.Close()
 			return false, StreamError{Err: integrityErr, Retryable: true}
 		}
@@ -626,35 +626,36 @@ func normalizeStreamRange(size, start, end int64) (int64, int64, error) {
 // validateStreamResponseIntegrity rejects upstream representations that cannot
 // safely satisfy the exact bytes requested by a media client. This runs before
 // response headers or body bytes are committed, leaving provider failover safe.
-func validateStreamResponseIntegrity(resp *http.Response, start, end, fileSize int64, partial bool) error {
+func validateStreamResponseIntegrity(resp *http.Response, start, end, fileSize, expectedLen int64, partial bool) error {
 	if resp == nil {
 		return fmt.Errorf("upstream returned no response")
 	}
 	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
 		return fmt.Errorf("upstream returned unexpected content encoding %q", encoding)
 	}
-	if !partial {
-		return nil
-	}
-	if resp.StatusCode != http.StatusPartialContent {
+	if partial && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("upstream ignored required byte range %d-%d with status %d", start, end, resp.StatusCode)
 	}
-
-	actualStart, actualEnd, actualTotal, err := parseTorrentContentRange(resp.Header.Get("Content-Range"))
-	if err != nil {
-		return fmt.Errorf("invalid upstream Content-Range: %w", err)
+	if resp.StatusCode == http.StatusPartialContent {
+		actualStart, actualEnd, actualTotal, err := parseTorrentContentRange(resp.Header.Get("Content-Range"))
+		if err != nil {
+			return fmt.Errorf("invalid upstream Content-Range: %w", err)
+		}
+		if actualStart != start || actualEnd != end {
+			return fmt.Errorf(
+				"upstream Content-Range %d-%d does not match requested range %d-%d",
+				actualStart,
+				actualEnd,
+				start,
+				end,
+			)
+		}
+		if actualTotal != fileSize {
+			return fmt.Errorf("upstream Content-Range total %d does not match file size %d", actualTotal, fileSize)
+		}
 	}
-	if actualStart != start || actualEnd != end {
-		return fmt.Errorf(
-			"upstream Content-Range %d-%d does not match requested range %d-%d",
-			actualStart,
-			actualEnd,
-			start,
-			end,
-		)
-	}
-	if actualTotal != fileSize {
-		return fmt.Errorf("upstream Content-Range total %d does not match file size %d", actualTotal, fileSize)
+	if expectedLen > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedLen {
+		return fmt.Errorf("upstream Content-Length %d does not match expected response length %d", resp.ContentLength, expectedLen)
 	}
 	return nil
 }
@@ -677,10 +678,10 @@ func (m *Manager) doRequest(
 				return retry.Unrecoverable(StreamError{Err: reqErr, Retryable: false})
 			}
 
-			// Set range header
-			if start > 0 || end > 0 {
-				req.Header.Set("Range", buildHTTPRange(start, end))
-			}
+			// Every stream request carries its normalized range. Besides keeping
+			// response validation uniform, this preserves the important bytes=0-0
+			// probe that cannot be inferred from start/end being non-zero.
+			req.Header.Set("Range", buildHTTPRange(start, end))
 
 			// Set optimized headers for streaming
 			req.Header.Set("Connection", "keep-alive")

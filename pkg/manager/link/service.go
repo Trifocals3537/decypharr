@@ -154,17 +154,10 @@ func New(
 // GetLink fetches and validates a download link for a file in an entry.
 // Links are cached at the account level; this service only tracks validation state.
 func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
-	// Use singleflight to deduplicate concurrent requests for the same file
 	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename))
-	v, err, _ := s.singleflight.Do(key, func() (any, error) {
-		return s.fetchAndValidate(ctx, entry, filename, 0, 0)
+	return doLinkFlight(ctx, &s.singleflight, key, func(sharedCtx context.Context) (types.DownloadLink, error) {
+		return s.fetchAndValidate(sharedCtx, entry, filename, 0, 0)
 	})
-
-	if err != nil {
-		return emptyDownloadLink, err
-	}
-
-	return v.(types.DownloadLink), nil
 }
 
 // Refresh evicts a rejected URL from local caches and returns a validated
@@ -291,8 +284,8 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 // regenerate provider links while that URL remains rejected.
 func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry, rejected types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
 	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, rejected.Filename))
-	v, err, _ := s.refreshflight.Do(key, func() (any, error) {
-		if err := ctx.Err(); err != nil {
+	return doLinkFlight(ctx, &s.refreshflight, key, func(sharedCtx context.Context) (types.DownloadLink, error) {
+		if err := sharedCtx.Err(); err != nil {
 			return emptyDownloadLink, err
 		}
 		if delay, blocked := s.refreshDelay(key); blocked {
@@ -308,7 +301,7 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 			return emptyDownloadLink, err
 		}
 
-		replacement, err := s.fetchAndValidate(ctx, entry, rejected.Filename, repairAttempt, linkRefreshes+1)
+		replacement, err := s.fetchAndValidate(sharedCtx, entry, rejected.Filename, repairAttempt, linkRefreshes+1)
 		if err != nil {
 			if linkErr := GetLinkError(err); linkErr != nil && linkErr.ShouldRefetch() &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -327,10 +320,38 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 		s.clearRefreshBackoff(key)
 		return replacement, nil
 	})
-	if err != nil {
+}
+
+// doLinkFlight keeps one provider lifecycle operation running independently of
+// any individual HTTP/FUSE caller. Each waiter may still leave immediately when
+// its own request is canceled, but that cancellation cannot poison playback for
+// callers sharing the same link resolution or refresh.
+func doLinkFlight(
+	ctx context.Context,
+	group *singleflight.Group,
+	key string,
+	work func(context.Context) (types.DownloadLink, error),
+) (types.DownloadLink, error) {
+	if err := ctx.Err(); err != nil {
 		return emptyDownloadLink, err
 	}
-	return v.(types.DownloadLink), nil
+
+	result := group.DoChan(key, func() (any, error) {
+		return work(context.WithoutCancel(ctx))
+	})
+	select {
+	case <-ctx.Done():
+		return emptyDownloadLink, ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return emptyDownloadLink, completed.Err
+		}
+		link, ok := completed.Val.(types.DownloadLink)
+		if !ok {
+			return emptyDownloadLink, fmt.Errorf("shared link operation returned %T", completed.Val)
+		}
+		return link, nil
+	}
 }
 
 func linkLifecycleKey(entry *storage.Entry, filename string) string {

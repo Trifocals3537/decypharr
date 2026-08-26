@@ -31,7 +31,9 @@ type FixerRequest struct {
 	AttemptedDebrids []string
 	StartedAt        time.Time
 	LastAttempt      time.Time
-	result           chan *FixResult
+	done             chan struct{}
+	result           *FixResult
+	err              error
 }
 
 // FixResult is the result of a fix operation
@@ -66,7 +68,11 @@ func NewFixer(manager *Manager) *Fixer {
 // 2. If fails, cascade through other debrids in config order
 // 3. Skip debrids where torrent already exists (unless they're also broken)
 // 4. Mark as completely failed if all debrids fail
-func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurrent bool) (*FixResult, error) {
+func (f *Fixer) FixTorrent(
+	ctx context.Context,
+	entry *storage.Entry,
+	skipCurrent bool,
+) (finalResult *FixResult, finalErr error) {
 	if entry == nil {
 		return nil, fmt.Errorf("entry is nil")
 	}
@@ -77,30 +83,21 @@ func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurren
 			AttemptsCount: 0,
 		}, nil
 	}
-	// Check if repair is already in flight
-	if req, exists := f.inFlightRepairs.Load(entry.InfoHash); exists {
-		// Wait for existing repair to complete
-		select {
-		case result := <-req.result:
-			return result, nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(5 * time.Minute):
-			return nil, fmt.Errorf("repair timeout for %s", entry.Name)
-		}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	// Create new repair request
-	req := &FixerRequest{
-		InfoHash:         entry.InfoHash,
-		AttemptedDebrids: make([]string, 0),
-		StartedAt:        time.Now(),
-		LastAttempt:      time.Now(),
-		result:           make(chan *FixResult, 1),
+	// Claim the repair atomically. Load followed by Store permits two callers to
+	// miss each other and both mutate the same provider placement. Waiters join
+	// the winning request and observe its broadcast result without consuming it.
+	req, joined := f.claimRepair(entry)
+	if joined {
+		return req.wait(ctx, entry.Name)
 	}
-	f.inFlightRepairs.Store(entry.InfoHash, req)
-	defer f.inFlightRepairs.Delete(entry.InfoHash)
-	req.CurrentDebrid = entry.ActiveProvider
+	defer func() {
+		req.complete(finalResult, finalErr)
+		f.inFlightRepairs.Delete(entry.InfoHash)
+	}()
 
 	// Build debrid attempt order: current debrid first, then others in config order
 	attemptOrder := f.buildAttemptOrder(entry, skipCurrent)
@@ -117,7 +114,6 @@ func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurren
 		select {
 		case <-ctx.Done():
 			result := &FixResult{Success: false, Error: ctx.Err(), AttemptsCount: totalAttempts}
-			req.result <- result
 			return result, ctx.Err()
 		default:
 		}
@@ -154,7 +150,6 @@ func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurren
 				Error:         nil,
 				AttemptsCount: totalAttempts,
 			}
-			req.result <- result
 			return result, nil
 		}
 
@@ -184,8 +179,45 @@ func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurren
 		Error:         fmt.Errorf("all re-insertion attempts failed: %w", lastErr),
 		AttemptsCount: totalAttempts,
 	}
-	req.result <- result
 	return result, result.Error
+}
+
+func (f *Fixer) claimRepair(entry *storage.Entry) (*FixerRequest, bool) {
+	now := time.Now()
+	candidate := &FixerRequest{
+		InfoHash:         entry.InfoHash,
+		CurrentDebrid:    entry.ActiveProvider,
+		AttemptedDebrids: make([]string, 0),
+		StartedAt:        now,
+		LastAttempt:      now,
+		done:             make(chan struct{}),
+	}
+	return f.inFlightRepairs.LoadOrStore(entry.InfoHash, candidate)
+}
+
+func (r *FixerRequest) wait(ctx context.Context, entryName string) (*FixResult, error) {
+	if r == nil || r.done == nil {
+		return nil, fmt.Errorf("repair request for %s is invalid", entryName)
+	}
+	timer := time.NewTimer(5 * time.Minute)
+	defer timer.Stop()
+	select {
+	case <-r.done:
+		return r.result, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("repair timeout for %s", entryName)
+	}
+}
+
+func (r *FixerRequest) complete(result *FixResult, err error) {
+	if result == nil && err == nil {
+		err = errors.New("repair completed without a result")
+	}
+	r.result = result
+	r.err = err
+	close(r.done)
 }
 
 // MoveTorrent attempts to re-insert a torrent on a specific debrid

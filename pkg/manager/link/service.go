@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -267,7 +270,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	if !s.accountValidationIsCurrent(link) {
 		// Another request suspended or permanently disabled the account while
 		// this validation was in flight. The successful URL may serve this
-		// caller, but it must not let a later recovery probe skip its own HEAD.
+		// caller, but it must not let a later recovery probe skip its own range validation.
 		return link, nil
 	}
 	if s.validated.Size() >= maxValidatedEntries {
@@ -639,7 +642,9 @@ func (s *Service) getPlacementFile(ctx context.Context, entry *storage.Entry, fi
 	return placementFile, nil
 }
 
-// validateLink validates a download link by making a HEAD request
+// validateLink validates both the generated URL and the exact byte-range
+// behavior playback depends on. A successful HEAD alone is insufficient: some
+// expired or intermediary URLs still answer HEAD while ignoring ranged GETs.
 func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) error {
 	if link == nil {
 		return NewPermanentError(ErrEmptyLink, "empty_link")
@@ -649,13 +654,16 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 	}
 	ctx = s.withCDNIdentity(ctx, link)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, link.DownloadLink, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.DownloadLink, nil)
 	if err != nil {
 		return NewPermanentError(
-			fmt.Errorf("failed to create HEAD request: %w", err),
+			fmt.Errorf("failed to create range probe: %w", err),
 			"request_creation_failed",
 		)
 	}
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Cache-Control", "no-cache")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -663,40 +671,78 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 			return ctx.Err()
 		}
 		return NewRetryableError(
-			fmt.Errorf("HEAD request failed: %w", err),
+			fmt.Errorf("range probe failed: %w", err),
 			"network_error",
 		)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
-	// Some CDNs reject HEAD even though byte-range GETs are supported. Probe a
-	// single byte in that case so validation does not discard a healthy link.
-	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, link.DownloadLink, nil)
-		if err != nil {
-			return NewPermanentError(fmt.Errorf("failed to create range probe: %w", err), "request_creation_failed")
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errorCode := resp.Header.Get("X-Error")
+		if errorCode != "" {
+			linkErr := ErrorCodeToLinkError(errorCode)
+			linkErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), s.now())
+			return linkErr
 		}
-		req.Header.Set("Range", "bytes=0-0")
-		resp, err = s.httpClient.Do(req)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return NewRetryableError(fmt.Errorf("range probe failed: %w", err), "network_error")
-		}
-		resp.Body.Close()
+		return ClassifyHTTPStatus(resp.StatusCode, resp.Header)
+	}
+	if resp.StatusCode != http.StatusPartialContent {
+		return NewRefetchableError(
+			fmt.Errorf("range probe returned HTTP %d instead of 206", resp.StatusCode),
+			"range_probe_status",
+		)
+	}
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return NewRefetchableError(
+			fmt.Errorf("range probe returned unexpected content encoding %q", encoding),
+			"range_probe_encoding",
+		)
+	}
+	if err := validateLinkProbeContentRange(resp.Header.Get("Content-Range"), link.Size); err != nil {
+		return NewRefetchableError(err, "range_probe_content_range")
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength != 1 {
+		return NewRefetchableError(
+			fmt.Errorf("range probe Content-Length is %d, want 1", resp.ContentLength),
+			"range_probe_content_length",
+		)
 	}
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
+	// Read the complete one-byte response plus at most one sentinel byte. This
+	// proves the body is neither empty nor overlong and lets compliant transports
+	// reuse the connection without risking a full-file download when Range was
+	// ignored.
+	probe, err := io.ReadAll(io.LimitReader(resp.Body, 2))
+	if err != nil {
+		return NewRetryableError(fmt.Errorf("range probe body failed: %w", err), "range_probe_body")
 	}
-	errorCode := resp.Header.Get("X-Error")
-	if errorCode != "" {
-		linkErr := ErrorCodeToLinkError(errorCode)
-		linkErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), s.now())
-		return linkErr
+	if len(probe) != 1 {
+		return NewRefetchableError(
+			fmt.Errorf("range probe returned %d body bytes, want 1", len(probe)),
+			"range_probe_body_length",
+		)
 	}
-	return ClassifyHTTPStatus(resp.StatusCode, resp.Header)
+	return nil
+}
+
+func validateLinkProbeContentRange(value string, expectedSize int64) error {
+	value = strings.TrimSpace(value)
+	fields := strings.Fields(value)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return fmt.Errorf("range probe returned invalid Content-Range %q", value)
+	}
+	bounds, totalText, found := strings.Cut(fields[1], "/")
+	if !found || bounds != "0-0" || totalText == "" {
+		return fmt.Errorf("range probe returned invalid Content-Range %q", value)
+	}
+	total, err := strconv.ParseInt(totalText, 10, 64)
+	if err != nil || total <= 0 {
+		return fmt.Errorf("range probe returned invalid Content-Range %q", value)
+	}
+	if expectedSize > 0 && total != expectedSize {
+		return fmt.Errorf("range probe total %d does not match expected size %d", total, expectedSize)
+	}
+	return nil
 }
 
 func (s *Service) validateWithRetry(ctx context.Context, link *types.DownloadLink) error {

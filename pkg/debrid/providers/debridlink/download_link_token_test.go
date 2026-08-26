@@ -23,7 +23,7 @@ func TestFetchDownloadLinkTracksDownloadAccountToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchDownloadLink() error = %v", err)
 	}
-	if got.Token != "download-token" {
-		t.Fatalf("link token = %q, want owning download token", got.Token)
+	if got.Token != "download-token" || got.Size != 4 {
+		t.Fatalf("link token/size = %q/%d, want owning download token and size 4", got.Token, got.Size)
 	}
 }

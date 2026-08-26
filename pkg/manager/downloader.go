@@ -32,6 +32,7 @@ type Downloader struct {
 	strmURL        string
 	mountPath      string
 	dest           string
+	relativeLinks  bool
 	logger         zerolog.Logger
 	usenetDownload func(context.Context, string, string, io.Writer, func(int64, int64)) error
 	torrentLink    func(context.Context, *storage.Entry, string) (string, error)
@@ -76,12 +77,20 @@ func NewDownloadManager(manager *Manager) *Downloader {
 		strmURL = fmt.Sprintf("http://%s:%s", bindAddress, cfg.Port)
 	}
 	return &Downloader{
-		manager:   manager,
-		strmURL:   strmURL,
-		mountPath: cfg.Mount.MountPath,
-		logger:    manager.logger.With().Str("component", "downloader").Logger(),
-		dest:      cfg.DownloadFolder,
+		manager:       manager,
+		strmURL:       strmURL,
+		mountPath:     cfg.Mount.MountPath,
+		relativeLinks: cfg.RelativeSymlinks,
+		logger:        manager.logger.With().Str("component", "downloader").Logger(),
+		dest:          cfg.DownloadFolder,
 	}
+}
+
+func (d *Downloader) relativeSymlinksEnabled() bool {
+	if d.manager != nil {
+		return config.Get().RelativeSymlinks
+	}
+	return d.relativeLinks
 }
 
 func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error {
@@ -362,7 +371,12 @@ func (d *Downloader) createSymlinksWhenMountFilesAppear(ctx context.Context, ent
 							_ = directory.Close()
 							return pathErr
 						}
-						linkErr := safepath.Symlink(d.dest, fullPath, fileSymlinkPath)
+						storedTarget, targetErr := symlinkTarget(fileSymlinkPath, fullPath, d.relativeSymlinksEnabled())
+						if targetErr != nil {
+							_ = directory.Close()
+							return targetErr
+						}
+						linkErr := safepath.Symlink(d.dest, storedTarget, fileSymlinkPath)
 						if linkErr != nil {
 							_ = directory.Close()
 							return fmt.Errorf(
@@ -483,7 +497,13 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 				if err := safepath.RejectSymlinks(source); err != nil {
 					return nil, fmt.Errorf("refusing torrent mount source %q: %w", source, err)
 				}
-				destination, err := createOwnedTorrentSymlink(d.dest, entry, layout.relative, source)
+				destination, err := createOwnedTorrentSymlink(
+					d.dest,
+					entry,
+					layout.relative,
+					source,
+					d.relativeSymlinksEnabled(),
+				)
 				if err != nil {
 					return nil, err
 				}

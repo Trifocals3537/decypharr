@@ -404,7 +404,7 @@ func ensureOwnedTorrentParent(root *os.Root, relative string) error {
 	return nil
 }
 
-func createOwnedTorrentSymlink(downloadRoot string, entry *storage.Entry, relative, target string) (string, error) {
+func createOwnedTorrentSymlink(downloadRoot string, entry *storage.Entry, relative, target string, relativeTarget bool) (string, error) {
 	relative, err := normalizeTorrentRelativePath(relative)
 	if err != nil {
 		return "", err
@@ -417,14 +417,19 @@ func createOwnedTorrentSymlink(downloadRoot string, entry *storage.Entry, relati
 	if err := ensureOwnedTorrentParent(root, relative); err != nil {
 		return "", err
 	}
-	if err := root.Symlink(target, relative); err != nil {
+	linkPath := filepath.Join(entryPath, relative)
+	storedTarget, err := symlinkTarget(linkPath, target, relativeTarget)
+	if err != nil {
+		return "", err
+	}
+	if err := root.Symlink(storedTarget, relative); err != nil {
 		if os.IsExist(err) {
 			before, statErr := root.Lstat(relative)
 			if statErr == nil && before.Mode()&os.ModeSymlink != 0 {
 				existingTarget, readErr := root.Readlink(relative)
 				after, afterErr := root.Lstat(relative)
 				if readErr == nil && afterErr == nil && os.SameFile(before, after) &&
-					sameFilesystemPath(existingTarget, target) {
+					sameSymlinkTarget(linkPath, existingTarget, storedTarget) {
 					return filepath.Join(entryPath, relative), nil
 				}
 			}
@@ -443,7 +448,7 @@ func createOwnedTorrentSymlink(downloadRoot string, entry *storage.Entry, relati
 		return "", fmt.Errorf("read created torrent symlink %q: %w", relative, err)
 	}
 	after, err := root.Lstat(relative)
-	if err != nil || !os.SameFile(before, after) || !sameFilesystemPath(actualTarget, target) {
+	if err != nil || !os.SameFile(before, after) || !sameSymlinkTarget(linkPath, actualTarget, storedTarget) {
 		if err != nil {
 			return "", fmt.Errorf("reinspect created torrent symlink %q: %w", relative, err)
 		}

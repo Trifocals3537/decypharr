@@ -329,7 +329,7 @@ func Symlink(root, oldTarget, newPath string) error {
 			info, statErr := rooted.Lstat(relative)
 			if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
 				existingTarget, readErr := rooted.Readlink(relative)
-				if readErr == nil && existingTarget == oldTarget {
+				if readErr == nil && sameSymlinkDestination(absoluteNewPath, existingTarget, oldTarget) {
 					return nil
 				}
 			}
@@ -337,6 +337,21 @@ func Symlink(root, oldTarget, newPath string) error {
 		return fmt.Errorf("create symlink %q -> %q beneath root: %w", absoluteNewPath, oldTarget, err)
 	}
 	return nil
+}
+
+func sameSymlinkDestination(linkPath, left, right string) bool {
+	resolve := func(target string) (string, error) {
+		if target == "" {
+			return "", fmt.Errorf("symlink target is empty")
+		}
+		if filepath.IsAbs(target) {
+			return filepath.Clean(target), nil
+		}
+		return filepath.Clean(filepath.Join(filepath.Dir(linkPath), target)), nil
+	}
+	resolvedLeft, leftErr := resolve(left)
+	resolvedRight, rightErr := resolve(right)
+	return leftErr == nil && rightErr == nil && samePath(resolvedLeft, resolvedRight)
 }
 
 func openRootTarget(root, absoluteTarget string) (*os.Root, string, error) {

@@ -9,4 +9,5 @@ description: What can Decypharr do?
 - **Repair**: Checks and fixes missing files.
 - **Performance**: Custom DFS implementation for fast start.
 - **Arrs**: Sonarr/Radarr support.
+- **Portable links**: Optional relative symlinks for compatible host and container layouts.
 - **Queue Cleanup**: Rules-driven handling of stuck/failed Arr queue items (import, blacklist, re-search).

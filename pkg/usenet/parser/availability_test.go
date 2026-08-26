@@ -2,6 +2,7 @@ package parser
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sirrobot01/decypharr/internal/nntp"
@@ -30,6 +31,10 @@ func TestArticleProbeFailuresClassifiesOnlyUniformMissingArticles(t *testing.T) 
 	}
 	if !nntp.IsArticleNotFoundError(err) {
 		t.Fatalf("expected the first NNTP cause to remain discoverable, got %v", err)
+	}
+	if message := err.Error(); !strings.Contains(message, ErrNZBArticlesUnavailable.Error()) ||
+		strings.Contains(message, "%!") {
+		t.Fatalf("malformed unavailable-article error: %q", message)
 	}
 }
 

@@ -61,7 +61,7 @@ type articlesUnavailableError struct {
 
 func (e *articlesUnavailableError) Error() string {
 	return fmt.Sprintf(
-		"%s: %d required article probe(s) failed; first failure: %v",
+		"%v: %d required article probe(s) failed; first failure: %v",
 		ErrNZBArticlesUnavailable,
 		e.count,
 		e.cause,

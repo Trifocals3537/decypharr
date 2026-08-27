@@ -50,7 +50,7 @@ type UserInfo APIResponse[struct {
 	Username     string `json:"username"`
 	Email        string `json:"email"`
 	AccountType  int    `json:"accountType"`
-	PremiumLeft  int64  `json:"premiumLeft"`
+	PremiumLeft  int64  `json:"premiumLeft"` // Remaining premium time in seconds.
 	Points       int    `json:"pts"`
 	Trafficshare int    `json:"trafficshare"`
 }]

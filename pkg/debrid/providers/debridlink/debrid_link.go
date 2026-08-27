@@ -24,6 +24,11 @@ import (
 	"go.uber.org/ratelimit"
 )
 
+const (
+	debridLinkProfileCacheDuration = time.Hour
+	debridLinkMaxPremiumSeconds    = int64((1<<63 - 1) / int64(time.Second))
+)
+
 type DebridLink struct {
 	Host             string `json:"host"`
 	APIKey           string
@@ -36,7 +41,8 @@ type DebridLink struct {
 	logger                zerolog.Logger
 	config                config.Debrid
 
-	Profile *types.Profile `json:"profile,omitempty"`
+	Profile            *types.Profile `json:"profile,omitempty"`
+	profileLastFetched time.Time
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink, error) {
@@ -210,10 +216,12 @@ func (dl *DebridLink) IsAvailable(hashes []string) map[string]bool {
 }
 
 func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
-	endpoint := fmt.Sprintf("/seedbox/%s", torrentId)
+	if strings.TrimSpace(torrentId) == "" {
+		return nil, fmt.Errorf("torrent ID is empty")
+	}
 	var res torrentInfo
 
-	resp, err := dl.doGet(endpoint, nil, &res)
+	resp, err := dl.doGet("/seedbox/list", map[string]string{"ids": torrentId}, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -224,32 +232,40 @@ func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if !res.Success || res.Value == nil {
 		return nil, fmt.Errorf("error getting torrent")
 	}
-	data := *res.Value
-
-	if len(data) == 0 {
+	data, found := debridLinkTorrentByID(*res.Value, torrentId)
+	if !found {
 		return nil, fmt.Errorf("torrent not found")
 	}
-	t := data[0]
-	name := utils.RemoveInvalidChars(t.Name)
+	name := utils.RemoveInvalidChars(data.Name)
 	torrent := &types.Torrent{
-		Id:               t.ID,
+		Id:               data.ID,
+		InfoHash:         data.HashString,
 		Name:             name,
-		Bytes:            t.TotalSize,
-		Status:           "downloaded",
+		Bytes:            data.TotalSize,
+		Progress:         data.DownloadPercent,
+		Status:           debridLinkTorrentStatus(data.Status),
+		Speed:            data.DownloadSpeed,
+		Seeders:          data.PeersConnected,
 		Filename:         name,
 		OriginalFilename: name,
 		Debrid:           dl.config.Name,
-		Added:            time.Unix(t.Created, 0),
 	}
-	torrent.Files, err = dl.filesByLogicalName(t.ID, t.Files)
+	if data.Created > 0 {
+		torrent.Added = time.Unix(data.Created, 0)
+	}
+	torrent.Files, err = dl.filesByLogicalName(data.ID, data.Files)
 	if err != nil {
 		return nil, err
 	}
+	dl.attachDownloadLinks(torrent.Files)
 
 	return torrent, nil
 }
 
 func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
+	if t == nil || strings.TrimSpace(t.Id) == "" {
+		return fmt.Errorf("torrent ID is missing")
+	}
 	var res torrentInfo
 
 	resp, err := dl.doGet("/seedbox/list", map[string]string{"ids": t.Id}, &res)
@@ -266,22 +282,16 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	if res.Value == nil {
 		return fmt.Errorf("torrent not found")
 	}
-	dt := *res.Value
-
-	if len(dt) == 0 {
+	data, found := debridLinkTorrentByID(*res.Value, t.Id)
+	if !found {
 		return fmt.Errorf("torrent not found")
-	}
-	data := dt[0]
-	status := types.TorrentStatusDownloading
-	if data.Status == 100 {
-		status = types.TorrentStatusDownloaded
 	}
 	name := utils.RemoveInvalidChars(data.Name)
 	t.Id = data.ID
 	t.Name = name
 	t.Bytes = data.TotalSize
 	t.Progress = data.DownloadPercent
-	t.Status = status
+	t.Status = debridLinkTorrentStatus(data.Status)
 	t.Speed = data.DownloadSpeed
 	t.Seeders = data.PeersConnected
 	t.Filename = name
@@ -289,7 +299,9 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	if data.HashString != "" {
 		t.InfoHash = data.HashString
 	}
-	t.Added = time.Unix(data.Created, 0)
+	if data.Created > 0 {
+		t.Added = time.Unix(data.Created, 0)
+	}
 	files, err := dl.filesByLogicalName(t.Id, data.Files)
 	if err != nil {
 		return err
@@ -298,6 +310,22 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	t.Files = files
 
 	return nil
+}
+
+func debridLinkTorrentByID(torrents []_torrentInfo, torrentID string) (_torrentInfo, bool) {
+	for _, torrent := range torrents {
+		if torrent.ID == torrentID {
+			return torrent, true
+		}
+	}
+	return _torrentInfo{}, false
+}
+
+func debridLinkTorrentStatus(status int) types.TorrentStatus {
+	if status == 100 {
+		return types.TorrentStatusDownloaded
+	}
+	return types.TorrentStatusDownloading
 }
 
 func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
@@ -608,6 +636,9 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return torrents, fmt.Errorf("debridlink API error: Status: %d", resp.StatusCode)
 	}
+	if !res.Success || res.Value == nil {
+		return torrents, fmt.Errorf("error getting torrents")
+	}
 
 	data := *res.Value
 
@@ -670,7 +701,7 @@ func (dl *DebridLink) GetAvailableSlots() (int, error) {
 }
 
 func (dl *DebridLink) GetProfile() (*types.Profile, error) {
-	if dl.Profile != nil {
+	if dl.Profile != nil && time.Since(dl.profileLastFetched) < debridLinkProfileCacheDuration {
 		return dl.Profile, nil
 	}
 	var res UserInfo
@@ -687,18 +718,23 @@ func (dl *DebridLink) GetProfile() (*types.Profile, error) {
 		return nil, fmt.Errorf("error getting user info")
 	}
 	data := *res.Value
-	expiration := time.Unix(data.PremiumLeft, 0)
+	now := time.Now()
+	expiration, err := debridLinkPremiumExpiration(now, data.PremiumLeft)
+	if err != nil {
+		return nil, err
+	}
+	premiumUntil := int64(0)
+	if !expiration.IsZero() {
+		premiumUntil = expiration.Unix()
+	}
 	profile := &types.Profile{
 		Id:         1,
 		Username:   data.Username,
 		Name:       dl.config.Name,
 		Email:      data.Email,
 		Points:     data.Points,
-		Premium:    data.PremiumLeft,
+		Premium:    premiumUntil,
 		Expiration: expiration,
-	}
-	if expiration.IsZero() {
-		profile.Expiration = time.Now().AddDate(1, 0, 0)
 	}
 	if data.PremiumLeft > 0 {
 		profile.Type = "premium"
@@ -706,7 +742,18 @@ func (dl *DebridLink) GetProfile() (*types.Profile, error) {
 		profile.Type = "free"
 	}
 	dl.Profile = profile
+	dl.profileLastFetched = now
 	return profile, nil
+}
+
+func debridLinkPremiumExpiration(now time.Time, seconds int64) (time.Time, error) {
+	if seconds <= 0 {
+		return time.Time{}, nil
+	}
+	if seconds > debridLinkMaxPremiumSeconds {
+		return time.Time{}, fmt.Errorf("debridlink API returned an invalid premium duration")
+	}
+	return now.Add(time.Duration(seconds) * time.Second), nil
 }
 
 func (dl *DebridLink) AccountManager() *account.Manager {

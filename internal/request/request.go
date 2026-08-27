@@ -148,8 +148,25 @@ func WithProviderTraffic(
 	}
 }
 
-// Do performs an HTTP request with retries for certain status codes
+// Do performs an HTTP request with retries for certain status codes.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	return c.do(req, nil)
+}
+
+// DoWithoutDefaultHeaders performs a request without applying the named
+// client-level headers. Request-specific headers are left intact. This is
+// useful when an API client follows a provider-generated URL whose own
+// signature or token authorizes the download and API credentials must not be
+// sent to that host.
+func (c *Client) DoWithoutDefaultHeaders(req *http.Request, excluded ...string) (*http.Response, error) {
+	excludedHeaders := make(map[string]struct{}, len(excluded))
+	for _, key := range excluded {
+		excludedHeaders[http.CanonicalHeaderKey(key)] = struct{}{}
+	}
+	return c.do(req, excludedHeaders)
+}
+
+func (c *Client) do(req *http.Request, excludedHeaders map[string]struct{}) (*http.Response, error) {
 	if c.configurationErr != nil {
 		return nil, c.configurationErr
 	}
@@ -157,6 +174,9 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	c.headersMu.RLock()
 	if c.headers != nil {
 		for key, value := range c.headers {
+			if _, excluded := excludedHeaders[http.CanonicalHeaderKey(key)]; excluded {
+				continue
+			}
 			req.Header.Set(key, value)
 		}
 	}

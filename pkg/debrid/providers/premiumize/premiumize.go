@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -755,21 +754,8 @@ func (pm *Premiumize) SpeedTest(ctx context.Context) types.SpeedTestResult {
 	if !found || link.DownloadLink == "" {
 		return result
 	}
-	const downloadSize = 1 << 20
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, link.DownloadLink, nil)
+	bytesRead, duration, err := common.ProbeDownload(ctx, current.Client(), link.DownloadLink)
 	if err != nil {
-		return result
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", downloadSize-1))
-	downloadStart := time.Now()
-	dlResp, err := current.Client().Do(req)
-	if err != nil {
-		return result
-	}
-	defer dlResp.Body.Close()
-	bytesRead, err := io.Copy(io.Discard, io.LimitReader(dlResp.Body, downloadSize))
-	duration := time.Since(downloadStart)
-	if err != nil || bytesRead == 0 {
 		return result
 	}
 	result.BytesRead = bytesRead

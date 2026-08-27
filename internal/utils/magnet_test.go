@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"context"
 	"encoding/base32"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/sirrobot01/decypharr/internal/testutil"
 )
 
@@ -86,6 +88,37 @@ func TestGetMagnetFromFile_RealTorrentFile_StripFalse(t *testing.T) {
 
 	torrentPath := testutil.GetTestTorrentPath()
 	testMagnetFromFile(t, torrentPath, false, expectedInfoHash, expectedName, expectedLink, expectedTrackerCount)
+}
+
+func TestGetMagnetFromBytesStripsTrackersFromUploadedFileWithoutChangingHash(t *testing.T) {
+	torrentData, err := os.ReadFile(testutil.GetTestTorrentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := GetMagnetFromBytes(torrentData, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sanitized, err := GetMagnetFromBytes(torrentData, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sanitized.InfoHash != original.InfoHash {
+		t.Fatalf("sanitized infohash = %q, want %q", sanitized.InfoHash, original.InfoHash)
+	}
+	if bytes.Equal(sanitized.File, torrentData) {
+		t.Fatal("sanitized torrent bytes were not rewritten")
+	}
+	metadata, err := metainfo.Load(bytes.NewReader(sanitized.File))
+	if err != nil {
+		t.Fatalf("load sanitized torrent: %v", err)
+	}
+	if metadata.Announce != "" || len(metadata.AnnounceList) != 0 {
+		t.Fatalf("sanitized torrent retains trackers: announce=%q tiers=%d", metadata.Announce, len(metadata.AnnounceList))
+	}
+	if got := metadata.HashInfoBytes().HexString(); got != original.InfoHash {
+		t.Fatalf("sanitized file infohash = %q, want %q", got, original.InfoHash)
+	}
 }
 
 func TestGetMagnetFromFile_MagnetFile_StripTrue(t *testing.T) {

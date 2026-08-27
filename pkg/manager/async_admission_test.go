@@ -1,8 +1,10 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/testutil"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
@@ -88,6 +91,69 @@ func TestAdmitNewTorrentReturnsBeforeProviderAndSuppressesDuplicates(t *testing.
 	}
 	if !strings.Contains(entry.LastError, "provider temporarily unavailable") {
 		t.Fatalf("queue error = %q, want provider failure", entry.LastError)
+	}
+}
+
+func TestAdmitNewTorrentPersistsAndRebuildsExactTorrentSource(t *testing.T) {
+	torrentData, err := os.ReadFile(testutil.GetTestTorrentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	magnet, err := utils.GetMagnetFromBytes(torrentData, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted := make(chan []byte, 1)
+	provider := &routingTestClient{
+		cfg: config.Debrid{Name: "torbox"},
+		submit: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			submitted <- append([]byte(nil), torrent.Magnet.File...)
+			return nil, errors.New("stop after source capture")
+		},
+	}
+	manager, downloadRoot := newAsyncAdmissionTestManager(t, provider, 1)
+	request := NewTorrentRequest(
+		"torbox",
+		downloadRoot,
+		magnet,
+		&arr.Arr{Name: "sonarr"},
+		config.DownloadActionSymlink,
+		nil,
+		"",
+		ImportTypeQBit,
+		false,
+	)
+
+	if err := admitTorrentPromptly(t, manager, request); err != nil {
+		t.Fatalf("AdmitNewTorrent() error = %v", err)
+	}
+	persisted, err := manager.storage.LoadTorrentSource(magnet.InfoHash)
+	if err != nil {
+		t.Fatalf("LoadTorrentSource() error = %v", err)
+	}
+	if !bytes.Equal(persisted, torrentData) {
+		t.Fatal("persisted source differs from admitted torrent")
+	}
+
+	entry, err := manager.queue.GetTorrent(magnet.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := manager.rebuildQueuedTorrentJob(entry)
+	if err != nil {
+		t.Fatalf("rebuildQueuedTorrentJob() error = %v", err)
+	}
+	if rebuilt.Request == nil || !bytes.Equal(rebuilt.Request.Magnet.File, torrentData) {
+		t.Fatal("rebuilt job did not retain the exact torrent source")
+	}
+
+	select {
+	case got := <-submitted:
+		if !bytes.Equal(got, torrentData) {
+			t.Fatal("provider submission did not receive the exact torrent source")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider submission did not run")
 	}
 }
 

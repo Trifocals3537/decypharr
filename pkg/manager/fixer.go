@@ -8,7 +8,6 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -252,10 +251,11 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 		}
 	}
 
-	// Construct magnet
-	magnet, err := utils.GetMagnetInfo(entry.Magnet, f.manager.config.AlwaysRmTrackerUrls)
+	// Reuse the exact verified .torrent source when one was admitted. Missing
+	// legacy sources may fall back to a magnet; corrupted sources fail closed.
+	magnet, err := f.manager.torrentMagnetForEntry(entry)
 	if err != nil {
-		magnet = utils.ConstructMagnet(entry.InfoHash, entry.Name)
+		return false, err
 	}
 
 	if magnet == nil {

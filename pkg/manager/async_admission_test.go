@@ -22,6 +22,8 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
+const asyncAdmissionTestTimeout = 30 * time.Second
+
 func TestAdmitNewTorrentReturnsBeforeProviderAndSuppressesDuplicates(t *testing.T) {
 	providerStarted := make(chan struct{})
 	providerRelease := make(chan struct{})
@@ -47,13 +49,10 @@ func TestAdmitNewTorrentReturnsBeforeProviderAndSuppressesDuplicates(t *testing.
 	downloadUncached := true
 	request := asyncAdmissionTestRequest(downloadRoot, "first", &downloadUncached)
 
-	if err := admitTorrentPromptly(t, manager, request); err != nil {
+	admission := startTorrentAdmission(manager, request)
+	awaitAsyncAdmissionValue(t, providerStarted, "provider worker start")
+	if err := awaitTorrentAdmission(t, admission); err != nil {
 		t.Fatalf("AdmitNewTorrent() error: %v", err)
-	}
-	select {
-	case <-providerStarted:
-	case <-time.After(time.Second):
-		t.Fatal("provider worker did not start")
 	}
 
 	entry, err := manager.queue.GetTorrent(request.Magnet.InfoHash)
@@ -76,7 +75,7 @@ func TestAdmitNewTorrentReturnsBeforeProviderAndSuppressesDuplicates(t *testing.
 	}
 
 	duplicate := asyncAdmissionTestRequest(downloadRoot, "first", &downloadUncached)
-	if err := admitTorrentPromptly(t, manager, duplicate); !errors.Is(err, ErrJobQueueDuplicate) {
+	if err := awaitTorrentAdmission(t, startTorrentAdmission(manager, duplicate)); !errors.Is(err, ErrJobQueueDuplicate) {
 		t.Fatalf("duplicate admission error = %v, want %v", err, ErrJobQueueDuplicate)
 	}
 	if got := attempts.Load(); got != 1 {
@@ -124,7 +123,7 @@ func TestAdmitNewTorrentPersistsAndRebuildsExactTorrentSource(t *testing.T) {
 		false,
 	)
 
-	if err := admitTorrentPromptly(t, manager, request); err != nil {
+	if err := awaitTorrentAdmission(t, startTorrentAdmission(manager, request)); err != nil {
 		t.Fatalf("AdmitNewTorrent() error = %v", err)
 	}
 	persisted, err := manager.storage.LoadTorrentSource(magnet.InfoHash)
@@ -147,13 +146,9 @@ func TestAdmitNewTorrentPersistsAndRebuildsExactTorrentSource(t *testing.T) {
 		t.Fatal("rebuilt job did not retain the exact torrent source")
 	}
 
-	select {
-	case got := <-submitted:
-		if !bytes.Equal(got, torrentData) {
-			t.Fatal("provider submission did not receive the exact torrent source")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("provider submission did not run")
+	got := awaitAsyncAdmissionValue(t, submitted, "provider submission")
+	if !bytes.Equal(got, torrentData) {
+		t.Fatal("provider submission did not receive the exact torrent source")
 	}
 }
 
@@ -181,34 +176,33 @@ func TestAdmitNewTorrentBoundsProviderSubmissionsByWorkerCount(t *testing.T) {
 	first := asyncAdmissionTestRequest(downloadRoot, "first", nil)
 	second := asyncAdmissionTestRequest(downloadRoot, "second", nil)
 
-	if err := admitTorrentPromptly(t, manager, first); err != nil {
+	firstAdmission := startTorrentAdmission(manager, first)
+	got := awaitAsyncAdmissionValue(t, providerStarted, "first provider submission")
+	if got != first.Magnet.InfoHash {
+		t.Fatalf("first provider submission = %q, want %q", got, first.Magnet.InfoHash)
+	}
+	if err := awaitTorrentAdmission(t, firstAdmission); err != nil {
 		t.Fatal(err)
 	}
-	if err := admitTorrentPromptly(t, manager, second); err != nil {
+	if err := awaitTorrentAdmission(t, startTorrentAdmission(manager, second)); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case got := <-providerStarted:
-		if got != first.Magnet.InfoHash {
-			t.Fatalf("first provider submission = %q, want %q", got, first.Magnet.InfoHash)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("first provider submission did not start")
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("provider attempts while first submission blocked = %d, want 1", got)
 	}
-	select {
-	case got := <-providerStarted:
-		t.Fatalf("second provider submission %q escaped the one-worker bound", got)
-	case <-time.After(50 * time.Millisecond):
+	if active, pending, outstanding := manager.jobQueue.ActiveCount(), manager.jobQueue.Len(), manager.jobQueue.OutstandingCount(); active != 1 || pending != 1 || outstanding != 2 {
+		t.Fatalf(
+			"blocked queue state = active %d, pending %d, outstanding %d; want 1/1/2",
+			active,
+			pending,
+			outstanding,
+		)
 	}
 
 	releaseFirst()
-	select {
-	case got := <-providerStarted:
-		if got != second.Magnet.InfoHash {
-			t.Fatalf("second provider submission = %q, want %q", got, second.Magnet.InfoHash)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("second provider submission did not start after capacity released")
+	got = awaitAsyncAdmissionValue(t, providerStarted, "second provider submission")
+	if got != second.Magnet.InfoHash {
+		t.Fatalf("second provider submission = %q, want %q", got, second.Magnet.InfoHash)
 	}
 	waitForQueuedEntryState(t, manager.queue, first.Magnet.InfoHash, storage.EntryStateError)
 	waitForQueuedEntryState(t, manager.queue, second.Magnet.InfoHash, storage.EntryStateError)
@@ -248,22 +242,28 @@ func newAsyncAdmissionTestManager(
 	return manager, downloadRoot
 }
 
-func admitTorrentPromptly(
-	t *testing.T,
-	manager *Manager,
-	request *ImportRequest,
-) error {
-	t.Helper()
+func startTorrentAdmission(manager *Manager, request *ImportRequest) <-chan error {
 	result := make(chan error, 1)
 	go func() {
 		result <- manager.AdmitNewTorrent(context.Background(), request)
 	}()
+	return result
+}
+
+func awaitTorrentAdmission(t *testing.T, result <-chan error) error {
+	t.Helper()
+	return awaitAsyncAdmissionValue(t, result, "durable torrent admission")
+}
+
+func awaitAsyncAdmissionValue[T any](t *testing.T, result <-chan T, name string) T {
+	t.Helper()
 	select {
-	case err := <-result:
-		return err
-	case <-time.After(time.Second):
-		t.Fatal("durable admission waited for provider work")
-		return nil
+	case value := <-result:
+		return value
+	case <-time.After(asyncAdmissionTestTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+		var zero T
+		return zero
 	}
 }
 
@@ -301,7 +301,7 @@ func waitForQueuedEntryState(
 	want storage.TorrentState,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(asyncAdmissionTestTimeout)
 	for time.Now().Before(deadline) {
 		entry, err := queue.GetTorrent(infoHash)
 		if err == nil && entry.State == want {

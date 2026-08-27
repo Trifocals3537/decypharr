@@ -1,8 +1,16 @@
 package debridlink
 
 type APIResponse[T any] struct {
-	Success bool `json:"success"`
-	Value   *T   `json:"value"` // Use pointer to allow nil
+	Success    bool                  `json:"success"`
+	Value      *T                    `json:"value"` // Use pointer to allow nil
+	Pagination *debridLinkPagination `json:"pagination,omitempty"`
+}
+
+type debridLinkPagination struct {
+	Page     int `json:"page"`
+	Pages    int `json:"pages"`
+	Next     int `json:"next"`
+	Previous int `json:"previous"`
 }
 
 type AvailableResponse APIResponse[map[string]map[string]struct {

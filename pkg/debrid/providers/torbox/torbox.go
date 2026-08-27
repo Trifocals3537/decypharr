@@ -38,6 +38,8 @@ var planSlots = map[string]int{
 	"pro":       10,
 }
 
+var torboxStatusDetails = regexp.MustCompile(`\s*\(.*?\)\s*`)
+
 const (
 	// A TorBox list is an authoritative provider snapshot. These ceilings keep
 	// an ignored offset or a hostile response from turning refresh into an
@@ -466,28 +468,30 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 }
 
 func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentStatus {
+	// download_finished is TorBox's authoritative completion flag. Its API
+	// documentation explicitly warns consumers not to infer completion from
+	// download_state alone.
 	if finished {
 		return types.TorrentStatusDownloaded
 	}
-	downloading := []string{"paused", "downloading",
-		"checkingResumeData", "metaDL", "pausedUP", "queuedUP", "checkingUP",
-		"forcedUP", "allocating", "downloading", "metaDL", "pausedDL",
-		"queuedDL", "checkingDL", "forcedDL", "checkingResumeData", "moving",
-		"incomplete",
-	}
 
-	downloaded := []string{
-		"completed", "cached", "uploading", "downloaded",
-	}
-
-	status = regexp.MustCompile(`\s*\(.*?\)\s*`).ReplaceAllString(status, "")
-
-	switch {
-	case utils.Contains(downloading, status):
+	status = strings.ToLower(strings.TrimSpace(torboxStatusDetails.ReplaceAllString(status, "")))
+	switch status {
+	case "queued", "queueddl", "queuedup":
+		return types.TorrentStatusQueued
+	case "paused", "downloading", "checkingresumedata", "metadl",
+		"pausedup", "checkingup", "forcedup", "allocating", "pauseddl",
+		"checkingdl", "forceddl", "moving", "stalled", "stalledup",
+		"stalleddl", "completed", "cached", "uploading", "downloaded":
+		// Stalled downloads are still active according to TorBox. Likewise, a
+		// ready-looking text state is not complete until download_finished is
+		// true, so keep polling instead of importing incomplete file metadata.
 		return types.TorrentStatusDownloading
-	case utils.Contains(downloaded, status):
-		return types.TorrentStatusDownloaded
+	case "error", "failed", "expired", "incomplete", "missing",
+		"missingfiles", "reported missing":
+		return types.TorrentStatusError
 	default:
+		// Preserve the existing fail-closed behavior for truly unknown states.
 		return types.TorrentStatusError
 	}
 }
@@ -709,6 +713,10 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 		switch torrent.Status {
 		case types.TorrentStatusDownloaded:
 			tb.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
+			return torrent, nil
+		case types.TorrentStatusQueued:
+			// TorBox will start this automatically when an account slot or
+			// backend capacity becomes available. It is not a torrent failure.
 			return torrent, nil
 		case types.TorrentStatusDownloading:
 			if !torrent.DownloadUncached {

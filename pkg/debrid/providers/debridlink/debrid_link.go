@@ -20,6 +20,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
+	"github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"go.uber.org/ratelimit"
 )
@@ -881,25 +882,8 @@ func (dl *DebridLink) SpeedTest(ctx context.Context) types.SpeedTestResult {
 		return result
 	}
 
-	// Download first 1MB to measure speed
-	const downloadSize = 1 * 1024 * 1024 // 1MB
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.DownloadLink, nil)
+	bytesRead, downloadDuration, err := common.ProbeDownload(ctx, dl.repairClient, link.DownloadLink)
 	if err != nil {
-		return result
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", downloadSize-1))
-
-	downloadStart := time.Now()
-	dlResp, err := dl.repairClient.Do(req)
-	if err != nil {
-		return result
-	}
-	defer dlResp.Body.Close()
-
-	bytesRead, err := io.Copy(io.Discard, io.LimitReader(dlResp.Body, downloadSize))
-	downloadDuration := time.Since(downloadStart)
-
-	if err != nil || bytesRead == 0 {
 		return result
 	}
 

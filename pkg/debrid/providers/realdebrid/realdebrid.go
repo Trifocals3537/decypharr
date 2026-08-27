@@ -62,6 +62,7 @@ type RealDebrid struct {
 	rarSemaphore       chan struct{}
 	Profile            *types.Profile
 	profileLastFetched time.Time
+	profileMu          sync.Mutex
 	config             config.Debrid
 	retries            int
 }
@@ -131,12 +132,6 @@ func New(
 		retries:               cfg.Retries,
 	}
 
-	go func() {
-		_, err = r.GetProfile()
-		if err != nil {
-			r.logger.Error().Err(err).Msg("Failed to get RealDebrid profile")
-		}
-	}()
 	return r, nil
 }
 
@@ -231,6 +226,10 @@ func (r *RealDebrid) doPut(endpoint string, body []byte, contentType string, res
 
 // doGetWithClient performs a GET using a specific client
 func (r *RealDebrid) doGetWithClient(client *request.Client, fullURL string, queryParams map[string]string, result any) (*http.Response, error) {
+	return r.doGetWithClientContext(context.Background(), client, fullURL, queryParams, result)
+}
+
+func (r *RealDebrid) doGetWithClientContext(ctx context.Context, client *request.Client, fullURL string, queryParams map[string]string, result any) (*http.Response, error) {
 	u, err := url.Parse(fullURL)
 	if err != nil {
 		return nil, err
@@ -244,7 +243,7 @@ func (r *RealDebrid) doGetWithClient(client *request.Client, fullURL string, que
 		u.RawQuery = q.Encode()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1325,9 +1324,13 @@ func (r *RealDebrid) Config() config.Debrid {
 }
 
 func (r *RealDebrid) getClientProfile(client *request.Client) (*types.Profile, error) {
+	return r.getClientProfileContext(context.Background(), client)
+}
+
+func (r *RealDebrid) getClientProfileContext(ctx context.Context, client *request.Client) (*types.Profile, error) {
 	var data profileResponse
 
-	resp, err := r.doGetWithClient(client, fmt.Sprintf("%s/user", r.Host), nil, &data)
+	resp, err := r.doGetWithClientContext(ctx, client, fmt.Sprintf("%s/user", r.Host), nil, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -1350,14 +1353,25 @@ func (r *RealDebrid) getClientProfile(client *request.Client) (*types.Profile, e
 }
 
 func (r *RealDebrid) GetProfile() (*types.Profile, error) {
-	if r.Profile != nil && time.Since(r.profileLastFetched) < profileCacheDuration {
-		return r.Profile, nil
+	return r.GetProfileContext(context.Background())
+}
+
+func (r *RealDebrid) GetProfileContext(ctx context.Context) (*types.Profile, error) {
+	r.profileMu.Lock()
+	defer r.profileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	profile, err := r.getClientProfile(r.client)
+	if r.Profile != nil && time.Since(r.profileLastFetched) < profileCacheDuration {
+		cached := *r.Profile
+		return &cached, nil
+	}
+	profile, err := r.getClientProfileContext(ctx, r.client)
 	if err != nil {
 		return nil, err
 	}
-	r.Profile = profile
+	stored := *profile
+	r.Profile = &stored
 	r.profileLastFetched = time.Now()
 	return profile, nil
 }

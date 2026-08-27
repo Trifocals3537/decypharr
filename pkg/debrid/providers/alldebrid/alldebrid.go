@@ -33,6 +33,7 @@ type AllDebrid struct {
 	client                *request.Client
 	repairClient          *request.Client
 	Profile               *types.Profile `json:"profile"`
+	profileMu             sync.Mutex
 	logger                zerolog.Logger
 	config                config.Debrid
 	restartMu             sync.Mutex
@@ -142,6 +143,10 @@ func (ad *AllDebrid) doAccountRequest(account *account.Account, endpoint string,
 
 // doRequest performs a GET request and unmarshals the response
 func (ad *AllDebrid) doRequest(endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
+	return ad.doRequestContext(context.Background(), endpoint, queryParams, result)
+}
+
+func (ad *AllDebrid) doRequestContext(ctx context.Context, endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
 	u, err := url.Parse(ad.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -155,7 +160,7 @@ func (ad *AllDebrid) doRequest(endpoint string, queryParams map[string]string, r
 		u.RawQuery = q.Encode()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -654,12 +659,22 @@ func (ad *AllDebrid) GetAvailableSlots() (int, error) {
 }
 
 func (ad *AllDebrid) GetProfile() (*types.Profile, error) {
+	return ad.GetProfileContext(context.Background())
+}
+
+func (ad *AllDebrid) GetProfileContext(ctx context.Context) (*types.Profile, error) {
+	ad.profileMu.Lock()
+	defer ad.profileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if ad.Profile != nil {
-		return ad.Profile, nil
+		cached := *ad.Profile
+		return &cached, nil
 	}
 	var res UserProfileResponse
 
-	resp, err := ad.doRequest("/user", nil, &res)
+	resp, err := ad.doRequestContext(ctx, "/user", nil, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +708,8 @@ func (ad *AllDebrid) GetProfile() (*types.Profile, error) {
 	} else {
 		profile.Type = "free"
 	}
-	ad.Profile = profile
+	stored := *profile
+	ad.Profile = &stored
 	return profile, nil
 }
 

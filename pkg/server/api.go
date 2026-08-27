@@ -441,7 +441,7 @@ func (s *Server) handleRunMountCacheCleanup(w http.ResponseWriter, r *http.Reque
 	}
 
 	if s.stats != nil {
-		s.stats.Refresh()
+		s.stats.RequestRefresh()
 	}
 
 	utils.JSONResponse(w, map[string]any{
@@ -471,7 +471,7 @@ func (s *Server) handlePurgeMountCache(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.stats != nil {
-		s.stats.Refresh()
+		s.stats.RequestRefresh()
 	}
 
 	utils.JSONResponse(w, map[string]any{

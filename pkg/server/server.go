@@ -239,11 +239,16 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.logger.Info().Msgf("Starting server on %s%s", addr, cfg.URLBase)
-	err = serveHTTP(ctx, srv, listener, httpShutdownTimeout)
-	if err != nil {
-		return fmt.Errorf("HTTP server: %w", err)
+	serveErr := serveHTTP(ctx, srv, listener, httpShutdownTimeout)
+
+	statsCtx, cancelStats := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	statsErr := s.stats.Stop(statsCtx)
+	cancelStats()
+
+	if serveErr != nil {
+		serveErr = fmt.Errorf("HTTP server: %w", serveErr)
 	}
-	return nil
+	return errors.Join(serveErr, statsErr)
 }
 
 func isLoopbackBindAddress(bindAddress string) bool {

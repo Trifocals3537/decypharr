@@ -57,6 +57,7 @@ type Torbox struct {
 	client                *request.Client
 	logger                zerolog.Logger
 	Profile               *types.Profile
+	profileMu             sync.Mutex
 	config                config.Debrid
 	downloadPresentCache  sync.Map
 	downloadPresentMu     sync.Mutex
@@ -998,12 +999,22 @@ func (tb *Torbox) GetAvailableSlots() (int, error) {
 }
 
 func (tb *Torbox) GetProfile() (*types.Profile, error) {
+	return tb.GetProfileContext(context.Background())
+}
+
+func (tb *Torbox) GetProfileContext(ctx context.Context) (*types.Profile, error) {
+	tb.profileMu.Lock()
+	defer tb.profileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if tb.Profile != nil {
-		return tb.Profile, nil
+		cached := *tb.Profile
+		return &cached, nil
 	}
 	var data ProfileResponse
 
-	resp, err := tb.doGet("/api/user/me", map[string]string{"settings": "true"}, &data)
+	resp, err := tb.doGetContext(ctx, "/api/user/me", map[string]string{"settings": "true"}, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,7 +1052,8 @@ func (tb *Torbox) GetProfile() (*types.Profile, error) {
 		profile.Type = "free"
 	}
 
-	tb.Profile = profile
+	stored := *profile
+	tb.Profile = &stored
 
 	return profile, nil
 }

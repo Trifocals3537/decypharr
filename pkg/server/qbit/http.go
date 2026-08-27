@@ -413,6 +413,29 @@ func containsAllHashes(hashes []string) bool {
 	return false
 }
 
+func torrentHashPredicate(hashes []string) func(*storage.Entry) bool {
+	if containsAllHashes(hashes) {
+		return func(entry *storage.Entry) bool {
+			return entry != nil
+		}
+	}
+
+	hashSet := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		hash = strings.ToLower(strings.TrimSpace(hash))
+		if hash != "" {
+			hashSet[hash] = struct{}{}
+		}
+	}
+	return func(entry *storage.Entry) bool {
+		if entry == nil {
+			return false
+		}
+		_, selected := hashSet[strings.ToLower(strings.TrimSpace(entry.InfoHash))]
+		return selected
+	}
+}
+
 func shouldDeleteTorrentFiles(r *http.Request) bool {
 	return r != nil && strings.EqualFold(
 		strings.TrimSpace(r.FormValue("deleteFiles")),
@@ -518,15 +541,11 @@ func (q *QBit) handleSetCategory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	category := getCategory(ctx)
 	hashes := getHashes(ctx)
-	var filterFunc func(t *storage.Entry) bool
-
-	hashSet := make(map[string]bool)
-	if len(hashes) > 0 {
-		for _, h := range hashes {
-			hashSet[h] = true
-		}
-
+	if len(hashes) == 0 {
+		http.Error(w, "No hashes provided", http.StatusBadRequest)
+		return
 	}
+	filterFunc := torrentHashPredicate(hashes)
 
 	updateFunc := func(t *storage.Entry) bool {
 		if t.Category != category {

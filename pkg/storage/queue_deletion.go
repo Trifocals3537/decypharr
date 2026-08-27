@@ -40,6 +40,7 @@ type queueDeletionTombstone struct {
 	PlacementSnapshots          [][]byte           `json:"placement_snapshots,omitempty"`
 	PlacementCleanupPending     bool               `json:"placement_cleanup_pending,omitempty"`
 	UnrecoverableCleanupPending bool               `json:"unrecoverable_cleanup_pending,omitempty"`
+	PreserveFiles               bool               `json:"preserve_files,omitempty"`
 }
 
 // QueueDeletionIntent is a validated, immutable view of a durable queue
@@ -54,6 +55,7 @@ type QueueDeletionIntent struct {
 	PlacementEntries            []*Entry
 	PlacementCleanupPending     bool
 	UnrecoverableCleanupPending bool
+	PreserveFiles               bool
 }
 
 func (s *Storage) loadQueueDeletionTombstone(
@@ -168,6 +170,7 @@ func queueDeletionIntentFromTombstone(
 		PlacementEntries:            placementEntries,
 		PlacementCleanupPending:     tombstone.PlacementCleanupPending,
 		UnrecoverableCleanupPending: tombstone.UnrecoverableCleanupPending,
+		PreserveFiles:               tombstone.PreserveFiles,
 	}, nil
 }
 
@@ -246,14 +249,24 @@ func (s *Storage) PrepareQueuedDeletion(
 		infohash,
 		placementCleanup,
 		false,
+		false,
 		placementSnapshots...,
 	)
+}
+
+// PrepareQueuedDeletionPreservingFiles records that queue retirement must not
+// delete local data, including when cleanup resumes after a process restart.
+func (s *Storage) PrepareQueuedDeletionPreservingFiles(
+	infohash string,
+) (*QueueDeletionIntent, error) {
+	return s.prepareQueuedDeletion(infohash, false, false, true)
 }
 
 func (s *Storage) prepareQueuedDeletion(
 	infohash string,
 	placementCleanup bool,
 	unrecoverableCleanup bool,
+	preserveFiles bool,
 	placementSnapshots ...*Entry,
 ) (*QueueDeletionIntent, error) {
 	key := normalizeMainEntryKey(infohash)
@@ -280,6 +293,10 @@ func (s *Storage) prepareQueuedDeletion(
 		}
 		if unrecoverableCleanup && !tombstone.UnrecoverableCleanupPending {
 			tombstone.UnrecoverableCleanupPending = true
+			changed = true
+		}
+		if preserveFiles && !tombstone.PreserveFiles {
+			tombstone.PreserveFiles = true
 			changed = true
 		}
 		var snapshotsChanged bool
@@ -339,6 +356,7 @@ func (s *Storage) prepareQueuedDeletion(
 		PlacementSnapshots:          placementData,
 		PlacementCleanupPending:     placementCleanup,
 		UnrecoverableCleanupPending: unrecoverableCleanup,
+		PreserveFiles:               preserveFiles,
 	}
 
 	// Once Put has been attempted, keep the in-process key closed even when

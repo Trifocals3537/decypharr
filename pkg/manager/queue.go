@@ -177,6 +177,15 @@ func (q *Queue) Delete(infohash string, cleanup func(t *storage.Entry) error) er
 	return err
 }
 
+// DeleteEntryOnly removes an active-download queue record without removing its
+// downloaded data. qBittorrent clients use this when deleteFiles=false.
+// Lifecycle cancellation and the durable deletion tombstone still apply, so a
+// late worker cannot recreate or mutate the retired record.
+func (q *Queue) DeleteEntryOnly(infohash string) error {
+	_, err := q.deleteWithResultAndSnapshotsOptions(infohash, nil, false)
+	return err
+}
+
 // deleteWithResult reports whether this call loaded and deleted a durable
 // queue row. A nil error with deleted=false is an authoritative, idempotent
 // miss; callers that also own main-storage state must still finish that work.
@@ -187,6 +196,20 @@ func (q *Queue) deleteWithResult(infohash string, cleanup func(t *storage.Entry)
 func (q *Queue) deleteWithResultAndSnapshots(
 	infohash string,
 	cleanup func(t *storage.Entry) error,
+	placementSnapshots ...*storage.Entry,
+) (deleted bool, err error) {
+	return q.deleteWithResultAndSnapshotsOptions(
+		infohash,
+		cleanup,
+		true,
+		placementSnapshots...,
+	)
+}
+
+func (q *Queue) deleteWithResultAndSnapshotsOptions(
+	infohash string,
+	cleanup func(t *storage.Entry) error,
+	deleteFiles bool,
 	placementSnapshots ...*storage.Entry,
 ) (deleted bool, err error) {
 	deletion, err := q.lifecycle.beginDelete(infohash)
@@ -216,11 +239,16 @@ func (q *Queue) deleteWithResultAndSnapshots(
 	// Snapshot and sync the exact final incarnation only after all work has
 	// drained. From this point onward every queue read/update/add fails closed,
 	// and restart recovery can finish without resurrecting this job.
-	intent, err := q.storage.PrepareQueuedDeletion(
-		infohash,
-		cleanup != nil,
-		placementSnapshots...,
-	)
+	var intent *storage.QueueDeletionIntent
+	if deleteFiles {
+		intent, err = q.storage.PrepareQueuedDeletion(
+			infohash,
+			cleanup != nil,
+			placementSnapshots...,
+		)
+	} else {
+		intent, err = q.storage.PrepareQueuedDeletionPreservingFiles(infohash)
+	}
 	if err != nil {
 		if storage.IsQueuedEntryNotFound(err) {
 			deleteSucceeded = true
@@ -257,8 +285,10 @@ func (q *Queue) deleteWithResultAndSnapshots(
 			return false, err
 		}
 	}
-	if err := q.deleteEntryFiles(intent.Entry); err != nil {
-		return false, err
+	if deleteFiles && !intent.PreserveFiles {
+		if err := q.deleteEntryFiles(intent.Entry); err != nil {
+			return false, err
+		}
 	}
 	if err := q.storage.RetireQueuedDeletionRow(
 		intent.InfoHash,

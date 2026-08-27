@@ -371,8 +371,30 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No hashes provided", http.StatusBadRequest)
 		return
 	}
+	if containsAllHashes(hashes) {
+		entries := q.manager.Queue().ListFilter(
+			"",
+			config.ProtocolTorrent,
+			"",
+			nil,
+			"",
+			false,
+		)
+		hashes = make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry != nil {
+				hashes = append(hashes, entry.InfoHash)
+			}
+		}
+	}
+	deleteFiles := shouldDeleteTorrentFiles(r)
 	for _, hash := range hashes {
-		err := q.manager.Queue().Delete(hash, nil)
+		var err error
+		if deleteFiles {
+			err = q.manager.Queue().Delete(hash, nil)
+		} else {
+			err = q.manager.Queue().DeleteEntryOnly(hash)
+		}
 		if err != nil && !strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -380,6 +402,22 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func containsAllHashes(hashes []string) bool {
+	for _, hash := range hashes {
+		if strings.EqualFold(strings.TrimSpace(hash), "all") {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldDeleteTorrentFiles(r *http.Request) bool {
+	return r != nil && strings.EqualFold(
+		strings.TrimSpace(r.FormValue("deleteFiles")),
+		"true",
+	)
 }
 
 func (q *QBit) handleTorrentsPause(w http.ResponseWriter, r *http.Request) {

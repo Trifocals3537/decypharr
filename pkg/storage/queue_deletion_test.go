@@ -181,6 +181,41 @@ func TestQueuedDeletionPersistsIndependentPlacementSnapshot(t *testing.T) {
 	}
 }
 
+func TestQueuedDeletionPersistsFilePreservationPolicy(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "db")
+	store, err := NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &Entry{InfoHash: "preserve-files-restart", Name: "release"}
+	if err := store.AddQueue(entry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PrepareQueuedDeletionPreservingFiles(entry.InfoHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close reopened storage: %v", err)
+		}
+	}()
+	intents, err := store.QueuedDeletionIntents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 1 || !intents[0].PreserveFiles {
+		t.Fatalf("recovered deletion intent = %#v, want preserve-files policy", intents)
+	}
+}
+
 func TestQueuedDeletionRejectsDifferentDurableIncarnation(t *testing.T) {
 	store := newDeleteTestStorage(t)
 	entry := &Entry{InfoHash: "incarnation-mismatch", Name: "release"}

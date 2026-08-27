@@ -1371,7 +1371,7 @@ func (s *Storage) getQueuedRaw(infohash string) (*Entry, error) {
 // DeleteQueued removes a queued entry
 func (s *Storage) DeleteQueued(infohash string, cleanup func(*Entry) error) error {
 	key := normalizeMainEntryKey(infohash)
-	intent, err := s.prepareQueuedDeletion(key, false, cleanup != nil)
+	intent, err := s.prepareQueuedDeletion(key, false, cleanup != nil, false)
 	if err != nil {
 		return err
 	}

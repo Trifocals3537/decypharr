@@ -130,6 +130,96 @@ func TestQueueDeleteTimeoutRetainsRowAndFilesForRetry(t *testing.T) {
 	}
 }
 
+func TestQueueDeleteEntryOnlyPreservesDownloadedFiles(t *testing.T) {
+	store := newLifecycleTestStorage(t)
+	lifecycle := newEntryLifecycle()
+	queue := newLifecycleTestQueue(store, lifecycle)
+	entry, outputPath := addLifecycleTestEntry(t, queue, "preserve-files")
+
+	if err := queue.DeleteEntryOnly(entry.InfoHash); err != nil {
+		t.Fatalf("DeleteEntryOnly() error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outputPath, "payload")); err != nil {
+		t.Fatalf("downloaded data was removed: %v", err)
+	}
+	if _, err := store.GetQueued(entry.InfoHash); !storage.IsQueuedEntryNotFound(err) {
+		t.Fatalf("queue row after entry-only delete = %v, want queued-entry-not-found", err)
+	}
+
+	replacement, _ := addLifecycleTestEntry(t, queue, entry.InfoHash)
+	if replacement.QueueGeneration == entry.QueueGeneration {
+		t.Fatal("entry-only delete did not invalidate the retired generation")
+	}
+}
+
+func TestQueueDeleteEntryOnlyPreservesFilesDuringRestartRecovery(t *testing.T) {
+	root := t.TempDir()
+	config.SetConfigPath(root)
+	downloadRoot := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(downloadRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config.Get().DownloadFolder = downloadRoot
+	dbPath := filepath.Join(root, "db")
+
+	store, err := storage.NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := newLifecycleTestQueue(store, newEntryLifecycle())
+	entry := &storage.Entry{
+		InfoHash: "preserve-files-recovery",
+		Name:     "release.mkv",
+		Protocol: config.ProtocolTorrent,
+		SavePath: downloadRoot,
+	}
+	outputPath := entry.DownloadPath()
+	if _, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputPath, "payload"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := store.PrepareQueuedDeletionPreservingFiles(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartQueuedDeletionCleanup(intent.InfoHash, intent.QueueIncarnation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = storage.NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close reopened storage: %v", err)
+		}
+	})
+	manager := &Manager{
+		storage: store,
+		queue:   newLifecycleTestQueue(store, newEntryLifecycle()),
+		logger:  zerolog.Nop(),
+	}
+	residual, fatal := manager.recoverQueuedDeletions()
+	if fatal != nil || residual != nil {
+		t.Fatalf("recoverQueuedDeletions() = residual %v, fatal %v", residual, fatal)
+	}
+	if _, err := os.Stat(filepath.Join(outputPath, "payload")); err != nil {
+		t.Fatalf("restart recovery removed preserved data: %v", err)
+	}
+	if _, err := store.GetQueued(entry.InfoHash); !storage.IsQueuedEntryNotFound(err) {
+		t.Fatalf("queue row after recovery = %v, want queued-entry-not-found", err)
+	}
+}
+
 func TestJobQueueDeleteJobsRemovesEveryPendingGeneration(t *testing.T) {
 	queue := &JobQueue{jobs: make([]*Job, 0, 5)}
 	queue.cond = sync.NewCond(&queue.mu)

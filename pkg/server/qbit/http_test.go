@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,5 +50,39 @@ func TestNormalizeStateFilterTreatsAllAsUnfiltered(t *testing.T) {
 	}
 	if got := normalizeStateFilter(" downloading "); got != "downloading" {
 		t.Fatalf("normalizeStateFilter() = %q, want downloading", got)
+	}
+}
+
+func TestContainsAllHashes(t *testing.T) {
+	if !containsAllHashes([]string{"hash", " ALL "}) {
+		t.Fatal("containsAllHashes() did not recognize all")
+	}
+	if containsAllHashes([]string{"hash-a", "hash-b"}) {
+		t.Fatal("containsAllHashes() matched ordinary hashes")
+	}
+}
+
+func TestShouldDeleteTorrentFilesRequiresExplicitTrue(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		form url.Values
+		want bool
+	}{
+		{name: "missing", form: url.Values{}},
+		{name: "false", form: url.Values{"deleteFiles": {"false"}}},
+		{name: "explicit true", form: url.Values{"deleteFiles": {"true"}}, want: true},
+		{name: "case and whitespace", form: url.Values{"deleteFiles": {" TRUE "}}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v2/torrents/delete",
+				strings.NewReader(test.form.Encode()),
+			)
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if got := shouldDeleteTorrentFiles(request); got != test.want {
+				t.Fatalf("shouldDeleteTorrentFiles() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }

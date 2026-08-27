@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +37,7 @@ type Manager struct {
 	serverReady   chan struct{}
 	serverStarted atomic.Bool
 	info          atomic.Pointer[MountInfo]
+	mountMu       sync.Mutex
 	manager       *manager.Manager
 	webdavURL     string
 
@@ -211,8 +213,11 @@ func (m *Manager) Stop() error {
 	// Cancel context and stop process
 	m.cancel()
 
-	// Stopping mount
-	m.stopMount()
+	// The manager context is canceled above so the health monitor exits, but
+	// unmount still needs a short independent window to reach the RC server.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	m.stopMount(stopCtx)
+	stopCancel()
 
 	if m.cmd != nil && m.cmd.Process != nil {
 		// Try graceful shutdown first
@@ -254,6 +259,22 @@ func (m *Manager) getMountInfo() *MountInfo {
 	return m.info.Load()
 }
 
+// updateMountInfo publishes an immutable snapshot. Readers can safely retain
+// the pointer returned by getMountInfo while health and recovery update state.
+func (m *Manager) updateMountInfo(update func(*MountInfo)) bool {
+	for {
+		current := m.info.Load()
+		if current == nil {
+			return false
+		}
+		next := *current
+		update(&next)
+		if m.info.CompareAndSwap(current, &next) {
+			return true
+		}
+	}
+}
+
 func (m *Manager) IsMounted() bool {
 	info := m.getMountInfo()
 	return info != nil && info.Mounted
@@ -261,6 +282,9 @@ func (m *Manager) IsMounted() bool {
 
 // Start creates the mount using rclone RC
 func (m *Manager) startMount(ctx context.Context) error {
+	m.mountMu.Lock()
+	defer m.mountMu.Unlock()
+
 	// Check if already mounted
 	if m.IsMounted() {
 		m.logger.Info().Msg("Mount is already mounted")
@@ -280,7 +304,10 @@ func (m *Manager) startMount(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) stopMount() {
+func (m *Manager) stopMount(ctx context.Context) {
+	m.mountMu.Lock()
+	defer m.mountMu.Unlock()
+
 	if !m.IsMounted() {
 		m.logger.Info().Msgf("Mount is not mounted, skipping unmount")
 		return
@@ -288,8 +315,13 @@ func (m *Manager) stopMount() {
 
 	m.logger.Info().Msg("Unmounting via RC")
 
-	m.unmount(m.ctx)
-	m.logger.Info().Msgf("Successfully unmounted %s", m.getMountInfo().LocalPath)
+	if err := m.unmount(ctx); err != nil {
+		m.logger.Error().Err(err).Msg("Failed to unmount rclone filesystem")
+		return
+	}
+	if info := m.getMountInfo(); info != nil {
+		m.logger.Info().Str("mount_path", info.LocalPath).Msg("Successfully unmounted rclone filesystem")
+	}
 }
 
 // IsReady returns true if the RC server is ready

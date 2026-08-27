@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -57,6 +58,9 @@ func TestSpeedTestKeepsCredentialsOnAPIAndOffSignedURL(t *testing.T) {
 			if got := r.Header.Get("Range"); got != "bytes=0-1048575" {
 				t.Errorf("Range = %q, want one-megabyte speed probe", got)
 			}
+			// Keep the mock transfer longer than the coarsest supported clock
+			// tick so Windows cannot report a zero-duration successful probe.
+			time.Sleep(10 * time.Millisecond)
 			_, _ = io.WriteString(w, strings.Repeat("x", 1024))
 		default:
 			t.Errorf("unexpected request path %q", r.URL.Path)

@@ -41,6 +41,8 @@ type AllDebrid struct {
 	restartNow            func() time.Time
 }
 
+var _ common.ContextTorrentLister = (*AllDebrid)(nil)
+
 const (
 	allDebridFileTreeMaxDepth = 64
 	allDebridFileTreeMaxItems = 100_000
@@ -567,10 +569,17 @@ func (ad *AllDebrid) GetDownloadLink(id string, file *types.File) (types.Downloa
 }
 
 func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {
+	return ad.GetTorrentsContext(context.Background())
+}
+
+func (ad *AllDebrid) GetTorrentsContext(ctx context.Context) ([]*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	torrents := make([]*types.Torrent, 0)
 	var res TorrentsListResponse
 
-	resp, err := ad.doRequest("/magnet/status", map[string]string{"status": "ready"}, &res)
+	resp, err := ad.doRequestContext(ctx, "/magnet/status", map[string]string{"status": "ready"}, &res)
 	if err != nil {
 		return torrents, err
 	}
@@ -580,6 +589,9 @@ func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {
 	}
 
 	for _, magnet := range res.Data.Magnets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		t := &types.Torrent{
 			Id:               strconv.Itoa(magnet.Id),
 			Name:             magnet.Filename,

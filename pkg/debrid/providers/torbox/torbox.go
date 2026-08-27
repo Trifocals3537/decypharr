@@ -64,6 +64,8 @@ type Torbox struct {
 	downloadPresentLoaded bool
 }
 
+var _ common.ContextTorrentLister = (*Torbox)(nil)
+
 func New(
 	dc config.Debrid,
 	ratelimits map[string]ratelimit.Limiter,
@@ -788,7 +790,15 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 }
 
 func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
-	return tb.getTorrentsBounded(
+	return tb.GetTorrentsContext(context.Background())
+}
+
+func (tb *Torbox) GetTorrentsContext(ctx context.Context) ([]*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return tb.getTorrentsBoundedContext(
+		ctx,
 		torboxTorrentListMaxPages,
 		torboxTorrentListMaxItems,
 		torboxTorrentListPageSize,
@@ -796,6 +806,10 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 }
 
 func (tb *Torbox) getTorrentsBounded(maxPages, maxItems, pageSize int) ([]*types.Torrent, error) {
+	return tb.getTorrentsBoundedContext(context.Background(), maxPages, maxItems, pageSize)
+}
+
+func (tb *Torbox) getTorrentsBoundedContext(ctx context.Context, maxPages, maxItems, pageSize int) ([]*types.Torrent, error) {
 	if maxPages <= 0 || maxItems <= 0 || pageSize <= 0 {
 		return nil, fmt.Errorf("torbox torrent list bounds must be positive")
 	}
@@ -805,7 +819,10 @@ func (tb *Torbox) getTorrentsBounded(maxPages, maxItems, pageSize int) ([]*types
 	seenIDs := make(map[string]int)
 
 	for page := 0; page < maxPages; page++ {
-		torrents, err := tb.getTorrents(offset, pageSize)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		torrents, err := tb.getTorrentsContext(ctx, offset, pageSize)
 		if err != nil {
 			// Never expose a partial list: manager reconciliation treats this
 			// return value as the provider's complete authoritative snapshot.
@@ -862,10 +879,10 @@ func (tb *Torbox) getTorrentsBounded(maxPages, maxItems, pageSize int) ([]*types
 	)
 }
 
-func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
+func (tb *Torbox) getTorrentsContext(ctx context.Context, offset, limit int) ([]*types.Torrent, error) {
 	var res TorrentsListResponse
 
-	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{
+	resp, err := tb.doGetContext(ctx, "/api/torrents/mylist", map[string]string{
 		"bypass_cache": "true",
 		"offset":       strconv.Itoa(offset),
 		"limit":        strconv.Itoa(limit),
@@ -888,6 +905,9 @@ func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 	cfg := config.Get()
 
 	for _, data := range *res.Data {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		t := &types.Torrent{
 			Id:               strconv.Itoa(data.Id),
 			Name:             data.Name,
@@ -906,6 +926,9 @@ func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 		files := make([]types.File, 0, len(data.Files))
 
 		for _, f := range data.Files {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if err := cfg.IsFileAllowed(f.AbsolutePath, f.Size); err != nil {
 				continue
 			}

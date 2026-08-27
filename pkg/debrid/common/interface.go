@@ -30,3 +30,10 @@ type Client interface {
 	SpeedTest(ctx context.Context) types.SpeedTestResult
 	SupportsCheck() bool
 }
+
+// ContextTorrentLister is the optional cancellation-aware torrent listing
+// capability used by manager reconciliation. Client implementations should
+// provide it whenever their transport supports request contexts.
+type ContextTorrentLister interface {
+	GetTorrentsContext(context.Context) ([]*types.Torrent, error)
+}

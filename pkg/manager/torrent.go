@@ -70,30 +70,10 @@ func (m *Manager) refreshTorrents(ctx context.Context, provider string, debridCl
 func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debridClient debrid.Client) error {
 	providerSnapshot := m.storage.BeginProviderSnapshot()
 
-	// GetTorrents predates the context-aware provider methods. Keep the
-	// manager-owned sync cancellable by isolating that legacy call in a
-	// provider-only goroutine. Once canceled, the detached call can report its
-	// result but cannot access manager storage.
-	type getTorrentsResult struct {
-		torrents []*types.Torrent
-		err      error
-	}
-	result := make(chan getTorrentsResult, 1)
-	go func() {
-		torrents, err := debridClient.GetTorrents()
-		result <- getTorrentsResult{torrents: torrents, err: err}
-	}()
-
-	var remote []*types.Torrent
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case providerResult := <-result:
-		if providerResult.err != nil {
-			m.logger.Error().Err(providerResult.err).Str("debrid", provider).Msg("Failed to get remote")
-			return providerResult.err
-		}
-		remote = providerResult.torrents
+	remote, err := getProviderTorrents(ctx, debridClient)
+	if err != nil {
+		m.logger.Error().Err(err).Str("debrid", provider).Msg("Failed to get remote")
+		return err
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -143,6 +123,31 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 		m.logger.Debug().Str("debrid", provider).Msg("No remote found")
 	}
 	return nil
+}
+
+func getProviderTorrents(ctx context.Context, client debrid.Client) ([]*types.Torrent, error) {
+	if contextual, ok := client.(debrid.ContextTorrentLister); ok {
+		return contextual.GetTorrentsContext(ctx)
+	}
+
+	// Compatibility path for an out-of-tree provider that only implements the
+	// original interface. The buffered result prevents a late return from
+	// retaining manager state after cancellation.
+	type result struct {
+		torrents []*types.Torrent
+		err      error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		torrents, err := client.GetTorrents()
+		resultCh <- result{torrents: torrents, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case providerResult := <-resultCh:
+		return providerResult.torrents, providerResult.err
+	}
 }
 
 type remoteTorrentIndex struct {

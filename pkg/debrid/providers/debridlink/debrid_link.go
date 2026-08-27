@@ -50,6 +50,8 @@ type DebridLink struct {
 	profileMu          sync.Mutex
 }
 
+var _ common.ContextTorrentLister = (*DebridLink)(nil)
+
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink, error) {
 	cfg := config.Get()
 	headers := map[string]string{
@@ -533,16 +535,26 @@ func (dl *DebridLink) GetDownloadUncached() bool {
 }
 
 func (dl *DebridLink) GetTorrents() ([]*types.Torrent, error) {
+	return dl.GetTorrentsContext(context.Background())
+}
+
+func (dl *DebridLink) GetTorrentsContext(ctx context.Context) ([]*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	page := 0
 	torrents := make([]*types.Torrent, 0)
 	visited := make(map[int]struct{})
 	for requestCount := 0; requestCount < debridLinkListMaxPages; requestCount++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, exists := visited[page]; exists {
 			return torrents, fmt.Errorf("debridlink torrent pagination repeated page %d", page)
 		}
 		visited[page] = struct{}{}
 
-		items, next, err := dl.getTorrents(page, debridLinkListPageSize)
+		items, next, err := dl.getTorrentsContext(ctx, page, debridLinkListPageSize)
 		if err != nil {
 			return torrents, err
 		}
@@ -643,6 +655,10 @@ func (dl *DebridLink) RefreshDownloadLinks() error {
 }
 
 func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, int, error) {
+	return dl.getTorrentsContext(context.Background(), page, perPage)
+}
+
+func (dl *DebridLink) getTorrentsContext(ctx context.Context, page, perPage int) ([]*types.Torrent, int, error) {
 	torrents := make([]*types.Torrent, 0)
 	var res torrentInfo
 
@@ -651,7 +667,7 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, int, err
 		"perPage": fmt.Sprintf("%d", perPage),
 	}
 
-	resp, err := dl.doGet("/seedbox/list", params, &res)
+	resp, err := dl.doGetContext(ctx, "/seedbox/list", params, &res)
 	if err != nil {
 		return torrents, -1, err
 	}
@@ -669,6 +685,9 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, int, err
 		return torrents, -1, err
 	}
 	for _, t := range data {
+		if err := ctx.Err(); err != nil {
+			return nil, -1, err
+		}
 		if t.Status != 100 {
 			continue
 		}

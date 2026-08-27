@@ -67,6 +67,8 @@ type RealDebrid struct {
 	retries            int
 }
 
+var _ common.ContextTorrentLister = (*RealDebrid)(nil)
+
 func New(
 	dc config.Debrid,
 	ratelimits map[string]ratelimit.Limiter,
@@ -1050,7 +1052,7 @@ func (r *RealDebrid) GetDownloadLink(id string, file *types.File) (types.Downloa
 	return r.accountsManager.GetDownloadLink(id, file, r.fetchDownloadLink)
 }
 
-func (r *RealDebrid) getTorrents(offset int, limit int) (int, int, []*types.Torrent, error) {
+func (r *RealDebrid) getTorrentsContext(ctx context.Context, offset int, limit int) (int, int, []*types.Torrent, error) {
 	torrents := make([]*types.Torrent, 0)
 	if offset < 0 || limit <= 0 {
 		return 0, 0, torrents, fmt.Errorf(
@@ -1079,7 +1081,7 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, int, []*types.Torr
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return 0, 0, torrents, err
 	}
@@ -1105,6 +1107,9 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, int, []*types.Torr
 
 	totalItems, _ := strconv.Atoi(resp.Header.Get("X-Total-Count"))
 	for _, remote := range data {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, nil, err
+		}
 		if remote.Status != "downloaded" {
 			continue
 		}
@@ -1128,6 +1133,13 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, int, []*types.Torr
 }
 
 func (r *RealDebrid) GetTorrents() ([]*types.Torrent, error) {
+	return r.GetTorrentsContext(context.Background())
+}
+
+func (r *RealDebrid) GetTorrentsContext(ctx context.Context) ([]*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	limit := 1000
 	if r.config.Limit > 0 {
 		limit = r.config.Limit
@@ -1137,7 +1149,10 @@ func (r *RealDebrid) GetTorrents() ([]*types.Torrent, error) {
 	seenIDs := make(map[string]int)
 	offset := 0
 	for page := 0; page < realDebridTorrentListMaxPages; page++ {
-		totalItems, returnedItems, torrents, err := r.getTorrents(offset, limit)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		totalItems, returnedItems, torrents, err := r.getTorrentsContext(ctx, offset, limit)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"realdebrid torrent list page %d at offset %d: %w",

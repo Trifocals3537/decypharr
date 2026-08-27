@@ -40,6 +40,7 @@ const (
 )
 
 var _ common.Client = (*Premiumize)(nil)
+var _ common.ContextTorrentLister = (*Premiumize)(nil)
 
 type Premiumize struct {
 	Host                  string `json:"host"`
@@ -330,14 +331,27 @@ func (pm *Premiumize) IsAvailable(infohashes []string) map[string]bool {
 }
 
 func (pm *Premiumize) GetTorrents() ([]*types.Torrent, error) {
-	transfers, err := pm.listTransfers()
+	return pm.GetTorrentsContext(context.Background())
+}
+
+func (pm *Premiumize) GetTorrentsContext(ctx context.Context) ([]*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	transfers, err := pm.listTransfersContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	torrents := make([]*types.Torrent, 0, len(transfers))
 	for _, tr := range transfers {
-		torrent, err := pm.transferToTorrent(tr, "")
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		torrent, err := pm.transferToTorrentContext(ctx, tr, "")
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			pm.logger.Warn().Err(err).Str("transfer_id", tr.ID).Msg("Skipping Premiumize transfer")
 			continue
 		}
@@ -349,8 +363,12 @@ func (pm *Premiumize) GetTorrents() ([]*types.Torrent, error) {
 }
 
 func (pm *Premiumize) listTransfers() ([]premiumizeTransfer, error) {
+	return pm.listTransfersContext(context.Background())
+}
+
+func (pm *Premiumize) listTransfersContext(ctx context.Context) ([]premiumizeTransfer, error) {
 	var data transferListResponse
-	req, err := http.NewRequest(http.MethodGet, pm.endpoint("/api/transfer/list"), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pm.endpoint("/api/transfer/list"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -361,13 +379,17 @@ func (pm *Premiumize) listTransfers() ([]premiumizeTransfer, error) {
 }
 
 func (pm *Premiumize) transferToTorrent(tr premiumizeTransfer, fallbackInfoHash string) (*types.Torrent, error) {
+	return pm.transferToTorrentContext(context.Background(), tr, fallbackInfoHash)
+}
+
+func (pm *Premiumize) transferToTorrentContext(ctx context.Context, tr premiumizeTransfer, fallbackInfoHash string) (*types.Torrent, error) {
 	status := mapStatus(tr.Status)
 	files := make(map[string]types.File)
 	var links []string
 	if status == types.TorrentStatusDownloaded {
 		var err error
 		var ready bool
-		files, links, ready, err = pm.filesForTransfer(tr)
+		files, links, ready, err = pm.filesForTransferContext(ctx, tr)
 		if err != nil {
 			return nil, err
 		}
@@ -404,10 +426,14 @@ func (pm *Premiumize) transferToTorrent(tr premiumizeTransfer, fallbackInfoHash 
 }
 
 func (pm *Premiumize) filesForTransfer(tr premiumizeTransfer) (map[string]types.File, []string, bool, error) {
+	return pm.filesForTransferContext(context.Background(), tr)
+}
+
+func (pm *Premiumize) filesForTransferContext(ctx context.Context, tr premiumizeTransfer) (map[string]types.File, []string, bool, error) {
 	fileRecords := make([]types.File, 0)
 	links := make([]string, 0)
 	if fileID := tr.FileID.String(); fileID != "" {
-		item, err := pm.itemDetails(fileID)
+		item, err := pm.itemDetailsContext(ctx, fileID)
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -419,7 +445,7 @@ func (pm *Premiumize) filesForTransfer(tr premiumizeTransfer) (map[string]types.
 		return files, links, item.Link != "", nil
 	}
 	if folderID := tr.FolderID.String(); folderID != "" {
-		linkedFiles, err := pm.addFolderFiles(&fileRecords, &links, tr.ID, folderID, "")
+		linkedFiles, err := pm.addFolderFilesContext(ctx, &fileRecords, &links, tr.ID, folderID, "")
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -448,9 +474,10 @@ func (pm *Premiumize) itemDetailsContext(ctx context.Context, id string) (*itemD
 	return &data, nil
 }
 
-func (pm *Premiumize) addFolderFiles(files *[]types.File, links *[]string, transferID, folderID, prefix string) (int, error) {
+func (pm *Premiumize) addFolderFilesContext(ctx context.Context, files *[]types.File, links *[]string, transferID, folderID, prefix string) (int, error) {
 	visitedItems := 0
-	return pm.addFolderFilesBounded(
+	return pm.addFolderFilesBoundedContext(
+		ctx,
 		files,
 		links,
 		transferID,
@@ -462,7 +489,8 @@ func (pm *Premiumize) addFolderFiles(files *[]types.File, links *[]string, trans
 	)
 }
 
-func (pm *Premiumize) addFolderFilesBounded(
+func (pm *Premiumize) addFolderFilesBoundedContext(
+	ctx context.Context,
 	files *[]types.File,
 	links *[]string,
 	transferID, folderID, prefix string,
@@ -470,6 +498,9 @@ func (pm *Premiumize) addFolderFilesBounded(
 	visitedFolders map[string]struct{},
 	visitedItems *int,
 ) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if depth > premiumizeTreeDepth {
 		return 0, fmt.Errorf(
 			"premiumize folder tree exceeds depth %d",
@@ -488,7 +519,7 @@ func (pm *Premiumize) addFolderFilesBounded(
 	visitedFolders[folderID] = struct{}{}
 
 	var data folderListResponse
-	req, err := http.NewRequest(http.MethodGet, pm.endpoint("/api/folder/list?id="+url.QueryEscape(folderID)), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pm.endpoint("/api/folder/list?id="+url.QueryEscape(folderID)), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -499,6 +530,9 @@ func (pm *Premiumize) addFolderFilesBounded(
 	// Decypharr's extension/size filters, so readiness reflects Premiumize.
 	linkedFiles := 0
 	for _, item := range data.Content {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		(*visitedItems)++
 		if *visitedItems > premiumizeTreeItems {
 			return 0, fmt.Errorf(
@@ -508,7 +542,8 @@ func (pm *Premiumize) addFolderFilesBounded(
 		}
 		itemPath := path.Join(prefix, item.Name)
 		if item.Type == "folder" {
-			n, err := pm.addFolderFilesBounded(
+			n, err := pm.addFolderFilesBoundedContext(
+				ctx,
 				files,
 				links,
 				transferID,

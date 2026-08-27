@@ -21,6 +21,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/providertraffic"
+	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/tlsconfig"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -172,8 +173,9 @@ func newStreamHTTPClient(governor *cdntraffic.Governor) *http.Client {
 	}
 
 	return &http.Client{
-		Timeout:   0,
-		Transport: cdntraffic.NewTransport(transport, governor),
+		Timeout:       0,
+		Transport:     cdntraffic.NewTransport(transport, governor),
+		CheckRedirect: request.NoRefererRedirectPolicy,
 	}
 }
 

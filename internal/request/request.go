@@ -306,7 +306,8 @@ func New(options ...ClientOption) *Client {
 
 	// Create default http client
 	client.httpClient = &http.Client{
-		Timeout: client.timeout,
+		Timeout:       client.timeout,
+		CheckRedirect: NoRefererRedirectPolicy,
 	}
 
 	// Apply options before configuring transport

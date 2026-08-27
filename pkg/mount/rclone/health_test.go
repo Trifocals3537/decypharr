@@ -35,12 +35,11 @@ func newRecoveryTestManager(t *testing.T, handler http.Handler) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	m := &Manager{
-		logger:      zerolog.Nop(),
-		ctx:         ctx,
-		cancel:      cancel,
-		serverReady: make(chan struct{}),
-		webdavURL:   "http://decypharr.example/webdav/",
-		client:      rcloneclient.NewClient(server.URL, "", "", zerolog.Nop()),
+		logger:    zerolog.Nop(),
+		ctx:       ctx,
+		cancel:    cancel,
+		webdavURL: "http://decypharr.example/webdav/",
+		client:    rcloneclient.NewClient(server.URL, "", "", zerolog.Nop()),
 	}
 	m.serverStarted.Store(true)
 	m.info.Store(&MountInfo{

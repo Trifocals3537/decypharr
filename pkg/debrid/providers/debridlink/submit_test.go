@@ -15,6 +15,17 @@ import (
 )
 
 func newSubmitTestProvider(t *testing.T, handler http.HandlerFunc) *DebridLink {
+	return newDebridLinkTestProvider(t, config.Debrid{
+		Name:   "debridlink",
+		APIKey: "secret-token",
+	}, handler)
+}
+
+func newDebridLinkTestProvider(
+	t *testing.T,
+	debridConfig config.Debrid,
+	handler http.HandlerFunc,
+) *DebridLink {
 	t.Helper()
 	previousPath := config.GetMainPath()
 	config.Reset()
@@ -26,10 +37,7 @@ func newSubmitTestProvider(t *testing.T, handler http.HandlerFunc) *DebridLink {
 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	provider, err := New(config.Debrid{
-		Name:   "debridlink",
-		APIKey: "secret-token",
-	}, nil)
+	provider, err := New(debridConfig, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

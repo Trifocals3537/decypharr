@@ -8,6 +8,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestSIDCookieDefaultsAreBrowserSafe(t *testing.T) {
@@ -59,6 +64,90 @@ func TestContainsAllHashes(t *testing.T) {
 	}
 	if containsAllHashes([]string{"hash-a", "hash-b"}) {
 		t.Fatal("containsAllHashes() matched ordinary hashes")
+	}
+}
+
+func TestTorrentHashPredicateTargetsOnlySelectedHashes(t *testing.T) {
+	predicate := torrentHashPredicate([]string{" HASH-A ", "hash-c"})
+
+	for _, test := range []struct {
+		entry *storage.Entry
+		want  bool
+	}{
+		{entry: &storage.Entry{InfoHash: "hash-a"}, want: true},
+		{entry: &storage.Entry{InfoHash: "HASH-C"}, want: true},
+		{entry: &storage.Entry{InfoHash: "hash-b"}, want: false},
+		{entry: nil, want: false},
+	} {
+		if got := predicate(test.entry); got != test.want {
+			t.Fatalf("torrentHashPredicate()(%v) = %t, want %t", test.entry, got, test.want)
+		}
+	}
+}
+
+func TestTorrentHashPredicateHonorsExplicitAll(t *testing.T) {
+	predicate := torrentHashPredicate([]string{"hash-a", " ALL "})
+	if !predicate(&storage.Entry{InfoHash: "unlisted"}) {
+		t.Fatal("torrentHashPredicate() did not honor explicit all selector")
+	}
+}
+
+func TestHandleSetCategoryUpdatesOnlySelectedHashes(t *testing.T) {
+	previousConfigPath := config.GetMainPath()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(func() { config.SetConfigPath(previousConfigPath) })
+
+	m := manager.New()
+	t.Cleanup(func() {
+		if err := m.Stop(); err != nil {
+			t.Errorf("stop manager: %v", err)
+		}
+		if err := logger.Close(); err != nil {
+			t.Errorf("close process logger: %v", err)
+		}
+	})
+	for _, entry := range []*storage.Entry{
+		{InfoHash: "hash-a", Name: "selected", Category: "old", Protocol: config.ProtocolTorrent},
+		{InfoHash: "hash-b", Name: "unselected", Category: "keep", Protocol: config.ProtocolTorrent},
+	} {
+		if err := m.Queue().Add(entry); err != nil {
+			t.Fatalf("Queue().Add(%q) error = %v", entry.InfoHash, err)
+		}
+	}
+
+	q := &QBit{manager: m}
+	handler := q.categoryContext(hashesContext(http.HandlerFunc(q.handleSetCategory)))
+	missingHashes := url.Values{"category": {"wrong"}}
+	request := httptest.NewRequest(http.MethodPost, "/torrents/setCategory", strings.NewReader(missingHashes.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("setCategory without hashes status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+
+	form := url.Values{"hashes": {"hash-a"}, "category": {"sonarr"}}
+	request = httptest.NewRequest(http.MethodPost, "/torrents/setCategory", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("setCategory status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	selected, err := m.Queue().GetTorrent("hash-a")
+	if err != nil {
+		t.Fatalf("GetTorrent(selected) error = %v", err)
+	}
+	if selected.Category != "sonarr" {
+		t.Fatalf("selected category = %q, want sonarr", selected.Category)
+	}
+	unselected, err := m.Queue().GetTorrent("hash-b")
+	if err != nil {
+		t.Fatalf("GetTorrent(unselected) error = %v", err)
+	}
+	if unselected.Category != "keep" {
+		t.Fatalf("unselected category = %q, want keep", unselected.Category)
 	}
 }
 

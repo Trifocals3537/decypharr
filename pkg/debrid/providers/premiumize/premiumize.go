@@ -695,10 +695,6 @@ func (pm *Premiumize) GetProfileContext(ctx context.Context) (*types.Profile, er
 	return &result, nil
 }
 
-func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, error) {
-	return pm.getClientProfileContext(context.Background(), client)
-}
-
 func (pm *Premiumize) getClientProfileContext(ctx context.Context, client *request.Client) (*types.Profile, error) {
 	var data accountInfoResponse
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pm.endpoint("/api/account/info"), nil)

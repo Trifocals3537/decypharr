@@ -228,11 +228,6 @@ func (r *RealDebrid) doPut(endpoint string, body []byte, contentType string, res
 	return resp, nil
 }
 
-// doGetWithClient performs a GET using a specific client
-func (r *RealDebrid) doGetWithClient(client *request.Client, fullURL string, queryParams map[string]string, result any) (*http.Response, error) {
-	return r.doGetWithClientContext(context.Background(), client, fullURL, queryParams, result)
-}
-
 func (r *RealDebrid) doGetWithClientContext(ctx context.Context, client *request.Client, fullURL string, queryParams map[string]string, result any) (*http.Response, error) {
 	u, err := url.Parse(fullURL)
 	if err != nil {
@@ -1358,10 +1353,6 @@ func (r *RealDebrid) getDownloadLinksContext(ctx context.Context, acc *account.A
 
 func (r *RealDebrid) Config() config.Debrid {
 	return r.config
-}
-
-func (r *RealDebrid) getClientProfile(client *request.Client) (*types.Profile, error) {
-	return r.getClientProfileContext(context.Background(), client)
 }
 
 func (r *RealDebrid) getClientProfileContext(ctx context.Context, client *request.Client) (*types.Profile, error) {

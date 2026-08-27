@@ -1,6 +1,7 @@
 package usenet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -449,6 +450,19 @@ func (s *NZBStorage) Stats() map[string]any {
 // always observe a fully-decodable file (old proto or new v2). Decode failures
 // are logged and skipped rather than aborting. Returns the number migrated.
 func (s *NZBStorage) MigrateLegacy() (int, error) {
+	return s.MigrateLegacyContext(context.Background())
+}
+
+// MigrateLegacyContext is the lifecycle-aware form of MigrateLegacy. A reset
+// can cancel an old Usenet instance before a replacement starts touching the
+// same metadata directory.
+func (s *NZBStorage) MigrateLegacyContext(ctx context.Context) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if s.migrationMarkerExists() {
 		return 0, nil
 	}
@@ -456,6 +470,9 @@ func (s *NZBStorage) MigrateLegacy() (int, error) {
 	// Cheap first-byte probe (lock-free) to collect only the legacy files.
 	var legacy []string
 	err := scanMetadataDirectory(s.metaDir, metaReadBatchSize, func(entry os.DirEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != metaFileExtension {
 			return nil
 		}
@@ -478,6 +495,9 @@ func (s *NZBStorage) MigrateLegacy() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to read meta directory: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 
 	if len(legacy) == 0 {
 		s.writeMigrationMarker()
@@ -487,25 +507,37 @@ func (s *NZBStorage) MigrateLegacy() (int, error) {
 	s.logger.Info().Int("legacy", len(legacy)).Msg("Migration: upgrading legacy NZB meta to v2")
 
 	var migrated, failed atomic.Int64
-	pl := pool.New().WithMaxGoroutines(min(runtime.NumCPU(), 6))
+	pl := pool.New().WithContext(ctx).WithMaxGoroutines(min(runtime.NumCPU(), 6))
 
 	for _, id := range legacy {
-		pl.Go(func() {
+		if ctx.Err() != nil {
+			break
+		}
+		pl.Go(func(taskCtx context.Context) error {
+			if err := taskCtx.Err(); err != nil {
+				return err
+			}
 			ok, err := s.migrateFile(id)
 			if err != nil {
 				s.logger.Warn().Err(err).Str("nzb_id", id).Msg("Migration: failed to migrate file")
 				failed.Add(1)
-				return
+				return nil
 			}
 			if ok {
 				if n := migrated.Add(1); n%1000 == 0 {
 					s.logger.Info().Int64("migrated", n).Int("total", len(legacy)).Msg("Migration: progress")
 				}
 			}
+			return taskCtx.Err()
 		})
 	}
 
-	pl.Wait()
+	if err := pl.Wait(); err != nil {
+		return int(migrated.Load()), err
+	}
+	if err := ctx.Err(); err != nil {
+		return int(migrated.Load()), err
+	}
 
 	// Recompute cached stats once from disk rather than racing per-file deltas.
 	s.mu.Lock()

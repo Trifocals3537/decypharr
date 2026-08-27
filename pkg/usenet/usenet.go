@@ -224,6 +224,14 @@ type Usenet struct {
 	watcherMu       sync.Mutex
 	claimScanner    *NZBClaimScanner
 	acceptedCleaner *AcceptedNZBCleaner
+
+	lifecycleOnce sync.Once
+	ctx           context.Context
+	cancel        context.CancelFunc
+	background    sync.WaitGroup
+	closeOnce     sync.Once
+	closeDone     chan struct{}
+	closeErr      error
 }
 
 // fsKey builds a cache key for fs map entries efficiently.
@@ -261,15 +269,6 @@ func New() (*Usenet, error) {
 		return nil, fmt.Errorf("failed to create NZB storage: %w", err)
 	}
 
-	// One-time (idempotent) upgrade of any legacy protobuf meta files to the v2
-	// codec. Runs in the background so it never blocks startup; atomic rewrites
-	// keep concurrent reads safe throughout.
-	go func() {
-		if _, err := nzbStorage.MigrateLegacy(); err != nil {
-			nzbStorage.logger.Warn().Err(err).Msg("Legacy NZB meta migration failed")
-		}
-	}()
-
 	// Create NNTP client with retry configuration
 	client, err := nntp.NewClient(cfg)
 	if err != nil {
@@ -302,11 +301,36 @@ func New() (*Usenet, error) {
 		failedFiles:              xsync.NewMap[string, error](),
 		contentVerifySlots:       make(chan struct{}, 1),
 	}
+	u.initLifecycle()
 
-	// Start background cleanup for idle sessions
-	go u.cleanupIdleFS()
+	// Both workers belong to this instance. Close cancels and joins them before
+	// a replacement instance can touch the same metadata or stream state.
+	u.startBackground(func(ctx context.Context) {
+		if _, err := nzbStorage.MigrateLegacyContext(ctx); err != nil && ctx.Err() == nil {
+			nzbStorage.logger.Warn().Err(err).Msg("Legacy NZB meta migration failed")
+		}
+	})
+	u.startBackground(func(ctx context.Context) {
+		u.cleanupIdleFS(ctx, 30*time.Second)
+	})
 
 	return u, nil
+}
+
+func (u *Usenet) initLifecycle() {
+	u.lifecycleOnce.Do(func() {
+		u.ctx, u.cancel = context.WithCancel(context.Background())
+		u.closeDone = make(chan struct{})
+	})
+}
+
+func (u *Usenet) startBackground(work func(context.Context)) {
+	u.initLifecycle()
+	u.background.Add(1)
+	go func() {
+		defer u.background.Done()
+		work(u.ctx)
+	}()
 }
 
 func initStreamsDir(streamsDir string) error {
@@ -328,12 +352,15 @@ func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent 
 		return nil, fmt.Errorf("no volumes available for file %s", file.Name)
 	}
 
-	fsCtx := context.Background()
+	u.initLifecycle()
+	if err := u.ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, maxConcurrent, prefetchSize, volumes, u.logger)
+	usenetFS, err := fs.NewFS(u.ctx, u.nntp, maxConcurrent, prefetchSize, volumes, u.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -412,35 +439,44 @@ func (u *Usenet) releaseFS(key string) {
 	entry.lastAccessed.Store(utils.NowUnix())
 }
 
-// cleanupIdleFS removes sessions with refCount=0 that haven't been used recently
-func (u *Usenet) cleanupIdleFS() {
+// cleanupIdleFS removes sessions with refCount=0 that haven't been used recently.
+// It exits with the owning Usenet instance instead of surviving config resets.
+func (u *Usenet) cleanupIdleFS(ctx context.Context, interval time.Duration) {
 	// Keep a warm reader through short pauses, then tear it down. Usenet segment
 	// buffering is only for active latency hiding; stale buffers should disappear
 	// quickly instead of behaving like a VFS cache.
 	const idleThreshold = int64(120) // 2 minutes idle
-	ticker := time.NewTicker(30 * time.Second)
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		now := utils.NowUnix()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := utils.NowUnix()
 
-		u.fs.Range(func(key string, entry *fsEntry) bool {
-			if entry.refCount.Load() == 0 {
-				lastUsed := entry.lastAccessed.Load()
-				if now-lastUsed > idleThreshold {
-					// Claim before touching anything: the CAS fences out a
-					// concurrent Stream that already Load()ed this entry from
-					// the map (it will fail acquire() and create a fresh
-					// entry). Delete from the map before the (potentially
-					// slow) cleanup so waiting creators aren't stalled.
-					if entry.claimForCleanup() {
-						u.fs.Delete(key)
-						entry.cleanup()
+			u.fs.Range(func(key string, entry *fsEntry) bool {
+				if entry.refCount.Load() == 0 {
+					lastUsed := entry.lastAccessed.Load()
+					if now-lastUsed > idleThreshold {
+						// Claim before touching anything: the CAS fences out a
+						// concurrent Stream that already Load()ed this entry from
+						// the map (it will fail acquire() and create a fresh
+						// entry). Delete from the map before the (potentially
+						// slow) cleanup so waiting creators aren't stalled.
+						if entry.claimForCleanup() {
+							u.fs.Delete(key)
+							entry.cleanup()
+						}
 					}
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
 	}
 }
 
@@ -720,11 +756,29 @@ func (u *Usenet) sampleSegments(segments []storage.NZBSegment, percent int) []st
 }
 
 func (u *Usenet) Stop() {
+	if u == nil {
+		return
+	}
+	u.initLifecycle()
+	u.cancel()
 	u.logger.Info().Msg("Stopping Usenet")
 }
 
 // Close closes all usenet resources including NNTP connections
 func (u *Usenet) Close() error {
+	if u == nil {
+		return nil
+	}
+	u.initLifecycle()
+	u.closeOnce.Do(func() {
+		u.closeErr = u.close()
+		close(u.closeDone)
+	})
+	<-u.closeDone
+	return u.closeErr
+}
+
+func (u *Usenet) close() error {
 	u.logger.Info().Msg("Closing Usenet NNTP client")
 
 	u.watcherMu.Lock()
@@ -744,6 +798,10 @@ func (u *Usenet) Close() error {
 		}
 	}
 
+	// Stop all instance-owned work before a replacement can be created. Closing
+	// NNTP below unblocks any active network reads; the wait happens after that.
+	u.cancel()
+
 	// Close NNTP client FIRST to force-close all active connections.
 	// This unblocks any in-flight StreamBody/TCP reads in prefetch workers,
 	// allowing SegmentFetcher.Close() (prefetchWg.Wait()) to complete without hanging.
@@ -752,14 +810,17 @@ func (u *Usenet) Close() error {
 			u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
 		}
 	}
+	u.background.Wait()
 
 	// Cleanup all active FS entries (fetcher.Close() now completes quickly
 	// because connections were already force-closed above)
-	u.fs.Range(func(key string, entry *fsEntry) bool {
-		entry.cleanup()
-		return true
-	})
-	u.fs.Clear()
+	if u.fs != nil {
+		u.fs.Range(func(key string, entry *fsEntry) bool {
+			entry.cleanup()
+			return true
+		})
+		u.fs.Clear()
+	}
 
 	u.logger.Info().Msg("Usenet closed")
 	return nil

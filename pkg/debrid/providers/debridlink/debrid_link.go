@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,7 +43,6 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink
 	cfg := config.Get()
 	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", dc.APIKey),
-		"Content-Type":  "application/json",
 	}
 	if dc.UserAgent != "" {
 		headers["User-Agent"] = dc.UserAgent
@@ -301,41 +301,89 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 }
 
 func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
-	payload := map[string]string{"url": t.Magnet.Link}
-	var res SubmitTorrentInfo
-
-	dt, err := json.Marshal(payload)
+	req, err := dl.newSubmitRequest(t)
 	if err != nil {
 		return nil, err
 	}
-	body := bytes.NewReader(dt)
-
-	req, err := http.NewRequest(http.MethodPost, dl.Host+"/seedbox/add", body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := dl.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer closeDebridLinkResponse(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = utils.ReadAllLimited(resp.Body, 64<<10)
 		return nil, fmt.Errorf("error adding torrent: Status: %d", resp.StatusCode)
 	}
 	if resp.ContentLength == 0 {
 		return nil, fmt.Errorf("empty response from debridlink API")
 	}
-	if err := utils.DecodeJSONResponse(resp.Body, &res); err != nil {
+
+	var res SubmitTorrentInfo
+	if err := utils.DecodeJSONResponseBounded(resp.Body, &res, utils.MaxJSONResponseBytes); err != nil {
 		return nil, err
 	}
 	if !res.Success || res.Value == nil {
 		return nil, fmt.Errorf("error adding torrent")
 	}
 	data := *res.Value
+	if data.ID == "" {
+		return nil, fmt.Errorf("debridlink API returned an empty torrent ID")
+	}
+
+	return dl.applySubmittedTorrent(t, data)
+}
+
+func (dl *DebridLink) newSubmitRequest(t *types.Torrent) (*http.Request, error) {
+	if t == nil || t.Magnet == nil {
+		return nil, fmt.Errorf("torrent source is missing")
+	}
+
+	if t.Magnet.IsTorrent() {
+		if len(t.Magnet.File) == 0 {
+			return nil, fmt.Errorf("torrent file is empty")
+		}
+		if int64(len(t.Magnet.File)) > utils.MaxMetadataFileBytes {
+			return nil, fmt.Errorf("torrent file exceeds %d bytes", utils.MaxMetadataFileBytes)
+		}
+
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("file", "upload.torrent")
+		if err != nil {
+			return nil, fmt.Errorf("create torrent upload: %w", err)
+		}
+		if _, err := part.Write(t.Magnet.File); err != nil {
+			return nil, fmt.Errorf("write torrent upload: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return nil, fmt.Errorf("finish torrent upload: %w", err)
+		}
+
+		req, err := http.NewRequest(http.MethodPost, dl.Host+"/seedbox/add", &body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req, nil
+	}
+
+	if strings.TrimSpace(t.Magnet.Link) == "" {
+		return nil, fmt.Errorf("magnet link is empty")
+	}
+	payload, err := json.Marshal(map[string]string{"url": t.Magnet.Link})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, dl.Host+"/seedbox/add", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+func (dl *DebridLink) applySubmittedTorrent(t *types.Torrent, data _torrentInfo) (*types.Torrent, error) {
 	name := utils.RemoveInvalidChars(data.Name)
 	t.Id = data.ID
 	t.Name = name
@@ -347,14 +395,26 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 	t.Filename = name
 	t.OriginalFilename = name
 	t.Debrid = dl.config.Name
-	t.Added = time.Unix(data.Created, 0)
-	t.Files, err = dl.filesByLogicalName(t.Id, data.Files)
+	t.Added = time.Now()
+	if data.Created > 0 {
+		t.Added = time.Unix(data.Created, 0)
+	}
+	if data.HashString != "" {
+		t.InfoHash = data.HashString
+	}
+	files, err := dl.filesByLogicalName(t.Id, data.Files)
 	if err != nil {
 		return nil, err
 	}
-	dl.attachDownloadLinks(t.Files)
+	dl.attachDownloadLinks(files)
+	t.Files = files
 
 	return t, nil
+}
+
+func closeDebridLinkResponse(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, (64<<10)+1))
+	_ = body.Close()
 }
 
 func (dl *DebridLink) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {

@@ -39,7 +39,7 @@ func (q *QBit) addMagnet(
 
 	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
 
-	err = q.manager.AddNewTorrent(ctx, importReq)
+	err = q.manager.AdmitNewTorrent(ctx, importReq)
 	if err != nil {
 		return retainedBytes, fmt.Errorf("failed to process torrent: %w", err)
 	}
@@ -82,7 +82,7 @@ func (q *QBit) addTorrent(
 		)
 	}
 	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
-	err = q.manager.AddNewTorrent(ctx, importReq)
+	err = q.manager.AdmitNewTorrent(ctx, importReq)
 	if err != nil {
 		return retainedBytes, fmt.Errorf("failed to process torrent: %w", err)
 	}

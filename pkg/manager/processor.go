@@ -18,6 +18,44 @@ import (
 
 var errDeleteQueueEntryOnJobFinish = errors.New("delete queue entry after job finishes")
 
+// AdmitNewTorrent durably records a torrent before provider work begins, then
+// hands submission and status checks to the bounded active-download worker
+// pool. qBittorrent callers therefore wait only for validation and durable
+// admission, not for provider latency. A process restart can rebuild the job
+// from the queued entry if it stops after the record is committed.
+func (m *Manager) AdmitNewTorrent(ctx context.Context, importReq *ImportRequest) error {
+	if err := m.validateTorrentImportRequest(importReq); err != nil {
+		return err
+	}
+
+	reservation, err := m.reserveJob(ctx, importReq.Magnet.InfoHash)
+	if err != nil {
+		return err
+	}
+	defer reservation.release()
+
+	torrent := newTorrentQueueEntry(importReq, debridTypes.TorrentStatusQueued)
+	if err := m.queue.Add(torrent); err != nil {
+		return fmt.Errorf("failed to add torrent to queue: %w", err)
+	}
+
+	importReq.Status = "queued"
+	importReq.Async = true
+	importReq.CompletedAt = time.Time{}
+	importReq.Error = ""
+	job := NewJob(JobTypeTorrent, importReq)
+	job.ID = torrent.InfoHash
+	job.Entry = torrent
+	if err := m.submitReservedJob(reservation, job); err != nil {
+		importReq.Status = "error"
+		importReq.Error = err.Error()
+		torrent.MarkAsError(err)
+		_ = m.queue.Update(torrent)
+		return fmt.Errorf("failed to queue torrent: %w", err)
+	}
+	return nil
+}
+
 // AddNewTorrent submits a torrent to debrid before entering the active-download queue.
 func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) error {
 	if importReq == nil || importReq.Magnet == nil {
@@ -139,6 +177,14 @@ func newTorrentQueueEntry(importReq *ImportRequest, status debridTypes.TorrentSt
 		Providers:        make(map[string]*storage.ProviderEntry),
 		Files:            make(map[string]*storage.File),
 		Tags:             []string{},
+	}
+	// Persist the admission policy before provider work starts. ActiveProvider
+	// doubles as the requested provider while Providers is still empty; once a
+	// placement succeeds applyDebridTorrentToEntry replaces it with the actual
+	// provider. This preserves explicit qBittorrent routing across a restart.
+	torrent.ActiveProvider = importReq.SelectedDebrid
+	if importReq.DownloadUncached != nil {
+		torrent.DownloadUncached = *importReq.DownloadUncached
 	}
 	torrent.ContentPath = torrent.DownloadPath()
 	return torrent

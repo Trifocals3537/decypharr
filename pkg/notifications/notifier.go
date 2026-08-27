@@ -1,6 +1,8 @@
 package notifications
 
 import (
+	"context"
+
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -26,7 +28,7 @@ type Event struct {
 // Notifier is the interface for sending notifications
 type Notifier interface {
 	// Send dispatches the notification event
-	Send(event Event) error
+	Send(ctx context.Context, event Event) error
 
 	// Name returns the name of this notifier
 	Name() string

@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,7 +48,7 @@ func (d *DiscordNotifier) Name() string {
 }
 
 // Send dispatches the notification to Discord
-func (d *DiscordNotifier) Send(event Event) error {
+func (d *DiscordNotifier) Send(ctx context.Context, event Event) error {
 	if d.webhookURL == "" {
 		return nil
 	}
@@ -68,7 +69,7 @@ func (d *DiscordNotifier) Send(event Event) error {
 		return fmt.Errorf("failed to marshal discord webhook: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, d.webhookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.webhookURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create discord request: %w", err)
 	}

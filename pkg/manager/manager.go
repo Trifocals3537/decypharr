@@ -316,7 +316,10 @@ func (m *Manager) stopAcceptingBackgroundWork() {
 	m.backgroundMu.Unlock()
 }
 
-const defaultBackgroundWaitTimeout = 30 * time.Second
+const (
+	defaultBackgroundWaitTimeout   = 30 * time.Second
+	defaultNotificationStopTimeout = 5 * time.Second
+)
 
 func (m *Manager) waitForBackground() error {
 	timeout := m.backgroundWaitTimeout
@@ -769,6 +772,20 @@ func (m *Manager) Stop() error {
 	if shutdownErr != nil {
 		m.logger.Error().Err(shutdownErr).Msg("Manager shutdown paused with resources still open")
 		return shutdownErr
+	}
+
+	if m.Notifications != nil {
+		notificationCtx, notificationCancel := context.WithTimeout(
+			context.Background(),
+			defaultNotificationStopTimeout,
+		)
+		if err := m.Notifications.Stop(notificationCtx); err != nil {
+			// Notification events contain detached snapshots and do not own mount,
+			// usenet, or storage resources. A slow webhook must not prevent those
+			// critical resources from closing.
+			m.logger.Warn().Err(err).Msg("Notification delivery did not drain before shutdown")
+		}
+		notificationCancel()
 	}
 
 	if m.mountManager != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	json "github.com/bytedance/sonic"
@@ -46,6 +47,7 @@ type DebridLink struct {
 
 	Profile            *types.Profile `json:"profile,omitempty"`
 	profileLastFetched time.Time
+	profileMu          sync.Mutex
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink, error) {
@@ -111,6 +113,10 @@ func (dl *DebridLink) Logger() zerolog.Logger {
 
 // doGet performs a GET request and unmarshals the response
 func (dl *DebridLink) doGet(endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
+	return dl.doGetContext(context.Background(), endpoint, queryParams, result)
+}
+
+func (dl *DebridLink) doGetContext(ctx context.Context, endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
 	u, err := url.Parse(dl.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -124,7 +130,7 @@ func (dl *DebridLink) doGet(endpoint string, queryParams map[string]string, resu
 		u.RawQuery = q.Encode()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -753,12 +759,22 @@ func (dl *DebridLink) GetAvailableSlots() (int, error) {
 }
 
 func (dl *DebridLink) GetProfile() (*types.Profile, error) {
+	return dl.GetProfileContext(context.Background())
+}
+
+func (dl *DebridLink) GetProfileContext(ctx context.Context) (*types.Profile, error) {
+	dl.profileMu.Lock()
+	defer dl.profileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if dl.Profile != nil && time.Since(dl.profileLastFetched) < debridLinkProfileCacheDuration {
-		return dl.Profile, nil
+		cached := *dl.Profile
+		return &cached, nil
 	}
 	var res UserInfo
 
-	resp, err := dl.doGet("/account/infos", nil, &res)
+	resp, err := dl.doGetContext(ctx, "/account/infos", nil, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +809,8 @@ func (dl *DebridLink) GetProfile() (*types.Profile, error) {
 	} else {
 		profile.Type = "free"
 	}
-	dl.Profile = profile
+	stored := *profile
+	dl.Profile = &stored
 	dl.profileLastFetched = now
 	return profile, nil
 }

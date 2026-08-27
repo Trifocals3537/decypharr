@@ -627,13 +627,20 @@ func (pm *Premiumize) CheckFile(ctx context.Context, infohash, fileID string) er
 }
 
 func (pm *Premiumize) GetProfile() (*types.Profile, error) {
+	return pm.GetProfileContext(context.Background())
+}
+
+func (pm *Premiumize) GetProfileContext(ctx context.Context) (*types.Profile, error) {
 	pm.profileMu.Lock()
 	defer pm.profileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if pm.profile != nil && time.Since(pm.profileLastFetched) < profileCacheDuration {
 		cached := *pm.profile
 		return &cached, nil
 	}
-	profile, err := pm.getClientProfile(pm.client)
+	profile, err := pm.getClientProfileContext(ctx, pm.client)
 	if err != nil {
 		return nil, err
 	}
@@ -645,8 +652,12 @@ func (pm *Premiumize) GetProfile() (*types.Profile, error) {
 }
 
 func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, error) {
+	return pm.getClientProfileContext(context.Background(), client)
+}
+
+func (pm *Premiumize) getClientProfileContext(ctx context.Context, client *request.Client) (*types.Profile, error) {
 	var data accountInfoResponse
-	req, err := http.NewRequest(http.MethodGet, pm.endpoint("/api/account/info"), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pm.endpoint("/api/account/info"), nil)
 	if err != nil {
 		return nil, err
 	}

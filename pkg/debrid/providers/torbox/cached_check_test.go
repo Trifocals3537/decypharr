@@ -1,7 +1,9 @@
 package torbox
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,6 +26,77 @@ func newCachedCheckTorbox(t *testing.T, handler http.HandlerFunc) *Torbox {
 		Host:   server.URL,
 		client: request.New(request.WithMaxRetries(0)),
 		config: config.Debrid{Name: "torbox"},
+	}
+}
+
+func TestSubmitMagnetUploadsTorrentFileWithCachePolicy(t *testing.T) {
+	fileData := []byte("d4:infod4:name4:test6:lengthi1eee")
+	for _, test := range []struct {
+		name             string
+		downloadUncached bool
+		wantCachedOnly   string
+		wantCacheCall    bool
+	}{
+		{name: "cached only", wantCachedOnly: "true", wantCacheCall: true},
+		{name: "uncached allowed", downloadUncached: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cacheCalled := false
+			createCalled := false
+			client := newCachedCheckTorbox(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/torrents/checkcached":
+					cacheCalled = true
+					_, _ = w.Write([]byte(`{"success":true,"data":{"` + cachedCheckTestHash + `":{"size":123}}}`))
+				case "/api/torrents/createtorrent":
+					createCalled = true
+					if err := r.ParseMultipartForm(1 << 20); err != nil {
+						t.Fatalf("ParseMultipartForm() error = %v", err)
+					}
+					file, header, err := r.FormFile("file")
+					if err != nil {
+						t.Fatalf("FormFile() error = %v", err)
+					}
+					defer file.Close()
+					got, err := io.ReadAll(file)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(got, fileData) || header.Filename != "upload.torrent" {
+						t.Fatalf("uploaded file = %q/%q, want %q/upload.torrent", got, header.Filename, fileData)
+					}
+					if got := r.FormValue("add_only_if_cached"); got != test.wantCachedOnly {
+						t.Errorf("add_only_if_cached = %q, want %q", got, test.wantCachedOnly)
+					}
+					if got := r.FormValue("magnet"); got != "" {
+						t.Errorf("multipart upload unexpectedly included magnet = %q", got)
+					}
+					_, _ = w.Write([]byte(`{"success":true,"data":{"torrent_id":7,"hash":"` + cachedCheckTestHash + `"}}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+
+			torrent, err := client.SubmitMagnet(&types.Torrent{
+				InfoHash:         cachedCheckTestHash,
+				Name:             "Release",
+				DownloadUncached: test.downloadUncached,
+				Magnet: &utils.Magnet{
+					InfoHash: cachedCheckTestHash,
+					Link:     "magnet:?xt=urn:btih:" + cachedCheckTestHash,
+					File:     fileData,
+				},
+			})
+			if err != nil {
+				t.Fatalf("SubmitMagnet() error = %v", err)
+			}
+			if cacheCalled != test.wantCacheCall || !createCalled {
+				t.Fatalf("calls = cache:%t create:%t, want cache:%t create:true", cacheCalled, createCalled, test.wantCacheCall)
+			}
+			if torrent.Id != "7" || torrent.Debrid != "torbox" {
+				t.Fatalf("submitted torrent = %#v", torrent)
+			}
+		})
 	}
 }
 

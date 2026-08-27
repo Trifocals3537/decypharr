@@ -172,8 +172,30 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Convert to retryablehttp request
-	retryReq, err := retryablehttp.FromRequest(req)
+	// Convert to a retryable request without copying replayable in-memory
+	// bodies. net/http supplies GetBody for bytes.Buffer/Reader and strings.Reader
+	// requests; using that factory avoids a second full allocation for large
+	// multipart torrent uploads while preserving exact retry behavior.
+	var retryReq *retryablehttp.Request
+	var err error
+	if req.GetBody != nil {
+		requestWithoutBody := req.Clone(req.Context())
+		requestWithoutBody.Body = nil
+		retryReq, err = retryablehttp.FromRequest(requestWithoutBody)
+		if err == nil {
+			err = retryReq.SetBody(retryablehttp.ReaderFunc(func() (io.Reader, error) {
+				return req.GetBody()
+			}))
+			retryReq.ContentLength = req.ContentLength
+		}
+		// The retry client owns the replacement readers returned by GetBody;
+		// close the unused original body to retain net/http's ownership contract.
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+	} else {
+		retryReq, err = retryablehttp.FromRequest(req)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("creating retryable request: %w", err)
 	}

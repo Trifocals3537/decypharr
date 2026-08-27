@@ -51,6 +51,8 @@ type Storage struct {
 	healthCounts        map[HealthStatus]int
 	healthCountsBuiltAt time.Time
 	migrationCleanupMu  sync.Mutex
+	torrentSourcesMu    sync.Mutex
+	torrentSourceBytes  int64
 }
 
 func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hybrid.Store, error) {
@@ -141,6 +143,9 @@ func NewStorage(dbPath string) (*Storage, error) {
 		log.Warn().Err(err).Msg("Metadata migration failed")
 	} else if count > 0 {
 		log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
+	}
+	if err := s.PruneTorrentSources(); err != nil {
+		log.Warn().Err(err).Msg("Failed to prune unreferenced torrent sources")
 	}
 
 	s.startupComplete = true

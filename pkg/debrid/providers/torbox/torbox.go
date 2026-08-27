@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
@@ -222,15 +223,75 @@ func (tb *Torbox) doPostForm(
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer closeTorboxResponse(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := utils.DecodeJSONResponse(resp.Body, result); err != nil {
+		if err := utils.DecodeJSONResponseBounded(resp.Body, result, utils.MaxJSONResponseBytes); err != nil {
 			return resp, err
 		}
 	}
 
 	return resp, nil
+}
+
+func (tb *Torbox) doPostTorrentFile(
+	endpoint string,
+	fileData []byte,
+	addOnlyIfCached bool,
+	result any,
+	operation providertraffic.Operation,
+) (*http.Response, error) {
+	if len(fileData) == 0 {
+		return nil, fmt.Errorf("torrent file is empty")
+	}
+	if int64(len(fileData)) > utils.MaxMetadataFileBytes {
+		return nil, fmt.Errorf("torrent file exceeds %d bytes", utils.MaxMetadataFileBytes)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "upload.torrent")
+	if err != nil {
+		return nil, fmt.Errorf("create torrent upload: %w", err)
+	}
+	if _, err := part.Write(fileData); err != nil {
+		return nil, fmt.Errorf("write torrent upload: %w", err)
+	}
+	if addOnlyIfCached {
+		if err := writer.WriteField("add_only_if_cached", "true"); err != nil {
+			return nil, fmt.Errorf("write torrent upload policy: %w", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("finish torrent upload: %w", err)
+	}
+
+	ctx := context.Background()
+	if operation != providertraffic.OperationNone {
+		ctx = providertraffic.WithOperation(ctx, operation)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tb.Host+endpoint, &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := tb.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer closeTorboxResponse(resp.Body)
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := utils.DecodeJSONResponseBounded(resp.Body, result, utils.MaxJSONResponseBytes); err != nil {
+			return resp, err
+		}
+	}
+	return resp, nil
+}
+
+func closeTorboxResponse(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, (64<<10)+1))
+	_ = body.Close()
 }
 
 // doPostJSON performs a POST request with a JSON body.
@@ -346,13 +407,12 @@ func (tb *Torbox) isCached(hash string) (cached bool, known bool) {
 }
 
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+	if torrent == nil || torrent.Magnet == nil {
+		return nil, fmt.Errorf("missing torrent magnet")
+	}
 	var data AddMagnetResponse
 
-	formData := map[string]string{
-		"magnet": torrent.Magnet.Link,
-	}
 	if !torrent.DownloadUncached {
-		formData["add_only_if_cached"] = "true"
 		// TorBox can leave createtorrent unanswered for a known cache miss,
 		// causing the request client's timeout and retry policy to turn a cheap
 		// refusal into minutes of latency. Probe first, but only act on a
@@ -366,7 +426,25 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	if torrent.DownloadUncached {
 		operation = providertraffic.OperationCreateTorrentUncached
 	}
-	resp, err := tb.doPostForm("/api/torrents/createtorrent", formData, &data, operation)
+	var (
+		resp *http.Response
+		err  error
+	)
+	if torrent.Magnet.IsTorrent() {
+		resp, err = tb.doPostTorrentFile(
+			"/api/torrents/createtorrent",
+			torrent.Magnet.File,
+			!torrent.DownloadUncached,
+			&data,
+			operation,
+		)
+	} else {
+		formData := map[string]string{"magnet": torrent.Magnet.Link}
+		if !torrent.DownloadUncached {
+			formData["add_only_if_cached"] = "true"
+		}
+		resp, err = tb.doPostForm("/api/torrents/createtorrent", formData, &data, operation)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +452,7 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
-	if data.Data == nil {
+	if !data.Success || data.Data == nil {
 		return nil, fmt.Errorf("error adding torrent")
 	}
 	dt := *data.Data

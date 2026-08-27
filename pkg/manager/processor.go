@@ -35,8 +35,14 @@ func (m *Manager) AdmitNewTorrent(ctx context.Context, importReq *ImportRequest)
 	defer reservation.release()
 
 	torrent := newTorrentQueueEntry(importReq, debridTypes.TorrentStatusQueued)
+	if err := m.persistTorrentSource(importReq); err != nil {
+		return fmt.Errorf("persist torrent source before admission: %w", err)
+	}
 	if err := m.queue.Add(torrent); err != nil {
-		return fmt.Errorf("failed to add torrent to queue: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to add torrent to queue: %w", err),
+			m.pruneTorrentSourcesAfterFailedAdmission(importReq),
+		)
 	}
 
 	importReq.Status = "queued"
@@ -83,8 +89,21 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 	torrent.DownloadUncached = debridTorrent.DownloadUncached
 	applyDebridTorrentToEntry(torrent, debridTorrent)
 
+	if err := m.persistTorrentSource(importReq); err != nil {
+		rollbackErr := m.deleteProviderTorrent(
+			m.ProviderClient(debridTorrent.Debrid),
+			debridTorrent.Id,
+		)
+		return errors.Join(
+			fmt.Errorf("persist torrent source before queueing: %w", err),
+			rollbackErr,
+		)
+	}
 	if err := m.queue.Add(torrent); err != nil {
-		return fmt.Errorf("failed to add torrent to queue: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to add torrent to queue: %w", err),
+			m.pruneTorrentSourcesAfterFailedAdmission(importReq),
+		)
 	}
 
 	job := NewJob(JobTypeTorrent, importReq)
@@ -135,8 +154,14 @@ func (m *Manager) processTorrentJob(ctx context.Context, job *Job) error {
 
 func (m *Manager) queueTorrentRetry(importReq *ImportRequest, reservation *jobReservation) error {
 	torrent := newTorrentQueueEntry(importReq, debridTypes.TorrentStatusQueued)
+	if err := m.persistTorrentSource(importReq); err != nil {
+		return fmt.Errorf("persist torrent source before retry queueing: %w", err)
+	}
 	if err := m.queue.Add(torrent); err != nil {
-		return fmt.Errorf("failed to add torrent to queue: %w", err)
+		return errors.Join(
+			fmt.Errorf("failed to add torrent to queue: %w", err),
+			m.pruneTorrentSourcesAfterFailedAdmission(importReq),
+		)
 	}
 
 	importReq.Status = "queued"

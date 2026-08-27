@@ -45,6 +45,20 @@ func stripTrackersFromMagnet(mi metainfo.Magnet, fileType string) metainfo.Magne
 	return mi
 }
 
+// stripTrackersFromTorrentFile removes announce metadata without rebuilding the
+// opaque info dictionary. That keeps the torrent's infohash stable while
+// ensuring providers do not receive tracker URLs when the removal policy is on.
+func stripTrackersFromTorrentFile(mi *metainfo.MetaInfo) ([]byte, error) {
+	mi.Announce = ""
+	mi.AnnounceList = nil
+
+	var data bytes.Buffer
+	if err := mi.Write(&data); err != nil {
+		return nil, fmt.Errorf("failed to sanitize torrent metadata")
+	}
+	return data.Bytes(), nil
+}
+
 func GetMagnetFromFile(file io.Reader, filePath string, rmTrackerUrls bool) (*Magnet, error) {
 	return GetMagnetFromFileBounded(file, filePath, rmTrackerUrls, MaxMetadataFileBytes)
 }
@@ -142,6 +156,9 @@ func GetMagnetFromURLContext(
 }
 
 func GetMagnetFromBytes(torrentData []byte, rmTrackerUrls bool) (*Magnet, error) {
+	if len(torrentData) == 0 {
+		return nil, fmt.Errorf("invalid torrent metadata")
+	}
 	if int64(len(torrentData)) > MaxMetadataFileBytes {
 		return nil, fmt.Errorf("%w: torrent metadata maximum is %d bytes", ErrContentTooLarge, MaxMetadataFileBytes)
 	}
@@ -157,16 +174,29 @@ func GetMagnetFromBytes(torrentData []byte, rmTrackerUrls bool) (*Magnet, error)
 	if err != nil {
 		return nil, fmt.Errorf("invalid torrent info dictionary")
 	}
-	magnetMeta := mi.Magnet(&hash, &info)
+	finalTorrentData := torrentData
 	if rmTrackerUrls {
-		magnetMeta = stripTrackersFromMagnet(magnetMeta, "torrent file")
+		originalTrackerCount := len(mi.UpvertedAnnounceList())
+		finalTorrentData, err = stripTrackersFromTorrentFile(mi)
+		if err != nil {
+			return nil, err
+		}
+		mi, err = metainfo.Load(bytes.NewReader(finalTorrentData))
+		if err != nil || mi.HashInfoBytes().HexString() != infoHash {
+			return nil, fmt.Errorf("sanitized torrent metadata changed the info dictionary")
+		}
+		if originalTrackerCount > 0 {
+			log := logger.Default()
+			log.Printf("Removed %d tracker tiers from torrent file", originalTrackerCount)
+		}
 	}
+	magnetMeta := mi.Magnet(&hash, &info)
 	magnet := &Magnet{
 		InfoHash: infoHash,
 		Name:     info.Name,
 		Size:     info.Length,
 		Link:     magnetMeta.String(),
-		File:     torrentData,
+		File:     finalTorrentData,
 	}
 	return magnet, nil
 }

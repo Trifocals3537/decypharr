@@ -340,12 +340,29 @@ func (m *Manager) waitForBackground() error {
 	}
 }
 
+func newManagerScheduler(location *time.Location, tag string) (gocron.Scheduler, error) {
+	options := []gocron.SchedulerOption{
+		gocron.WithGlobalJobOptions(
+			gocron.WithTags(tag),
+			// Periodic reconciliation is state-based and safe to retry on the
+			// next tick. Rescheduling a tick that arrives while the previous run
+			// is active prevents slow providers or storage from creating an
+			// unbounded backlog of duplicate work.
+			gocron.WithSingletonMode(gocron.LimitModeReschedule),
+		),
+	}
+	if location != nil {
+		options = append(options, gocron.WithLocation(location))
+	}
+	return gocron.NewScheduler(options...)
+}
+
 func (m *Manager) init() {
 	m.initializationErr = nil
 	cfg := config.Get()
-	scheduler, err := gocron.NewScheduler(gocron.WithLocation(time.Local), gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-manager")))
+	scheduler, err := newManagerScheduler(time.Local, "decypharr-manager")
 	if err != nil {
-		scheduler, _ = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-manager")))
+		scheduler, _ = newManagerScheduler(nil, "decypharr-manager")
 	}
 
 	// Create CET scheduler for time-specific jobs
@@ -353,9 +370,9 @@ func (m *Manager) init() {
 	if err != nil {
 		cetLocation = time.UTC
 	}
-	cetScheduler, err := gocron.NewScheduler(gocron.WithLocation(cetLocation), gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-cet")))
+	cetScheduler, err := newManagerScheduler(cetLocation, "decypharr-cet")
 	if err != nil {
-		cetScheduler, _ = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-cet")))
+		cetScheduler, _ = newManagerScheduler(nil, "decypharr-cet")
 	}
 
 	m.config = cfg

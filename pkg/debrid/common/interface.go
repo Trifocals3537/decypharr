@@ -37,3 +37,15 @@ type Client interface {
 type ContextTorrentLister interface {
 	GetTorrentsContext(context.Context) ([]*types.Torrent, error)
 }
+
+// ContextDownloadLinkRefresher is the optional cancellation-aware account
+// link-cache refresh capability used by scheduled provider maintenance.
+type ContextDownloadLinkRefresher interface {
+	RefreshDownloadLinksContext(context.Context) error
+}
+
+// ContextAccountSyncer is the optional cancellation-aware account metadata
+// synchronization capability used by scheduled provider maintenance.
+type ContextAccountSyncer interface {
+	SyncAccountsContext(context.Context) error
+}

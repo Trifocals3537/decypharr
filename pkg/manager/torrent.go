@@ -568,7 +568,7 @@ func (m *Manager) refreshDebridDownloadLinks(ctx context.Context, debridName str
 		return
 	}
 
-	if err := awaitProviderCall(ctx, client.RefreshDownloadLinks); err != nil && ctx.Err() == nil {
+	if err := refreshProviderDownloadLinks(ctx, client); err != nil && ctx.Err() == nil {
 		m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to refresh download links")
 	}
 }

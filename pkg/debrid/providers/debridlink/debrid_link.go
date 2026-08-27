@@ -51,6 +51,8 @@ type DebridLink struct {
 }
 
 var _ common.ContextTorrentLister = (*DebridLink)(nil)
+var _ common.ContextDownloadLinkRefresher = (*DebridLink)(nil)
+var _ common.ContextAccountSyncer = (*DebridLink)(nil)
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink, error) {
 	cfg := config.Get()
@@ -568,16 +570,23 @@ func (dl *DebridLink) GetTorrentsContext(ctx context.Context) ([]*types.Torrent,
 }
 
 func (dl *DebridLink) fetchDownloadLinks(account *account.Account) ([]types.DownloadLink, error) {
+	return dl.fetchDownloadLinksContext(context.Background(), account)
+}
+
+func (dl *DebridLink) fetchDownloadLinksContext(ctx context.Context, account *account.Account) ([]types.DownloadLink, error) {
 	links := make([]types.DownloadLink, 0)
 	page := 0
 	visited := make(map[int]struct{})
 	for requestCount := 0; requestCount < debridLinkListMaxPages; requestCount++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, exists := visited[page]; exists {
 			return links, fmt.Errorf("debridlink download pagination repeated page %d", page)
 		}
 		visited[page] = struct{}{}
 
-		data, next, err := dl._fetchDownloadLinks(account, page, debridLinkListPageSize)
+		data, next, err := dl.fetchDownloadLinksPageContext(ctx, account, page, debridLinkListPageSize)
 		if err != nil {
 			return links, err
 		}
@@ -590,13 +599,13 @@ func (dl *DebridLink) fetchDownloadLinks(account *account.Account) ([]types.Down
 	return links, fmt.Errorf("debridlink download pagination exceeded %d pages", debridLinkListMaxPages)
 }
 
-func (dl *DebridLink) _fetchDownloadLinks(account *account.Account, page, limit int) ([]types.DownloadLink, int, error) {
+func (dl *DebridLink) fetchDownloadLinksPageContext(ctx context.Context, account *account.Account, page, limit int) ([]types.DownloadLink, int, error) {
 	links := make([]types.DownloadLink, 0)
 	if account == nil || account.Client() == nil {
 		return links, -1, fmt.Errorf("debridlink download account is missing")
 	}
 
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/downloader/list?page=%d&perPage=%d", dl.Host, page, limit), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/downloader/list?page=%d&perPage=%d", dl.Host, page, limit), nil)
 	if err != nil {
 		return links, -1, err
 	}
@@ -627,6 +636,9 @@ func (dl *DebridLink) _fetchDownloadLinks(account *account.Account, page, limit 
 		return links, -1, err
 	}
 	for _, l := range data {
+		if err := ctx.Err(); err != nil {
+			return nil, -1, err
+		}
 		if l.Expired || l.Created <= 0 {
 			continue
 		}
@@ -651,7 +663,11 @@ func (dl *DebridLink) _fetchDownloadLinks(account *account.Account, page, limit 
 }
 
 func (dl *DebridLink) RefreshDownloadLinks() error {
-	return dl.accountsManager.RefreshLinks(dl.fetchDownloadLinks)
+	return dl.RefreshDownloadLinksContext(context.Background())
+}
+
+func (dl *DebridLink) RefreshDownloadLinksContext(ctx context.Context) error {
+	return dl.accountsManager.RefreshLinksContext(ctx, dl.fetchDownloadLinksContext)
 }
 
 func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, int, error) {
@@ -854,7 +870,16 @@ func (dl *DebridLink) syncAccount(account *account.Account) error {
 }
 
 func (dl *DebridLink) SyncAccounts() {
-	dl.accountsManager.Sync(dl.syncAccount)
+	_ = dl.SyncAccountsContext(context.Background())
+}
+
+func (dl *DebridLink) SyncAccountsContext(ctx context.Context) error {
+	return dl.accountsManager.SyncContext(ctx, func(ctx context.Context, account *account.Account) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return dl.syncAccount(account)
+	})
 }
 
 func (dl *DebridLink) deleteDownloadLink(account *account.Account, downloadLink types.DownloadLink) error {

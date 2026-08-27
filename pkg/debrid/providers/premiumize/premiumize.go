@@ -41,6 +41,8 @@ const (
 
 var _ common.Client = (*Premiumize)(nil)
 var _ common.ContextTorrentLister = (*Premiumize)(nil)
+var _ common.ContextDownloadLinkRefresher = (*Premiumize)(nil)
+var _ common.ContextAccountSyncer = (*Premiumize)(nil)
 
 type Premiumize struct {
 	Host                  string `json:"host"`
@@ -627,7 +629,14 @@ func (pm *Premiumize) fetchDownloadLink(acc *account.Account, id string, file *t
 }
 
 func (pm *Premiumize) RefreshDownloadLinks() error {
-	return pm.accountsManager.RefreshLinks(func(account *account.Account) ([]types.DownloadLink, error) {
+	return pm.RefreshDownloadLinksContext(context.Background())
+}
+
+func (pm *Premiumize) RefreshDownloadLinksContext(ctx context.Context) error {
+	return pm.accountsManager.RefreshLinksContext(ctx, func(ctx context.Context, account *account.Account) ([]types.DownloadLink, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return []types.DownloadLink{}, nil
 	})
 }
@@ -746,11 +755,15 @@ func (pm *Premiumize) AccountManager() *account.Manager {
 }
 
 func (pm *Premiumize) SyncAccounts() {
-	pm.accountsManager.Sync(pm.syncAccount)
+	_ = pm.SyncAccountsContext(context.Background())
 }
 
-func (pm *Premiumize) syncAccount(acc *account.Account) error {
-	profile, err := pm.getClientProfile(acc.Client())
+func (pm *Premiumize) SyncAccountsContext(ctx context.Context) error {
+	return pm.accountsManager.SyncContext(ctx, pm.syncAccountContext)
+}
+
+func (pm *Premiumize) syncAccountContext(ctx context.Context, acc *account.Account) error {
+	profile, err := pm.getClientProfileContext(ctx, acc.Client())
 	if err != nil {
 		return err
 	}

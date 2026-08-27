@@ -66,8 +66,14 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink
 	if dc.Proxy != "" {
 		opts = append(opts, request.WithProxy(dc.Proxy))
 	}
+	probeHeaders := make(map[string]string)
+	if dc.UserAgent != "" {
+		probeHeaders["User-Agent"] = dc.UserAgent
+	}
 	repairOpts := []request.ClientOption{
-		request.WithHeaders(headers),
+		// Download URLs are signed external URLs. Never attach the provider API
+		// credential to them; only non-secret presentation headers are shared.
+		request.WithHeaders(probeHeaders),
 		request.WithRateLimiter(ratelimits["repair"]),
 		request.WithMaxRetries(4),
 		request.WithRetryableStatus(http.StatusTooManyRequests),
@@ -884,7 +890,7 @@ func (dl *DebridLink) SpeedTest(ctx context.Context) types.SpeedTestResult {
 	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", downloadSize-1))
 
 	downloadStart := time.Now()
-	dlResp, err := current.Client().Do(req)
+	dlResp, err := dl.repairClient.Do(req)
 	if err != nil {
 		return result
 	}

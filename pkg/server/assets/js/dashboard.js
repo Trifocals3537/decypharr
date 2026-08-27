@@ -298,6 +298,10 @@ class TorrentDashboard {
         this.refs.torrentsList.innerHTML = this.state.torrents.map(torrent => {
             const isSelected = this.state.selectedEntries.has(torrent.info_hash);
             const hash = this.escapeAttr(String(torrent.info_hash || ''));
+            // The dashboard API returns storage entries, where ActiveProvider
+            // is serialized as active_provider. Keep the legacy debrid fallback
+            // for compatibility with older or externally supplied payloads.
+            const providerName = torrent.active_provider || torrent.debrid || '';
             return `
                 <tr class="hover" data-hash="${hash}">
                     <td>
@@ -328,7 +332,7 @@ class TorrentDashboard {
                         ${this.renderProtocolBadge(torrent.protocol)}
                     </td>
                     <td>
-                        ${torrent.debrid ? `<span class="badge badge-sm badge-primary">${this.escapeHtml(torrent.debrid)}</span>` : '-'}
+                        ${providerName ? `<span class="badge badge-sm badge-primary">${this.escapeHtml(providerName)}</span>` : '-'}
                     </td>
                     <td>
                         <span class="text-sm">${torrent.num_seeds || 0}</span>

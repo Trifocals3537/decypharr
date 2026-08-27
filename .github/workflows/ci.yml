@@ -198,6 +198,9 @@ jobs:
       - name: Audit build dependencies
         run: npm audit --audit-level=high
 
+      - name: Test browser behavior
+        run: npm test
+
       - name: Build assets
         run: npm run build
 

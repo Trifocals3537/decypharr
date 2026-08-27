@@ -95,11 +95,13 @@ func (m *Manager) recoverQueuedDeletions() (residual error, fatal error) {
 					"manual confirmation is required",
 			))
 		}
-		if err := m.queue.deleteEntryFiles(intent.Entry); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf(
-				"finish local queue cleanup: %w",
-				err,
-			))
+		if !intent.PreserveFiles {
+			if err := m.queue.deleteEntryFiles(intent.Entry); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf(
+					"finish local queue cleanup: %w",
+					err,
+				))
+			}
 		}
 		if len(cleanupErrs) == 0 {
 			if err := store.CompleteQueuedDeletion(

@@ -178,20 +178,36 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 
 func hashesContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_hashes := chi.URLParam(r, "hashes")
-		var hashes []string
-		if _hashes != "" {
-			hashes = strings.Split(_hashes, "|")
+		var rawHashes []string
+		if pathHashes := chi.URLParam(r, "hashes"); pathHashes != "" {
+			rawHashes = append(rawHashes, pathHashes)
 		}
-		if hashes == nil {
-			// GetReader hashes from form
+		if len(rawHashes) == 0 {
 			_ = r.ParseForm()
-			hashes = r.Form["hashes"]
+			rawHashes = append(rawHashes, r.Form["hashes"]...)
 		}
-		for i, hash := range hashes {
-			hashes[i] = strings.TrimSpace(hash)
-		}
+		hashes := normalizeHashes(rawHashes)
 		ctx := context.WithValue(r.Context(), hashesKey, hashes)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func normalizeHashes(values []string) []string {
+	hashes := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		for hash := range strings.SplitSeq(value, "|") {
+			hash = strings.TrimSpace(hash)
+			if hash == "" {
+				continue
+			}
+			key := strings.ToLower(hash)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			hashes = append(hashes, hash)
+		}
+	}
+	return hashes
 }

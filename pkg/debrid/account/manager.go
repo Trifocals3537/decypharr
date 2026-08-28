@@ -1,9 +1,12 @@
 package account
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,14 +17,15 @@ import (
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sourcegraph/conc/pool"
 	"go.uber.org/ratelimit"
 )
 
 type LinkFetcher func(account *Account, id string, file *types.File) (types.DownloadLink, error)
 type LinkDeleter func(account *Account, dl types.DownloadLink) error
 type LinksFetcher func(account *Account) ([]types.DownloadLink, error)
+type ContextLinksFetcher func(context.Context, *Account) ([]types.DownloadLink, error)
 type SyncFunc func(account *Account) error
+type ContextSyncFunc func(context.Context, *Account) error
 
 type Manager struct {
 	debrid   string
@@ -382,34 +386,70 @@ func earlierPositiveDuration(current, candidate time.Duration) time.Duration {
 }
 
 func (m *Manager) RefreshLinks(fetcher LinksFetcher) error {
-	wgPool := pool.New().WithMaxGoroutines(max(1, m.accounts.Size())).WithErrors()
-	m.accounts.Range(func(key string, acc *Account) bool {
-		wgPool.Go(func() error {
-			links, err := fetcher(acc)
+	return m.RefreshLinksContext(context.Background(), func(_ context.Context, account *Account) ([]types.DownloadLink, error) {
+		return fetcher(account)
+	})
+}
+
+func (m *Manager) RefreshLinksContext(ctx context.Context, fetcher ContextLinksFetcher) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	accounts := m.All()
+	var wg sync.WaitGroup
+	errorsCh := make(chan error, len(accounts))
+	for _, acc := range accounts {
+		wg.Go(func() {
+			links, err := fetcher(ctx, acc)
 			if err != nil {
-				m.logger.Error().Err(err).Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Failed to fetch download links for account")
-				return err
+				if ctx.Err() == nil {
+					m.logger.Error().Err(err).Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Failed to fetch download links for account")
+				}
+				errorsCh <- err
+				return
 			}
 			for _, dl := range links {
+				if ctx.Err() != nil {
+					errorsCh <- ctx.Err()
+					return
+				}
 				acc.storeLink(dl)
 			}
-			return nil
 		})
-		return true
-	})
-	return wgPool.Wait()
+	}
+	wg.Wait()
+	close(errorsCh)
+	var refreshErr error
+	for err := range errorsCh {
+		refreshErr = errors.Join(refreshErr, err)
+	}
+	return errors.Join(refreshErr, ctx.Err())
 }
 
 func (m *Manager) Sync(syncer SyncFunc) {
-	workers := m.accounts.Size()
-	if workers == 0 {
-		return
+	_ = m.SyncContext(context.Background(), func(_ context.Context, account *Account) error {
+		return syncer(account)
+	})
+}
+
+func (m *Manager) SyncContext(ctx context.Context, syncer ContextSyncFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	wgPool := pool.New().WithMaxGoroutines(workers)
-	m.accounts.Range(func(key string, acc *Account) bool {
-		wgPool.Go(func() {
-			if err := syncer(acc); err != nil {
-				m.logger.Error().Err(err).Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Failed to sync account")
+	accounts := m.All()
+	var wg sync.WaitGroup
+	errorsCh := make(chan error, len(accounts))
+	for _, acc := range accounts {
+		wg.Go(func() {
+			if err := syncer(ctx, acc); err != nil {
+				if ctx.Err() == nil {
+					m.logger.Error().Err(err).Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Failed to sync account")
+				}
+				errorsCh <- err
+				return
+			}
+			if ctx.Err() != nil {
+				errorsCh <- ctx.Err()
 				return
 			}
 			// Check if account has expired
@@ -419,9 +459,14 @@ func (m *Manager) Sync(syncer SyncFunc) {
 			}
 			m.UpdateAccount(acc)
 		})
-		return true
-	})
-	wgPool.Wait()
+	}
+	wg.Wait()
+	close(errorsCh)
+	var syncErr error
+	for err := range errorsCh {
+		syncErr = errors.Join(syncErr, err)
+	}
+	return errors.Join(syncErr, ctx.Err())
 }
 
 func (m *Manager) UpdateAccount(updatedAccount *Account) {

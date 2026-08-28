@@ -46,6 +46,29 @@ func awaitProviderCall(ctx context.Context, call func() error) error {
 	}
 }
 
+func syncProviderAccounts(ctx context.Context, client debrid.Client) error {
+	if contextual, ok := client.(debrid.ContextAccountSyncer); ok {
+		return contextual.SyncAccountsContext(ctx)
+	}
+	return awaitProviderCall(ctx, func() error {
+		client.SyncAccounts()
+		return nil
+	})
+}
+
+func refreshProviderDownloadLinks(ctx context.Context, client debrid.Client) error {
+	if contextual, ok := client.(debrid.ContextDownloadLinkRefresher); ok {
+		return contextual.RefreshDownloadLinksContext(ctx)
+	}
+	return awaitProviderCall(ctx, client.RefreshDownloadLinks)
+}
+
+func (m *Manager) syncDebridAccounts(ctx context.Context, debridName string, client debrid.Client) {
+	if err := syncProviderAccounts(ctx, client); err != nil && ctx.Err() == nil {
+		m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to sync accounts")
+	}
+}
+
 func (m *Manager) syncAccounts(ctx context.Context) {
 	// Sync accounts for all debrids
 	m.clients.Range(func(debridName string, debridClient debrid.Client) bool {
@@ -55,10 +78,7 @@ func (m *Manager) syncAccounts(ctx context.Context) {
 		if debridClient == nil {
 			return true
 		}
-		_ = awaitProviderCall(ctx, func() error {
-			debridClient.SyncAccounts()
-			return nil
-		})
+		m.syncDebridAccounts(ctx, debridName, debridClient)
 		return ctx.Err() == nil
 	})
 }
@@ -209,7 +229,7 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 		} else {
 			jobName := debridName + "-account-syncTorrents"
 			if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
-				debridClient.SyncAccounts()
+				m.syncDebridAccounts(ctx, debridName, debridClient)
 			}), gocron.WithContext(ctx), gocron.WithName(jobName)); err != nil {
 				m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to create account syncTorrents job")
 			} else {

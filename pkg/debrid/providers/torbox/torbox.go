@@ -65,6 +65,8 @@ type Torbox struct {
 }
 
 var _ common.ContextTorrentLister = (*Torbox)(nil)
+var _ common.ContextDownloadLinkRefresher = (*Torbox)(nil)
+var _ common.ContextAccountSyncer = (*Torbox)(nil)
 
 func New(
 	dc config.Debrid,
@@ -977,7 +979,16 @@ func (tb *Torbox) fetchDownloadLinks(account *account.Account) ([]types.Download
 }
 
 func (tb *Torbox) RefreshDownloadLinks() error {
-	return tb.accountsManager.RefreshLinks(tb.fetchDownloadLinks)
+	return tb.RefreshDownloadLinksContext(context.Background())
+}
+
+func (tb *Torbox) RefreshDownloadLinksContext(ctx context.Context) error {
+	return tb.accountsManager.RefreshLinksContext(ctx, func(ctx context.Context, account *account.Account) ([]types.DownloadLink, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return tb.fetchDownloadLinks(account)
+	})
 }
 
 func (tb *Torbox) CheckFile(ctx context.Context, infohash, link string) error {
@@ -1090,7 +1101,16 @@ func (tb *Torbox) syncAccount(account *account.Account) error {
 }
 
 func (tb *Torbox) SyncAccounts() {
-	tb.accountsManager.Sync(tb.syncAccount)
+	_ = tb.SyncAccountsContext(context.Background())
+}
+
+func (tb *Torbox) SyncAccountsContext(ctx context.Context) error {
+	return tb.accountsManager.SyncContext(ctx, func(ctx context.Context, account *account.Account) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return tb.syncAccount(account)
+	})
 }
 
 func (tb *Torbox) deleteDownloadLink(account *account.Account, downloadLink types.DownloadLink) error {

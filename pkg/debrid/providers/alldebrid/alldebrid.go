@@ -42,6 +42,8 @@ type AllDebrid struct {
 }
 
 var _ common.ContextTorrentLister = (*AllDebrid)(nil)
+var _ common.ContextDownloadLinkRefresher = (*AllDebrid)(nil)
+var _ common.ContextAccountSyncer = (*AllDebrid)(nil)
 
 const (
 	allDebridFileTreeMaxDepth = 64
@@ -622,7 +624,16 @@ func (ad *AllDebrid) fetchDownloadLinks(account *account.Account) ([]types.Downl
 }
 
 func (ad *AllDebrid) RefreshDownloadLinks() error {
-	return ad.accountsManager.RefreshLinks(ad.fetchDownloadLinks)
+	return ad.RefreshDownloadLinksContext(context.Background())
+}
+
+func (ad *AllDebrid) RefreshDownloadLinksContext(ctx context.Context) error {
+	return ad.accountsManager.RefreshLinksContext(ctx, func(ctx context.Context, account *account.Account) ([]types.DownloadLink, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return ad.fetchDownloadLinks(account)
+	})
 }
 
 func (ad *AllDebrid) CheckFile(ctx context.Context, _, link string) error {
@@ -734,7 +745,16 @@ func (ad *AllDebrid) syncAccount(account *account.Account) error {
 }
 
 func (ad *AllDebrid) SyncAccounts() {
-	ad.accountsManager.Sync(ad.syncAccount)
+	_ = ad.SyncAccountsContext(context.Background())
+}
+
+func (ad *AllDebrid) SyncAccountsContext(ctx context.Context) error {
+	return ad.accountsManager.SyncContext(ctx, func(ctx context.Context, account *account.Account) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return ad.syncAccount(account)
+	})
 }
 
 func (ad *AllDebrid) deleteLink(account *account.Account, downloadLink types.DownloadLink) error {

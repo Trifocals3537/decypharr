@@ -68,6 +68,8 @@ type RealDebrid struct {
 }
 
 var _ common.ContextTorrentLister = (*RealDebrid)(nil)
+var _ common.ContextDownloadLinkRefresher = (*RealDebrid)(nil)
+var _ common.ContextAccountSyncer = (*RealDebrid)(nil)
 
 func New(
 	dc config.Debrid,
@@ -224,11 +226,6 @@ func (r *RealDebrid) doPut(endpoint string, body []byte, contentType string, res
 	}
 
 	return resp, nil
-}
-
-// doGetWithClient performs a GET using a specific client
-func (r *RealDebrid) doGetWithClient(client *request.Client, fullURL string, queryParams map[string]string, result any) (*http.Response, error) {
-	return r.doGetWithClientContext(context.Background(), client, fullURL, queryParams, result)
 }
 
 func (r *RealDebrid) doGetWithClientContext(ctx context.Context, client *request.Client, fullURL string, queryParams map[string]string, result any) (*http.Response, error) {
@@ -1222,16 +1219,27 @@ func (r *RealDebrid) GetTorrentsContext(ctx context.Context) ([]*types.Torrent, 
 }
 
 func (r *RealDebrid) RefreshDownloadLinks() error {
-	return r.accountsManager.RefreshLinks(r.fetchDownloadLinks)
+	return r.RefreshDownloadLinksContext(context.Background())
 }
 
-func (r *RealDebrid) fetchDownloadLinks(acc *account.Account) ([]types.DownloadLink, error) {
-	return collectRealDebridDownloadLinks(func(offset, limit int) ([]types.DownloadLink, error) {
-		return r._getDownloadLinks(acc, offset, limit)
+func (r *RealDebrid) RefreshDownloadLinksContext(ctx context.Context) error {
+	return r.accountsManager.RefreshLinksContext(ctx, r.fetchDownloadLinksContext)
+}
+
+func (r *RealDebrid) fetchDownloadLinksContext(ctx context.Context, acc *account.Account) ([]types.DownloadLink, error) {
+	return collectRealDebridDownloadLinksContext(ctx, func(offset, limit int) ([]types.DownloadLink, error) {
+		return r.getDownloadLinksContext(ctx, acc, offset, limit)
 	})
 }
 
 func collectRealDebridDownloadLinks(
+	fetch func(offset, limit int) ([]types.DownloadLink, error),
+) ([]types.DownloadLink, error) {
+	return collectRealDebridDownloadLinksContext(context.Background(), fetch)
+}
+
+func collectRealDebridDownloadLinksContext(
+	ctx context.Context,
 	fetch func(offset, limit int) ([]types.DownloadLink, error),
 ) ([]types.DownloadLink, error) {
 	if fetch == nil {
@@ -1241,6 +1249,9 @@ func collectRealDebridDownloadLinks(
 	offset := 0
 	seenIDs := make(map[string]int, realDebridDownloadListPageSize)
 	for page := 0; page < realDebridDownloadListMaxPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		batchLinks, err := fetch(
 			offset,
 			realDebridDownloadListPageSize,
@@ -1263,6 +1274,9 @@ func collectRealDebridDownloadLinks(
 			)
 		}
 		for _, link := range batchLinks {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			id := strings.TrimSpace(link.Id)
 			if id == "" {
 				return nil, fmt.Errorf(
@@ -1300,7 +1314,7 @@ func collectRealDebridDownloadLinks(
 	)
 }
 
-func (r *RealDebrid) _getDownloadLinks(acc *account.Account, offset int, limit int) ([]types.DownloadLink, error) {
+func (r *RealDebrid) getDownloadLinksContext(ctx context.Context, acc *account.Account, offset int, limit int) ([]types.DownloadLink, error) {
 	var data []DownloadsResponse
 
 	queryParams := map[string]string{
@@ -1310,7 +1324,7 @@ func (r *RealDebrid) _getDownloadLinks(acc *account.Account, offset int, limit i
 		queryParams["offset"] = fmt.Sprintf("%d", offset)
 	}
 
-	resp, err := r.doGetWithClient(acc.Client(), fmt.Sprintf("%s/downloads", r.Host), queryParams, &data)
+	resp, err := r.doGetWithClientContext(ctx, acc.Client(), fmt.Sprintf("%s/downloads", r.Host), queryParams, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -1319,6 +1333,9 @@ func (r *RealDebrid) _getDownloadLinks(acc *account.Account, offset int, limit i
 	}
 	links := make([]types.DownloadLink, 0)
 	for _, d := range data {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		links = append(links, types.DownloadLink{
 			Debrid:       r.config.Name,
 			Token:        acc.Token,
@@ -1336,10 +1353,6 @@ func (r *RealDebrid) _getDownloadLinks(acc *account.Account, offset int, limit i
 
 func (r *RealDebrid) Config() config.Debrid {
 	return r.config
-}
-
-func (r *RealDebrid) getClientProfile(client *request.Client) (*types.Profile, error) {
-	return r.getClientProfileContext(context.Background(), client)
 }
 
 func (r *RealDebrid) getClientProfileContext(ctx context.Context, client *request.Client) (*types.Profile, error) {
@@ -1411,14 +1424,18 @@ func (r *RealDebrid) AccountManager() *account.Manager {
 }
 
 func (r *RealDebrid) SyncAccounts() {
-	r.accountsManager.Sync(r.syncAccount)
+	_ = r.SyncAccountsContext(context.Background())
 }
 
-func (r *RealDebrid) syncAccount(acc *account.Account) error {
+func (r *RealDebrid) SyncAccountsContext(ctx context.Context) error {
+	return r.accountsManager.SyncContext(ctx, r.syncAccountContext)
+}
+
+func (r *RealDebrid) syncAccountContext(ctx context.Context, acc *account.Account) error {
 	if acc.Token == "" {
 		return fmt.Errorf("account %s has no token", acc.Username)
 	}
-	profile, err := r.getClientProfile(acc.Client())
+	profile, err := r.getClientProfileContext(ctx, acc.Client())
 	if err != nil {
 		return fmt.Errorf("error syncing account %s: %w", acc.Username, err)
 	}
@@ -1426,8 +1443,11 @@ func (r *RealDebrid) syncAccount(acc *account.Account) error {
 	acc.Expiration = profile.Expiration
 
 	var trafficData TrafficResponse
-	trafficResp, err := r.doGetWithClient(acc.Client(), fmt.Sprintf("%s/traffic/details", r.Host), nil, &trafficData)
+	trafficResp, err := r.doGetWithClientContext(ctx, acc.Client(), fmt.Sprintf("%s/traffic/details", r.Host), nil, &trafficData)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return nil
 	}
 	if trafficResp.StatusCode != http.StatusOK {

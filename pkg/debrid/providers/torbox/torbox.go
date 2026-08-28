@@ -69,6 +69,7 @@ var _ common.ContextDownloadLinkRefresher = (*Torbox)(nil)
 var _ common.ContextAccountSyncer = (*Torbox)(nil)
 var _ common.ContextMagnetSubmitter = (*Torbox)(nil)
 var _ common.ContextStatusChecker = (*Torbox)(nil)
+var _ common.ContextDownloadLinkResolver = (*Torbox)(nil)
 
 func New(
 	dc config.Debrid,
@@ -582,14 +583,15 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (tb *Torbox) loadDownloadPresent() error {
-	return tb.loadDownloadPresentBounded(
+func (tb *Torbox) loadDownloadPresentContext(ctx context.Context) error {
+	return tb.loadDownloadPresentBoundedContext(
+		ctx,
 		torboxTorrentListMaxPages,
 		torboxTorrentListMaxItems,
 	)
 }
 
-func (tb *Torbox) loadDownloadPresentBounded(maxPages, maxItems int) error {
+func (tb *Torbox) loadDownloadPresentBoundedContext(ctx context.Context, maxPages, maxItems int) error {
 	if maxPages <= 0 || maxItems <= 0 {
 		return fmt.Errorf("torbox download-present list bounds must be positive")
 	}
@@ -597,8 +599,11 @@ func (tb *Torbox) loadDownloadPresentBounded(maxPages, maxItems int) error {
 	offset := 0
 	present := make(map[string]bool)
 	for page := 0; page < maxPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var res TorrentsListResponse
-		resp, err := tb.doGet("/api/torrents/mylist", map[string]string{"offset": fmt.Sprintf("%d", offset)}, &res)
+		resp, err := tb.doGetContext(ctx, "/api/torrents/mylist", map[string]string{"offset": fmt.Sprintf("%d", offset)}, &res)
 		if err != nil {
 			return fmt.Errorf(
 				"torbox download-present page %d at offset %d: %w",
@@ -792,7 +797,18 @@ func (tb *Torbox) GetDownloadLink(id string, file *types.File) (types.DownloadLi
 	return tb.accountsManager.GetDownloadLink(id, file, tb.fetchDownloadLink)
 }
 
+func (tb *Torbox) GetDownloadLinkContext(ctx context.Context, id string, file *types.File) (types.DownloadLink, error) {
+	return tb.accountsManager.GetDownloadLinkContext(ctx, id, file, tb.fetchDownloadLinkContext)
+}
+
 func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	return tb.fetchDownloadLinkContext(context.Background(), account, id, file)
+}
+
+func (tb *Torbox) fetchDownloadLinkContext(ctx context.Context, account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	if err := ctx.Err(); err != nil {
+		return types.DownloadLink{}, err
+	}
 	query := url.Values{}
 	query.Set("token", account.Token)
 	query.Set("torrent_id", id)
@@ -1023,9 +1039,16 @@ func (tb *Torbox) RefreshDownloadLinksContext(ctx context.Context) error {
 }
 
 func (tb *Torbox) CheckFile(ctx context.Context, infohash, link string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tb.downloadPresentMu.Lock()
+	if err := ctx.Err(); err != nil {
+		tb.downloadPresentMu.Unlock()
+		return err
+	}
 	if !tb.downloadPresentLoaded {
-		if err := tb.loadDownloadPresent(); err != nil {
+		if err := tb.loadDownloadPresentContext(ctx); err != nil {
 			tb.downloadPresentMu.Unlock()
 			return err
 		}

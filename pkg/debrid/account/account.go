@@ -1,6 +1,7 @@
 package account
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,18 @@ func (a *Account) sliceFileLink(fileLink string) string {
 }
 
 func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
+	return a.GetDownloadLinkContext(context.Background(), id, file, func(_ context.Context, account *Account, id string, file *types.File) (types.DownloadLink, error) {
+		return fetcher(account, id, file)
+	})
+}
+
+func (a *Account) GetDownloadLinkContext(ctx context.Context, id string, file *types.File, fetcher ContextLinkFetcher) (types.DownloadLink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return types.DownloadLink{}, err
+	}
 	slicedLink := a.sliceFileLink(file.Link)
 	dl, ok := a.links.Load(slicedLink)
 	if ok && dl.NeedsRefresh(time.Now()) {
@@ -59,8 +72,11 @@ func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetch
 	}
 	if !ok {
 		var err error
-		dl, err = fetcher(a, id, file)
+		dl, err = fetcher(ctx, a, id, file)
 		if err != nil {
+			return dl, err
+		}
+		if err := ctx.Err(); err != nil {
 			return dl, err
 		}
 		a.storeLink(dl)

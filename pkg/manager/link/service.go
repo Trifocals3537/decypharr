@@ -31,6 +31,7 @@ const (
 	refreshBackoffBase    = 30 * time.Second
 	refreshBackoffMax     = 5 * time.Minute
 	maxRefreshBackoffs    = 4096
+	sharedLinkTimeout     = 2 * time.Minute
 )
 
 var (
@@ -325,10 +326,10 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 	})
 }
 
-// doLinkFlight keeps one provider lifecycle operation running independently of
-// any individual HTTP/FUSE caller. Each waiter may still leave immediately when
-// its own request is canceled, but that cancellation cannot poison playback for
-// callers sharing the same link resolution or refresh.
+// doLinkFlight keeps one bounded provider lifecycle operation running
+// independently of any individual HTTP/FUSE caller. Each waiter may still
+// leave immediately when its own request is canceled, but that cancellation
+// cannot poison playback for callers sharing the same resolution or refresh.
 func doLinkFlight(
 	ctx context.Context,
 	group *singleflight.Group,
@@ -340,7 +341,9 @@ func doLinkFlight(
 	}
 
 	result := group.DoChan(key, func() (any, error) {
-		return work(context.WithoutCancel(ctx))
+		sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sharedLinkTimeout)
+		defer cancel()
+		return work(sharedCtx)
 	})
 	select {
 	case <-ctx.Done():
@@ -527,7 +530,7 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 	}
 
 	// This uses account-level caching internally
-	downloadLink, err := client.GetDownloadLink(placement.ID, debridFile)
+	downloadLink, err := debrid.ResolveDownloadLink(ctx, client, placement.ID, debridFile)
 	if err != nil {
 		var unavailable *accountpkg.UnavailableError
 		if errors.As(err, &unavailable) {

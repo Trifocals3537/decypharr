@@ -19,7 +19,27 @@ import (
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"golang.org/x/sync/singleflight"
 )
+
+func TestDoLinkFlightBoundsSharedWork(t *testing.T) {
+	t.Parallel()
+	var group singleflight.Group
+	before := time.Now()
+	_, err := doLinkFlight(context.Background(), &group, "bounded", func(ctx context.Context) (types.DownloadLink, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return types.DownloadLink{}, errors.New("shared link context has no deadline")
+		}
+		if deadline.After(before.Add(sharedLinkTimeout + time.Second)) {
+			return types.DownloadLink{}, fmt.Errorf("shared link deadline %s exceeds timeout", deadline)
+		}
+		return types.DownloadLink{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 type lifecycleTestClient struct {
 	debrid.Client

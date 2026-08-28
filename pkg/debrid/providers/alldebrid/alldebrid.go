@@ -46,6 +46,7 @@ var _ common.ContextDownloadLinkRefresher = (*AllDebrid)(nil)
 var _ common.ContextAccountSyncer = (*AllDebrid)(nil)
 var _ common.ContextMagnetSubmitter = (*AllDebrid)(nil)
 var _ common.ContextStatusChecker = (*AllDebrid)(nil)
+var _ common.ContextDownloadLinkResolver = (*AllDebrid)(nil)
 
 const (
 	allDebridFileTreeMaxDepth = 64
@@ -109,6 +110,10 @@ func (ad *AllDebrid) Logger() zerolog.Logger {
 }
 
 func (ad *AllDebrid) doAccountRequest(account *account.Account, endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
+	return ad.doAccountRequestContext(context.Background(), account, endpoint, queryParams, result)
+}
+
+func (ad *AllDebrid) doAccountRequestContext(ctx context.Context, account *account.Account, endpoint string, queryParams map[string]string, result any) (*http.Response, error) {
 	u, err := url.Parse(ad.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -122,13 +127,16 @@ func (ad *AllDebrid) doAccountRequest(account *account.Account, endpoint string,
 		u.RawQuery = q.Encode()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := account.Client().Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		// The query can contain a signed provider URL. net/http errors include
 		// the complete request URL, so do not wrap or stringify them here.
 		return nil, fmt.Errorf("alldebrid request to %s failed", endpoint)
@@ -564,9 +572,13 @@ func (ad *AllDebrid) DeleteTorrent(torrentId string) error {
 }
 
 func (ad *AllDebrid) fetchDownloadLink(account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	return ad.fetchDownloadLinkContext(context.Background(), account, id, file)
+}
+
+func (ad *AllDebrid) fetchDownloadLinkContext(ctx context.Context, account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
 	var data DownloadLink
 
-	resp, err := ad.doAccountRequest(account, "/link/unlock", map[string]string{"link": file.Link}, &data)
+	resp, err := ad.doAccountRequestContext(ctx, account, "/link/unlock", map[string]string{"link": file.Link}, &data)
 	if err != nil {
 		return types.DownloadLink{}, err
 	}
@@ -599,6 +611,10 @@ func (ad *AllDebrid) fetchDownloadLink(account *account.Account, id string, file
 
 func (ad *AllDebrid) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	return ad.accountsManager.GetDownloadLink(id, file, ad.fetchDownloadLink)
+}
+
+func (ad *AllDebrid) GetDownloadLinkContext(ctx context.Context, id string, file *types.File) (types.DownloadLink, error) {
+	return ad.accountsManager.GetDownloadLinkContext(ctx, id, file, ad.fetchDownloadLinkContext)
 }
 
 func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {

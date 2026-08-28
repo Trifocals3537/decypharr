@@ -44,6 +44,8 @@ type AllDebrid struct {
 var _ common.ContextTorrentLister = (*AllDebrid)(nil)
 var _ common.ContextDownloadLinkRefresher = (*AllDebrid)(nil)
 var _ common.ContextAccountSyncer = (*AllDebrid)(nil)
+var _ common.ContextMagnetSubmitter = (*AllDebrid)(nil)
+var _ common.ContextStatusChecker = (*AllDebrid)(nil)
 
 const (
 	allDebridFileTreeMaxDepth = 64
@@ -171,6 +173,9 @@ func (ad *AllDebrid) doRequestContext(ctx context.Context, endpoint string, quer
 
 	resp, err := ad.client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		// Magnet and unlock parameters can contain credentials or signed URLs.
 		return nil, fmt.Errorf("alldebrid request to %s failed", endpoint)
 	}
@@ -194,7 +199,7 @@ func (ad *AllDebrid) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
-func (ad *AllDebrid) doPostFile(endpoint string, fileData []byte, result any) (*http.Response, error) {
+func (ad *AllDebrid) doPostFileContext(ctx context.Context, endpoint string, fileData []byte, result any) (*http.Response, error) {
 	u, err := url.Parse(ad.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -209,9 +214,11 @@ func (ad *AllDebrid) doPostFile(endpoint string, fileData []byte, result any) (*
 	if _, err = part.Write(fileData); err != nil {
 		return nil, err
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
 
-	req, err := http.NewRequest(http.MethodPost, u.String(), &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), &body)
 	if err != nil {
 		return nil, err
 	}
@@ -232,16 +239,26 @@ func (ad *AllDebrid) doPostFile(endpoint string, fileData []byte, result any) (*
 }
 
 func (ad *AllDebrid) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
-	if torrent.Magnet.IsTorrent() {
-		return ad.addTorrentFile(torrent)
-	}
-	return ad.addMagnetLink(torrent)
+	return ad.SubmitMagnetContext(context.Background(), torrent)
 }
 
-func (ad *AllDebrid) addTorrentFile(torrent *types.Torrent) (*types.Torrent, error) {
+func (ad *AllDebrid) SubmitMagnetContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if torrent == nil || torrent.Magnet == nil {
+		return nil, fmt.Errorf("missing torrent magnet")
+	}
+	if torrent.Magnet.IsTorrent() {
+		return ad.addTorrentFileContext(ctx, torrent)
+	}
+	return ad.addMagnetLinkContext(ctx, torrent)
+}
+
+func (ad *AllDebrid) addTorrentFileContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
 	var data UploadFileResponse
 
-	resp, err := ad.doPostFile("/magnet/upload/file", torrent.Magnet.File, &data)
+	resp, err := ad.doPostFileContext(ctx, "/magnet/upload/file", torrent.Magnet.File, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -263,10 +280,10 @@ func (ad *AllDebrid) addTorrentFile(torrent *types.Torrent) (*types.Torrent, err
 	return torrent, nil
 }
 
-func (ad *AllDebrid) addMagnetLink(torrent *types.Torrent) (*types.Torrent, error) {
+func (ad *AllDebrid) addMagnetLinkContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
 	var data UploadMagnetResponse
 
-	resp, err := ad.doRequest("/magnet/upload", map[string]string{"magnets[]": torrent.Magnet.Link}, &data)
+	resp, err := ad.doRequestContext(ctx, "/magnet/upload", map[string]string{"magnets[]": torrent.Magnet.Link}, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -429,9 +446,13 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 }
 
 func (ad *AllDebrid) updateTorrent(t *types.Torrent) (int, error) {
+	return ad.updateTorrentContext(context.Background(), t)
+}
+
+func (ad *AllDebrid) updateTorrentContext(ctx context.Context, t *types.Torrent) (int, error) {
 	var res TorrentInfoResponse
 
-	resp, err := ad.doRequest("/magnet/status", map[string]string{"id": t.Id}, &res)
+	resp, err := ad.doRequestContext(ctx, "/magnet/status", map[string]string{"id": t.Id}, &res)
 	if err != nil {
 		return 0, err
 	}
@@ -484,8 +505,18 @@ func findMagnet(magnets Magnets, torrentId string) (magnetInfo, error) {
 }
 
 func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
+	return ad.CheckStatusContext(context.Background(), torrent)
+}
+
+func (ad *AllDebrid) CheckStatusContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return torrent, err
+	}
+	if torrent == nil {
+		return nil, fmt.Errorf("torrent is nil")
+	}
 	for {
-		statusCode, err := ad.updateTorrent(torrent)
+		statusCode, err := ad.updateTorrentContext(ctx, torrent)
 
 		if err != nil || torrent == nil {
 			return torrent, err
@@ -505,7 +536,7 @@ func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error)
 				return torrent, customerror.NewTorrentNotCachedError(torrent.Name)
 			}
 			if statusCode == allDebridStatusNotDownloaded {
-				return ad.recoverNotDownloadedTorrent(torrent)
+				return ad.recoverNotDownloadedTorrentContext(ctx, torrent)
 			}
 			ad.clearMagnetRestart(torrent.Id)
 			return torrent, newAllDebridStatusError(torrent.Name, statusCode)

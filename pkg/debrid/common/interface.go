@@ -49,3 +49,15 @@ type ContextDownloadLinkRefresher interface {
 type ContextAccountSyncer interface {
 	SyncAccountsContext(context.Context) error
 }
+
+// ContextMagnetSubmitter is the optional cancellation-aware torrent submission
+// capability used by imports and repairs.
+type ContextMagnetSubmitter interface {
+	SubmitMagnetContext(context.Context, *types.Torrent) (*types.Torrent, error)
+}
+
+// ContextStatusChecker is the optional cancellation-aware initial torrent
+// status capability used immediately after submission and by queue workers.
+type ContextStatusChecker interface {
+	CheckStatusContext(context.Context, *types.Torrent) (*types.Torrent, error)
+}

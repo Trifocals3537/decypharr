@@ -53,6 +53,8 @@ type DebridLink struct {
 var _ common.ContextTorrentLister = (*DebridLink)(nil)
 var _ common.ContextDownloadLinkRefresher = (*DebridLink)(nil)
 var _ common.ContextAccountSyncer = (*DebridLink)(nil)
+var _ common.ContextMagnetSubmitter = (*DebridLink)(nil)
+var _ common.ContextStatusChecker = (*DebridLink)(nil)
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink, error) {
 	cfg := config.Get()
@@ -282,12 +284,16 @@ func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
 }
 
 func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
+	return dl.updateTorrentContext(context.Background(), t)
+}
+
+func (dl *DebridLink) updateTorrentContext(ctx context.Context, t *types.Torrent) error {
 	if t == nil || strings.TrimSpace(t.Id) == "" {
 		return fmt.Errorf("torrent ID is missing")
 	}
 	var res torrentInfo
 
-	resp, err := dl.doGet("/seedbox/list", map[string]string{"ids": t.Id}, &res)
+	resp, err := dl.doGetContext(ctx, "/seedbox/list", map[string]string{"ids": t.Id}, &res)
 	if err != nil {
 		return err
 	}
@@ -348,7 +354,14 @@ func debridLinkTorrentStatus(status int) types.TorrentStatus {
 }
 
 func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
-	req, err := dl.newSubmitRequest(t)
+	return dl.SubmitMagnetContext(context.Background(), t)
+}
+
+func (dl *DebridLink) SubmitMagnetContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	req, err := dl.newSubmitRequestContext(ctx, t)
 	if err != nil {
 		return nil, err
 	}
@@ -382,6 +395,10 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 }
 
 func (dl *DebridLink) newSubmitRequest(t *types.Torrent) (*http.Request, error) {
+	return dl.newSubmitRequestContext(context.Background(), t)
+}
+
+func (dl *DebridLink) newSubmitRequestContext(ctx context.Context, t *types.Torrent) (*http.Request, error) {
 	if t == nil || t.Magnet == nil {
 		return nil, fmt.Errorf("torrent source is missing")
 	}
@@ -407,7 +424,7 @@ func (dl *DebridLink) newSubmitRequest(t *types.Torrent) (*http.Request, error) 
 			return nil, fmt.Errorf("finish torrent upload: %w", err)
 		}
 
-		req, err := http.NewRequest(http.MethodPost, dl.Host+"/seedbox/add", &body)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, dl.Host+"/seedbox/add", &body)
 		if err != nil {
 			return nil, err
 		}
@@ -422,7 +439,7 @@ func (dl *DebridLink) newSubmitRequest(t *types.Torrent) (*http.Request, error) 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodPost, dl.Host+"/seedbox/add", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dl.Host+"/seedbox/add", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -465,8 +482,18 @@ func closeDebridLinkResponse(body io.ReadCloser) {
 }
 
 func (dl *DebridLink) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
+	return dl.CheckStatusContext(context.Background(), torrent)
+}
+
+func (dl *DebridLink) CheckStatusContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return torrent, err
+	}
+	if torrent == nil {
+		return nil, fmt.Errorf("torrent is nil")
+	}
 	for {
-		err := dl.UpdateTorrent(torrent)
+		err := dl.updateTorrentContext(ctx, torrent)
 		if err != nil || torrent == nil {
 			return torrent, err
 		}

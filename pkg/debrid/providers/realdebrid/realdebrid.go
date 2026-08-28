@@ -70,6 +70,8 @@ type RealDebrid struct {
 var _ common.ContextTorrentLister = (*RealDebrid)(nil)
 var _ common.ContextDownloadLinkRefresher = (*RealDebrid)(nil)
 var _ common.ContextAccountSyncer = (*RealDebrid)(nil)
+var _ common.ContextMagnetSubmitter = (*RealDebrid)(nil)
+var _ common.ContextStatusChecker = (*RealDebrid)(nil)
 
 func New(
 	dc config.Debrid,
@@ -145,12 +147,16 @@ func (r *RealDebrid) Logger() zerolog.Logger {
 
 // doGet performs a GET request using the main client
 func (r *RealDebrid) doGet(endpoint string, result any) (*http.Response, error) {
+	return r.doGetContext(context.Background(), endpoint, result)
+}
+
+func (r *RealDebrid) doGetContext(ctx context.Context, endpoint string, result any) (*http.Response, error) {
 	u, err := url.Parse(r.Host + endpoint)
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +176,13 @@ func (r *RealDebrid) doGet(endpoint string, result any) (*http.Response, error) 
 	return resp, nil
 }
 
-// doPost performs a POST request with form data
-func (r *RealDebrid) doPostForm(endpoint string, formData map[string]string, result any) (*http.Response, error) {
+func (r *RealDebrid) doPostFormContext(ctx context.Context, endpoint string, formData map[string]string, result any) (*http.Response, error) {
 	form := url.Values{}
 	for k, v := range formData {
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, r.Host+endpoint, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.Host+endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -198,14 +203,13 @@ func (r *RealDebrid) doPostForm(endpoint string, formData map[string]string, res
 	return resp, nil
 }
 
-// doPut performs a PUT request with body
-func (r *RealDebrid) doPut(endpoint string, body []byte, contentType string, result any) (*http.Response, error) {
+func (r *RealDebrid) doPutContext(ctx context.Context, endpoint string, body []byte, contentType string, result any) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequest(http.MethodPut, r.Host+endpoint, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, r.Host+endpoint, bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -631,16 +635,26 @@ func (r *RealDebrid) IsAvailable(hashes []string) map[string]bool {
 }
 
 func (r *RealDebrid) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
-	if t.Magnet.IsTorrent() {
-		return r.addTorrent(t)
-	}
-	return r.addMagnet(t)
+	return r.SubmitMagnetContext(context.Background(), t)
 }
 
-func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
+func (r *RealDebrid) SubmitMagnetContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if t == nil || t.Magnet == nil {
+		return nil, fmt.Errorf("missing torrent magnet")
+	}
+	if t.Magnet.IsTorrent() {
+		return r.addTorrentContext(ctx, t)
+	}
+	return r.addMagnetContext(ctx, t)
+}
+
+func (r *RealDebrid) addTorrentContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	var data AddMagnetSchema
 
-	resp, err := r.doPut("/torrents/addTorrent", t.Magnet.File, "application/x-bittorrent", &data)
+	resp, err := r.doPutContext(ctx, "/torrents/addTorrent", t.Magnet.File, "application/x-bittorrent", &data)
 	if err != nil {
 		return nil, err
 	}
@@ -662,11 +676,11 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
+func (r *RealDebrid) addMagnetContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	var data AddMagnetSchema
 
 	formData := map[string]string{"magnet": t.Magnet.Link}
-	resp, err := r.doPostForm("/torrents/addMagnet", formData, &data)
+	resp, err := r.doPostFormContext(ctx, "/torrents/addMagnet", formData, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -779,12 +793,28 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 }
 
 func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
+	return r.CheckStatusContext(context.Background(), t)
+}
+
+func (r *RealDebrid) CheckStatusContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return t, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("torrent is nil")
+	}
 	for {
-		time.Sleep(2 * time.Second)
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return t, ctx.Err()
+		case <-timer.C:
+		}
 
 		var data torrentInfo
 
-		resp, err := r.doGet(fmt.Sprintf("/torrents/info/%s", t.Id), &data)
+		resp, err := r.doGetContext(ctx, fmt.Sprintf("/torrents/info/%s", t.Id), &data)
 		if err != nil {
 			r.logger.Info().Msgf("ERROR Checking file: %v", err)
 			return t, err
@@ -828,7 +858,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 			}
 
 			selectURL := fmt.Sprintf("/torrents/selectFiles/%s", t.Id)
-			selectResp, err := r.doPostForm(selectURL, map[string]string{"files": strings.Join(filesId, ",")}, nil)
+			selectResp, err := r.doPostFormContext(ctx, selectURL, map[string]string{"files": strings.Join(filesId, ",")}, nil)
 			if err != nil {
 				return t, err
 			}

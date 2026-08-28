@@ -67,6 +67,8 @@ type Torbox struct {
 var _ common.ContextTorrentLister = (*Torbox)(nil)
 var _ common.ContextDownloadLinkRefresher = (*Torbox)(nil)
 var _ common.ContextAccountSyncer = (*Torbox)(nil)
+var _ common.ContextMagnetSubmitter = (*Torbox)(nil)
+var _ common.ContextStatusChecker = (*Torbox)(nil)
 
 func New(
 	dc config.Debrid,
@@ -206,7 +208,8 @@ func (tb *Torbox) doGetContextBounded(
 }
 
 // doPostForm performs a POST request with form data
-func (tb *Torbox) doPostForm(
+func (tb *Torbox) doPostFormContext(
+	ctx context.Context,
 	endpoint string,
 	formData map[string]string,
 	result any,
@@ -217,7 +220,6 @@ func (tb *Torbox) doPostForm(
 		form.Set(k, v)
 	}
 
-	ctx := context.Background()
 	if len(operations) > 0 && operations[0] != providertraffic.OperationNone {
 		ctx = providertraffic.WithOperation(ctx, operations[0])
 	}
@@ -242,7 +244,8 @@ func (tb *Torbox) doPostForm(
 	return resp, nil
 }
 
-func (tb *Torbox) doPostTorrentFile(
+func (tb *Torbox) doPostTorrentFileContext(
+	ctx context.Context,
 	endpoint string,
 	fileData []byte,
 	addOnlyIfCached bool,
@@ -274,7 +277,6 @@ func (tb *Torbox) doPostTorrentFile(
 		return nil, fmt.Errorf("finish torrent upload: %w", err)
 	}
 
-	ctx := context.Background()
 	if operation != providertraffic.OperationNone {
 		ctx = providertraffic.WithOperation(ctx, operation)
 	}
@@ -373,12 +375,16 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 // results, which is useful for bulk lookup but cannot tell callers whether an
 // absent key means "not cached" or "the request failed".
 func (tb *Torbox) isCached(hash string) (cached bool, known bool) {
+	return tb.isCachedContext(context.Background(), hash)
+}
+
+func (tb *Torbox) isCachedContext(ctx context.Context, hash string) (cached bool, known bool) {
 	if strings.TrimSpace(hash) == "" {
 		return false, false
 	}
 
 	var res AvailableResponse
-	resp, err := tb.doGet("/api/torrents/checkcached", map[string]string{
+	resp, err := tb.doGetContext(ctx, "/api/torrents/checkcached", map[string]string{
 		"hash":       hash,
 		"format":     "object",
 		"list_files": "false",
@@ -415,6 +421,13 @@ func (tb *Torbox) isCached(hash string) (cached bool, known bool) {
 }
 
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+	return tb.SubmitMagnetContext(context.Background(), torrent)
+}
+
+func (tb *Torbox) SubmitMagnetContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if torrent == nil || torrent.Magnet == nil {
 		return nil, fmt.Errorf("missing torrent magnet")
 	}
@@ -425,7 +438,7 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		// causing the request client's timeout and retry policy to turn a cheap
 		// refusal into minutes of latency. Probe first, but only act on a
 		// trustworthy answer so a provider outage cannot become a false miss.
-		if cached, known := tb.isCached(torrent.InfoHash); known && !cached {
+		if cached, known := tb.isCachedContext(ctx, torrent.InfoHash); known && !cached {
 			return nil, customerror.NewTorrentNotCachedError(torrent.Name)
 		}
 	}
@@ -439,7 +452,8 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		err  error
 	)
 	if torrent.Magnet.IsTorrent() {
-		resp, err = tb.doPostTorrentFile(
+		resp, err = tb.doPostTorrentFileContext(
+			ctx,
 			"/api/torrents/createtorrent",
 			torrent.Magnet.File,
 			!torrent.DownloadUncached,
@@ -451,7 +465,7 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		if !torrent.DownloadUncached {
 			formData["add_only_if_cached"] = "true"
 		}
-		resp, err = tb.doPostForm("/api/torrents/createtorrent", formData, &data, operation)
+		resp, err = tb.doPostFormContext(ctx, "/api/torrents/createtorrent", formData, &data, operation)
 	}
 	if err != nil {
 		return nil, err
@@ -640,9 +654,16 @@ func (tb *Torbox) loadDownloadPresentBounded(maxPages, maxItems int) error {
 }
 
 func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
+	return tb.updateTorrentContext(context.Background(), t)
+}
+
+func (tb *Torbox) updateTorrentContext(ctx context.Context, t *types.Torrent) error {
+	if t == nil {
+		return fmt.Errorf("torrent is nil")
+	}
 	var res InfoResponse
 
-	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{"id": t.Id}, &res)
+	resp, err := tb.doGetContext(ctx, "/api/torrents/mylist", map[string]string{"id": t.Id}, &res)
 	if err != nil {
 		return err
 	}
@@ -708,8 +729,18 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 }
 
 func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
+	return tb.CheckStatusContext(context.Background(), torrent)
+}
+
+func (tb *Torbox) CheckStatusContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return torrent, err
+	}
+	if torrent == nil {
+		return nil, fmt.Errorf("torrent is nil")
+	}
 	for {
-		err := tb.UpdateTorrent(torrent)
+		err := tb.updateTorrentContext(ctx, torrent)
 
 		if err != nil || torrent == nil {
 			return torrent, err

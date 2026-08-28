@@ -7,6 +7,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
+	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 // runInitialCalls performs any initial calls of worker functions
@@ -44,6 +45,40 @@ func awaitProviderCall(ctx context.Context, call func() error) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func submitProviderMagnet(ctx context.Context, client debrid.Client, torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return torrent, err
+	}
+	if contextual, ok := client.(debrid.ContextMagnetSubmitter); ok {
+		return contextual.SubmitMagnetContext(ctx, torrent)
+	}
+	result, err := client.SubmitMagnet(torrent)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return result, ctxErr
+	}
+	return result, err
+}
+
+func checkProviderStatus(ctx context.Context, client debrid.Client, torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return torrent, err
+	}
+	if contextual, ok := client.(debrid.ContextStatusChecker); ok {
+		return contextual.CheckStatusContext(ctx, torrent)
+	}
+	result, err := client.CheckStatus(torrent)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return result, ctxErr
+	}
+	return result, err
 }
 
 func syncProviderAccounts(ctx context.Context, client debrid.Client) error {

@@ -130,7 +130,7 @@ func (f *Fixer) FixTorrent(
 		// Force a fresh submit only for the broken active provider; for any other
 		// debrid, let MoveTorrent reuse an existing valid placement if present.
 		reinsert := debridName == entry.ActiveProvider
-		success, err := f.MoveTorrent(entry, debridName, reinsert)
+		success, err := f.MoveTorrentContext(ctx, entry, debridName, reinsert)
 		totalAttempts++
 
 		if success {
@@ -221,6 +221,18 @@ func (r *FixerRequest) complete(result *FixResult, err error) {
 
 // MoveTorrent attempts to re-insert a torrent on a specific debrid
 func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bool) (bool, error) {
+	return f.MoveTorrentContext(context.Background(), entry, debridName, reinsert)
+}
+
+// MoveTorrentContext attempts to re-insert a torrent on a specific debrid and
+// stops provider work when its repair request is canceled.
+func (f *Fixer) MoveTorrentContext(ctx context.Context, entry *storage.Entry, debridName string, reinsert bool) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	// Check if entry can be moved
 	if entry == nil {
 		return false, fmt.Errorf("entry is nil")
@@ -275,7 +287,7 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 		DownloadUncached: false,
 	}
 
-	newDebridTorrent, err = client.SubmitMagnet(newDebridTorrent)
+	newDebridTorrent, err = submitProviderMagnet(ctx, client, newDebridTorrent)
 	if err != nil {
 		submitErr := fmt.Errorf("failed to submit magnet: %w", err)
 		if newDebridTorrent != nil && newDebridTorrent.Id != "" {
@@ -310,7 +322,7 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 
 	// Check status
 	newDebridTorrent.DownloadUncached = false
-	newDebridTorrent, err = client.CheckStatus(newDebridTorrent)
+	newDebridTorrent, err = checkProviderStatus(ctx, client, newDebridTorrent)
 	if err != nil {
 		rollbackID := submittedID
 		if newDebridTorrent != nil && newDebridTorrent.Id != "" {

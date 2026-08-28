@@ -43,6 +43,8 @@ var _ common.Client = (*Premiumize)(nil)
 var _ common.ContextTorrentLister = (*Premiumize)(nil)
 var _ common.ContextDownloadLinkRefresher = (*Premiumize)(nil)
 var _ common.ContextAccountSyncer = (*Premiumize)(nil)
+var _ common.ContextMagnetSubmitter = (*Premiumize)(nil)
+var _ common.ContextStatusChecker = (*Premiumize)(nil)
 
 type Premiumize struct {
 	Host                  string `json:"host"`
@@ -162,22 +164,29 @@ func (pm *Premiumize) doForm(ctx context.Context, method, apiPath string, values
 }
 
 func (pm *Premiumize) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
-	if t.Magnet == nil {
+	return pm.SubmitMagnetContext(context.Background(), t)
+}
+
+func (pm *Premiumize) SubmitMagnetContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if t == nil || t.Magnet == nil {
 		return nil, fmt.Errorf("missing magnet")
 	}
 	if t.Magnet.IsTorrent() {
-		return pm.addTorrent(t)
+		return pm.addTorrentContext(ctx, t)
 	}
-	return pm.addMagnet(t)
+	return pm.addMagnetContext(ctx, t)
 }
 
-func (pm *Premiumize) addMagnet(t *types.Torrent) (*types.Torrent, error) {
+func (pm *Premiumize) addMagnetContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	src := t.Magnet.Link
 	if src == "" && t.InfoHash != "" {
 		src = utils.ConstructMagnet(t.InfoHash, t.Name).Link
 	}
 	var data transferCreateResponse
-	_, err := pm.doForm(context.Background(), http.MethodPost, "/api/transfer/create", url.Values{"src": {src}}, &data)
+	_, err := pm.doForm(ctx, http.MethodPost, "/api/transfer/create", url.Values{"src": {src}}, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +194,7 @@ func (pm *Premiumize) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (pm *Premiumize) addTorrent(t *types.Torrent) (*types.Torrent, error) {
+func (pm *Premiumize) addTorrentContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("src", cmp.Or(t.Filename, t.Magnet.Name, "upload.torrent"))
@@ -199,7 +208,7 @@ func (pm *Premiumize) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, pm.endpoint("/api/transfer/create"), &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pm.endpoint("/api/transfer/create"), &body)
 	if err != nil {
 		return nil, err
 	}
@@ -227,11 +236,22 @@ func (pm *Premiumize) applySubmittedTorrent(t *types.Torrent, data transferCreat
 }
 
 func (pm *Premiumize) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
-	return pm.UpdateAndReturnTorrent(t)
+	return pm.CheckStatusContext(context.Background(), t)
+}
+
+func (pm *Premiumize) CheckStatusContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return t, err
+	}
+	return pm.updateAndReturnTorrentContext(ctx, t)
 }
 
 func (pm *Premiumize) UpdateAndReturnTorrent(t *types.Torrent) (*types.Torrent, error) {
-	if err := pm.UpdateTorrent(t); err != nil {
+	return pm.updateAndReturnTorrentContext(context.Background(), t)
+}
+
+func (pm *Premiumize) updateAndReturnTorrentContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
+	if err := pm.updateTorrentContext(ctx, t); err != nil {
 		return t, err
 	}
 	if t.Status == types.TorrentStatusDownloaded {
@@ -260,13 +280,20 @@ func (pm *Premiumize) GetTorrent(torrentID string) (*types.Torrent, error) {
 }
 
 func (pm *Premiumize) UpdateTorrent(t *types.Torrent) error {
-	transfers, err := pm.listTransfers()
+	return pm.updateTorrentContext(context.Background(), t)
+}
+
+func (pm *Premiumize) updateTorrentContext(ctx context.Context, t *types.Torrent) error {
+	if t == nil {
+		return fmt.Errorf("torrent is nil")
+	}
+	transfers, err := pm.listTransfersContext(ctx)
 	if err != nil {
 		return err
 	}
 	for _, tr := range transfers {
 		if tr.ID == t.Id {
-			updated, err := pm.transferToTorrent(tr, t.InfoHash)
+			updated, err := pm.transferToTorrentContext(ctx, tr, t.InfoHash)
 			if err != nil {
 				return err
 			}

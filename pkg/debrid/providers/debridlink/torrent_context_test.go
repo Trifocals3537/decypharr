@@ -27,3 +27,16 @@ func TestMaintenanceContextRejectsCanceledContext(t *testing.T) {
 		t.Fatalf("SyncAccountsContext() error = %v, want context.Canceled", err)
 	}
 }
+
+func TestSubmissionContextRejectsCanceledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	provider := &DebridLink{}
+	if _, err := provider.SubmitMagnetContext(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SubmitMagnetContext() error = %v, want context.Canceled", err)
+	}
+	if _, err := provider.CheckStatusContext(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CheckStatusContext() error = %v, want context.Canceled", err)
+	}
+}

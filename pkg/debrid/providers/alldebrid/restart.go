@@ -1,6 +1,7 @@
 package alldebrid
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,7 +69,7 @@ func newAllDebridStatusError(name string, statusCode int) error {
 	)
 }
 
-func (ad *AllDebrid) recoverNotDownloadedTorrent(torrent *types.Torrent) (*types.Torrent, error) {
+func (ad *AllDebrid) recoverNotDownloadedTorrentContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
 	attempt, decision := ad.planMagnetRestart(torrent.Id)
 	switch decision {
 	case magnetRestartExhausted:
@@ -77,7 +78,7 @@ func (ad *AllDebrid) recoverNotDownloadedTorrent(torrent *types.Torrent) (*types
 		torrent.Status = types.TorrentStatusDownloading
 		return torrent, nil
 	case magnetRestartExecute:
-		if err := ad.restartMagnet(torrent.Id); err != nil {
+		if err := ad.restartMagnetContext(ctx, torrent.Id); err != nil {
 			ad.logger.Warn().
 				Err(err).
 				Str("torrent_id", torrent.Id).
@@ -155,13 +156,18 @@ func (ad *AllDebrid) evictOldestMagnetRestartLocked() {
 }
 
 func (ad *AllDebrid) restartMagnet(torrentID string) error {
+	return ad.restartMagnetContext(context.Background(), torrentID)
+}
+
+func (ad *AllDebrid) restartMagnetContext(ctx context.Context, torrentID string) error {
 	numericID, err := strconv.Atoi(torrentID)
 	if err != nil || numericID <= 0 {
 		return fmt.Errorf("invalid AllDebrid torrent ID")
 	}
 
 	form := url.Values{"id": {torrentID}}
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		http.MethodPost,
 		allDebridRestartEndpoint(ad.Host),
 		strings.NewReader(form.Encode()),
@@ -173,6 +179,9 @@ func (ad *AllDebrid) restartMagnet(torrentID string) error {
 
 	resp, err := ad.client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("AllDebrid magnet restart request failed")
 	}
 	defer func() {

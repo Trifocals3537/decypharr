@@ -359,7 +359,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		DownloadUncached: entry.DownloadUncached,
 	}
 
-	dbT, err := client.CheckStatus(debridTorrent)
+	dbT, err := checkProviderStatus(ctx, client, debridTorrent)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
@@ -534,6 +534,9 @@ func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridType
 
 // SendToDebrid submits a magnet to debrid service(s) - replaces debrid.Parse
 func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest) (*debridTypes.Torrent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := m.validateTorrentImportRequest(importRequest); err != nil {
 		return nil, err
 	}
@@ -551,6 +554,9 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 	errs := make([]error, 0, len(clients))
 
 	for _, db := range clients {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		providerConfig := db.Config()
 		providerName := providerConfig.Name
 		if providerName == "" {
@@ -596,7 +602,13 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			Str("Action", string(importRequest.Action)).
 			Msg("Processing torrent")
 
-		dbt, err := db.SubmitMagnet(debridTorrent)
+		dbt, err := submitProviderMagnet(ctx, db, debridTorrent)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if dbt != nil && dbt.Id != "" {
+				ctxErr = errors.Join(ctxErr, m.deleteProviderTorrent(db, dbt.Id))
+			}
+			return nil, ctxErr
+		}
 		if err != nil || dbt == nil || dbt.Id == "" {
 			if err == nil {
 				err = fmt.Errorf("provider returned an incomplete submission response")
@@ -614,7 +626,14 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		dbt.Arr = importRequest.Arr
 		_logger.Info().Str("id", dbt.Id).Msgf("Entry: %s submitted to %s", dbt.Name, providerName)
 
-		torrent, err := db.CheckStatus(dbt)
+		torrent, err := checkProviderStatus(ctx, db, dbt)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			rollbackID := dbt.Id
+			if torrent != nil && torrent.Id != "" {
+				rollbackID = torrent.Id
+			}
+			return nil, errors.Join(ctxErr, m.deleteProviderTorrent(db, rollbackID))
+		}
 		if err != nil {
 			m.recordSubmissionRejection(
 				providerName,

@@ -17,6 +17,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 func TestDoRecognizesRedactedAPIErrorEnvelopeWithoutOutput(t *testing.T) {
@@ -96,6 +97,45 @@ func TestCheckFileItemDetailsHonorsContextCancellation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("CheckFile did not return after context cancellation")
+	}
+}
+
+func TestFinishedTransferWithPendingLinksIsNotRejectedAsUncached(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/transfer/list":
+			_, _ = w.Write([]byte(`{"status":"success","transfers":[{"id":"transfer-1","name":"Movie","status":"finished","progress":1,"file_id":"item-1"}]}`))
+		case "/api/item/details":
+			// Premiumize has created the item but has not populated its signed
+			// link yet. A later queue pass will see the link once it is ready.
+			_, _ = w.Write([]byte(`{"status":"success","id":"item-1","name":"Movie.mkv","size":1234,"link":""}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := &Premiumize{
+		Host:   server.URL,
+		client: request.New(request.WithMaxRetries(0)),
+		config: config.Debrid{Name: "premiumize-main"},
+	}
+	torrent := &types.Torrent{
+		Id:               "transfer-1",
+		Name:             "Movie",
+		DownloadUncached: false,
+	}
+
+	got, err := client.CheckStatusContext(context.Background(), torrent)
+	if err != nil {
+		t.Fatalf("CheckStatusContext() error = %v, want pending readiness without an uncached rejection", err)
+	}
+	if got.Status != types.TorrentStatusDownloading {
+		t.Fatalf("torrent status = %q, want downloading until links are ready", got.Status)
+	}
+	if len(got.Files) != 0 {
+		t.Fatalf("torrent files = %#v, want no usable files before Premiumize supplies a link", got.Files)
 	}
 }
 

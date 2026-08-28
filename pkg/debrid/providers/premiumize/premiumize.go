@@ -252,10 +252,18 @@ func (pm *Premiumize) UpdateAndReturnTorrent(t *types.Torrent) (*types.Torrent, 
 }
 
 func (pm *Premiumize) updateAndReturnTorrentContext(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
-	if err := pm.updateTorrentContext(ctx, t); err != nil {
+	providerFinished, err := pm.updateTorrentContext(ctx, t)
+	if err != nil {
 		return t, err
 	}
 	if t.Status == types.TorrentStatusDownloaded {
+		return t, nil
+	}
+	if providerFinished {
+		// Premiumize can finish the transfer before item/folder links are
+		// populated. This provider-side eventual consistency is not evidence
+		// that a cached-only grab was uncached. Keep it in the manager's status
+		// queue until transferToTorrentContext observes usable links.
 		return t, nil
 	}
 	if t.Status == types.TorrentStatusDownloading || t.Status == types.TorrentStatusQueued {
@@ -281,22 +289,23 @@ func (pm *Premiumize) GetTorrent(torrentID string) (*types.Torrent, error) {
 }
 
 func (pm *Premiumize) UpdateTorrent(t *types.Torrent) error {
-	return pm.updateTorrentContext(context.Background(), t)
+	_, err := pm.updateTorrentContext(context.Background(), t)
+	return err
 }
 
-func (pm *Premiumize) updateTorrentContext(ctx context.Context, t *types.Torrent) error {
+func (pm *Premiumize) updateTorrentContext(ctx context.Context, t *types.Torrent) (bool, error) {
 	if t == nil {
-		return fmt.Errorf("torrent is nil")
+		return false, fmt.Errorf("torrent is nil")
 	}
 	transfers, err := pm.listTransfersContext(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, tr := range transfers {
 		if tr.ID == t.Id {
 			updated, err := pm.transferToTorrentContext(ctx, tr, t.InfoHash)
 			if err != nil {
-				return err
+				return false, err
 			}
 			t.Name = updated.Name
 			t.Filename = updated.Filename
@@ -309,10 +318,10 @@ func (pm *Premiumize) updateTorrentContext(ctx context.Context, t *types.Torrent
 			t.Links = updated.Links
 			t.Debrid = updated.Debrid
 			t.InfoHash = cmp.Or(updated.InfoHash, t.InfoHash)
-			return nil
+			return mapStatus(tr.Status) == types.TorrentStatusDownloaded, nil
 		}
 	}
-	return customerror.TorrentNotFoundError
+	return false, customerror.TorrentNotFoundError
 }
 
 func (pm *Premiumize) DeleteTorrent(torrentID string) error {

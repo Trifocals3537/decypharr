@@ -92,6 +92,59 @@ func TestApplyDebridTorrentPreservesCollisionSafeLogicalNamesAndPaths(t *testing
 	}
 }
 
+func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
+	entry := &storage.Entry{
+		InfoHash:       "late-provider-links",
+		Status:         debridTypes.TorrentStatusDownloaded,
+		Files:          make(map[string]*storage.File),
+		Providers:      make(map[string]*storage.ProviderEntry),
+		ActiveProvider: "premiumize-main",
+	}
+	remote := &debridTypes.Torrent{
+		Id:       "transfer-1",
+		InfoHash: entry.InfoHash,
+		Name:     "Movie",
+		Debrid:   "premiumize-main",
+		Status:   debridTypes.TorrentStatusDownloaded,
+		Files:    make(map[string]debridTypes.File),
+	}
+
+	if applyCompletedTorrentFiles(entry, remote) {
+		t.Fatal("applyCompletedTorrentFiles() = ready before provider links exist")
+	}
+	if entry.Status != debridTypes.TorrentStatusDownloading {
+		t.Fatalf("entry status = %q, want downloading while provider links are pending", entry.Status)
+	}
+
+	pendingFile := debridTypes.File{
+		Id:   "item-1",
+		Name: "Movie.mkv",
+		Path: "Movie.mkv",
+		Size: 1234,
+	}
+	remote.Files["Movie.mkv"] = pendingFile
+	if applyCompletedTorrentFiles(entry, remote) {
+		t.Fatal("applyCompletedTorrentFiles() = ready for a provider file without a link")
+	}
+	if len(entry.Files) != 0 {
+		t.Fatalf("canonical files = %#v, want partial provider tree kept out", entry.Files)
+	}
+
+	pendingFile.Link = "https://provider.example/media"
+	remote.Files["Movie.mkv"] = pendingFile
+	if !applyCompletedTorrentFiles(entry, remote) {
+		t.Fatal("applyCompletedTorrentFiles() = not ready after provider link appeared")
+	}
+	managed := entry.Files["Movie.mkv"]
+	placement := entry.Providers["premiumize-main"]
+	if managed == nil || managed.Path != "Movie.mkv" || managed.Size != 1234 {
+		t.Fatalf("managed file = %#v, want recovered file metadata", managed)
+	}
+	if placement == nil || placement.Files["Movie.mkv"] == nil || placement.Files["Movie.mkv"].Link == "" {
+		t.Fatalf("provider placement = %#v, want recovered provider link", placement)
+	}
+}
+
 func TestTorrentFileLayoutsRejectTraversalAliasesAndAmbiguousBasenames(t *testing.T) {
 	tests := []struct {
 		name  string

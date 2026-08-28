@@ -413,12 +413,21 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		placement.Progress = entry.Progress
 	}
 
-	_ = m.queue.Update(entry)
-	// Check if done or failed
+	// Check if done or failed.
 	if debridTorrent.Status == debridTypes.TorrentStatusDownloaded {
+		if !applyCompletedTorrentFiles(entry, debridTorrent) {
+			if err := m.queue.Update(entry); err != nil {
+				return err
+			}
+			m.logger.Debug().
+				Str("debrid", debridTorrent.Debrid).
+				Str("name", debridTorrent.Name).
+				Msg("Provider completed transfer before file links were ready; keeping entry queued")
+			return nil
+		}
 		return m.processAction(ctx, entry)
 	}
-	return nil
+	return m.queue.Update(entry)
 }
 
 func (m *Manager) processAction(ctx context.Context, entry *storage.Entry) error {
@@ -484,30 +493,56 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Entry,
 	}
 	// Update status to submitting
 	torrent.UpdatedAt = time.Now()
-	applyDebridTorrentToEntry(torrent, debridTorrent)
-	if err := m.queue.Update(torrent); err != nil {
-		return err
-	}
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
+		applyDebridTorrentToEntry(torrent, debridTorrent)
+		if err := m.queue.Update(torrent); err != nil {
+			return err
+		}
 		m.logger.Info().
 			Str("debrid", debridTorrent.Debrid).
 			Str("name", debridTorrent.Name).
 			Msg("Started downloading torrent")
 		return nil
 	}
+	if !applyCompletedTorrentFiles(torrent, debridTorrent) {
+		// Keep the entry in the existing cancellation-aware queue lifecycle. A
+		// later provider status check will apply the completed file snapshot
+		// above instead of permanently failing an otherwise healthy grab.
+		torrent.Status = debridTypes.TorrentStatusDownloading
+		if err := m.queue.Update(torrent); err != nil {
+			return err
+		}
+		m.logger.Debug().
+			Str("debrid", debridTorrent.Debrid).
+			Str("name", debridTorrent.Name).
+			Msg("Provider completed transfer before file links were ready; keeping entry queued")
+		return nil
+	}
 
 	return m.processAction(ctx, torrent)
 }
 
+// applyCompletedTorrentFiles reconciles the authoritative provider snapshot
+// into an entry and reports whether every provider file has a usable link. A
+// completed transfer with an empty or partially populated file tree is an
+// eventual-consistency state, not a completed Decypharr entry. Partial trees
+// update provider state but never leak into the canonical file map.
+func applyCompletedTorrentFiles(entry *storage.Entry, torrent *debridTypes.Torrent) bool {
+	if entry == nil || torrent == nil || torrent.Status != debridTypes.TorrentStatusDownloaded {
+		return false
+	}
+	if !isComplete(torrent.Files) {
+		applyDebridTorrentState(entry, torrent)
+		entry.Status = debridTypes.TorrentStatusDownloading
+		return false
+	}
+	applyDebridTorrentToEntry(entry, torrent)
+	return true
+}
+
 func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {
-	_ = torrent.AddTorrentProvider(debridTorrent)
-	torrent.ActiveProvider = debridTorrent.Debrid
-	torrent.Bytes = debridTorrent.GetSize()
-	torrent.Size = debridTorrent.GetSize()
-	torrent.Name = debridTorrent.Name
-	torrent.OriginalFilename = debridTorrent.OriginalFilename
-	torrent.UpdatedAt = time.Now()
+	applyDebridTorrentState(torrent, debridTorrent)
 
 	for _, file := range debridTorrent.Files {
 		tFile := &storage.File{
@@ -521,6 +556,16 @@ func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridType
 		}
 		torrent.Files[file.Name] = tFile
 	}
+}
+
+func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {
+	_ = torrent.AddTorrentProvider(debridTorrent)
+	torrent.ActiveProvider = debridTorrent.Debrid
+	torrent.Bytes = debridTorrent.GetSize()
+	torrent.Size = debridTorrent.GetSize()
+	torrent.Name = debridTorrent.Name
+	torrent.OriginalFilename = debridTorrent.OriginalFilename
+	torrent.UpdatedAt = time.Now()
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
 		return

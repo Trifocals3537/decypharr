@@ -72,6 +72,7 @@ var _ common.ContextDownloadLinkRefresher = (*RealDebrid)(nil)
 var _ common.ContextAccountSyncer = (*RealDebrid)(nil)
 var _ common.ContextMagnetSubmitter = (*RealDebrid)(nil)
 var _ common.ContextStatusChecker = (*RealDebrid)(nil)
+var _ common.ContextDownloadLinkResolver = (*RealDebrid)(nil)
 
 func New(
 	dc config.Debrid,
@@ -267,13 +268,13 @@ func (r *RealDebrid) doGetWithClientContext(ctx context.Context, client *request
 }
 
 // doPostFormWithClient performs a POST with form data using a specific client
-func (r *RealDebrid) doPostFormWithClient(client *request.Client, fullURL string, formData map[string]string, result any, errorResult any) (*http.Response, error) {
+func (r *RealDebrid) doPostFormWithClientContext(ctx context.Context, client *request.Client, fullURL string, formData map[string]string, result any, errorResult any) (*http.Response, error) {
 	form := url.Values{}
 	for k, v := range formData {
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -1014,7 +1015,7 @@ func (r *RealDebrid) CheckFile(ctx context.Context, infohash, link string) error
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, r.Host+"/unrestrict/check", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.Host+"/unrestrict/check", strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -1034,6 +1035,10 @@ func (r *RealDebrid) CheckFile(ctx context.Context, infohash, link string) error
 }
 
 func (r *RealDebrid) fetchDownloadLink(account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	return r.fetchDownloadLinkContext(context.Background(), account, id, file)
+}
+
+func (r *RealDebrid) fetchDownloadLinkContext(ctx context.Context, account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
 	emptyLink := types.DownloadLink{}
 	link := file.Link
 	if strings.HasPrefix(file.Link, "https://real-debrid.com/d/") && len(file.Link) > 39 {
@@ -1044,7 +1049,7 @@ func (r *RealDebrid) fetchDownloadLink(account *account.Account, id string, file
 	var errResp ErrorResponse
 	var data UnrestrictResponse
 
-	resp, err := r.doPostFormWithClient(account.Client(), fmt.Sprintf("%s/unrestrict/link/", r.Host), formData, &data, &errResp)
+	resp, err := r.doPostFormWithClientContext(ctx, account.Client(), fmt.Sprintf("%s/unrestrict/link/", r.Host), formData, &data, &errResp)
 	if err != nil {
 		return emptyLink, err
 	}
@@ -1077,6 +1082,10 @@ func (r *RealDebrid) fetchDownloadLink(account *account.Account, id string, file
 
 func (r *RealDebrid) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	return r.accountsManager.GetDownloadLink(id, file, r.fetchDownloadLink)
+}
+
+func (r *RealDebrid) GetDownloadLinkContext(ctx context.Context, id string, file *types.File) (types.DownloadLink, error) {
+	return r.accountsManager.GetDownloadLinkContext(ctx, id, file, r.fetchDownloadLinkContext)
 }
 
 func (r *RealDebrid) getTorrentsContext(ctx context.Context, offset int, limit int) (int, int, []*types.Torrent, error) {

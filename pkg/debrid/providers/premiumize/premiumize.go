@@ -45,6 +45,7 @@ var _ common.ContextDownloadLinkRefresher = (*Premiumize)(nil)
 var _ common.ContextAccountSyncer = (*Premiumize)(nil)
 var _ common.ContextMagnetSubmitter = (*Premiumize)(nil)
 var _ common.ContextStatusChecker = (*Premiumize)(nil)
+var _ common.ContextDownloadLinkResolver = (*Premiumize)(nil)
 
 type Premiumize struct {
 	Host                  string `json:"host"`
@@ -487,10 +488,6 @@ func (pm *Premiumize) filesForTransferContext(ctx context.Context, tr premiumize
 	return make(map[string]types.File), links, false, nil
 }
 
-func (pm *Premiumize) itemDetails(id string) (*itemDetailsResponse, error) {
-	return pm.itemDetailsContext(context.Background(), id)
-}
-
 func (pm *Premiumize) itemDetailsContext(ctx context.Context, id string) (*itemDetailsResponse, error) {
 	var data itemDetailsResponse
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pm.endpoint("/api/item/details?id="+url.QueryEscape(id)), nil)
@@ -626,11 +623,22 @@ func (pm *Premiumize) GetDownloadLink(id string, file *types.File) (types.Downlo
 }
 
 func (pm *Premiumize) fetchDownloadLink(acc *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	return pm.fetchDownloadLinkContext(context.Background(), acc, id, file)
+}
+
+func (pm *Premiumize) GetDownloadLinkContext(ctx context.Context, id string, file *types.File) (types.DownloadLink, error) {
+	return pm.accountsManager.GetDownloadLinkContext(ctx, id, file, pm.fetchDownloadLinkContext)
+}
+
+func (pm *Premiumize) fetchDownloadLinkContext(ctx context.Context, acc *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	if err := ctx.Err(); err != nil {
+		return types.DownloadLink{}, err
+	}
 	link := file.Link
 	size := file.Size
 	filename := file.Name
 	if link == "" && file.Id != "" {
-		item, err := pm.itemDetails(file.Id)
+		item, err := pm.itemDetailsContext(ctx, file.Id)
 		if err != nil {
 			return types.DownloadLink{}, err
 		}
@@ -676,6 +684,9 @@ func (pm *Premiumize) CheckFile(ctx context.Context, infohash, fileID string) er
 		}
 		resp, err := pm.client.Do(req)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			// net/http errors contain the complete signed provider URL.
 			return fmt.Errorf("premiumize link check request failed")
 		}

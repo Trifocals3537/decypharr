@@ -21,6 +21,7 @@ import (
 )
 
 type LinkFetcher func(account *Account, id string, file *types.File) (types.DownloadLink, error)
+type ContextLinkFetcher func(context.Context, *Account, string, *types.File) (types.DownloadLink, error)
 type LinkDeleter func(account *Account, dl types.DownloadLink) error
 type LinksFetcher func(account *Account) ([]types.DownloadLink, error)
 type ContextLinksFetcher func(context.Context, *Account) ([]types.DownloadLink, error)
@@ -249,6 +250,18 @@ func (m *Manager) GetAccount(token string) (*Account, error) {
 }
 
 func (m *Manager) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
+	return m.GetDownloadLinkContext(context.Background(), id, file, func(_ context.Context, account *Account, id string, file *types.File) (types.DownloadLink, error) {
+		return fetcher(account, id, file)
+	})
+}
+
+func (m *Manager) GetDownloadLinkContext(ctx context.Context, id string, file *types.File, fetcher ContextLinkFetcher) (types.DownloadLink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return types.DownloadLink{}, err
+	}
 	now := m.nowTime()
 	accounts := m.All()
 	if current := m.current.Load(); current != nil {
@@ -265,6 +278,9 @@ func (m *Manager) GetDownloadLink(id string, file *types.File, fetcher LinkFetch
 	var earliestRetry time.Duration
 	temporaryUnavailable := false
 	for _, acc := range accounts {
+		if err := ctx.Err(); err != nil {
+			return lastLink, err
+		}
 		acquired, probeID, retryAfter := acc.TryAcquire(now)
 		if !acquired {
 			status := acc.RecoveryStatus(now)
@@ -275,9 +291,15 @@ func (m *Manager) GetDownloadLink(id string, file *types.File, fetcher LinkFetch
 			continue
 		}
 
-		dl, err := acc.GetDownloadLink(id, file, fetcher)
+		dl, err := acc.GetDownloadLinkContext(ctx, id, file, fetcher)
 		if probeID != 0 {
 			dl.RecoveryProbeID = probeID
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if probeID != 0 {
+				m.ReleaseRecoveryProbe(acc, probeID)
+			}
+			return dl, ctxErr
 		}
 		if err == nil {
 			m.current.Store(acc)

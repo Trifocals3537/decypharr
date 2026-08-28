@@ -42,6 +42,9 @@ func TestSubmissionContextRejectsCanceledContext(t *testing.T) {
 	if _, err := provider.CheckStatusContext(ctx, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("CheckStatusContext() error = %v, want context.Canceled", err)
 	}
+	if _, err := provider.GetDownloadLinkContext(ctx, "", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetDownloadLinkContext() error = %v, want context.Canceled", err)
+	}
 }
 
 func TestCheckStatusContextCancelsInitialDelay(t *testing.T) {

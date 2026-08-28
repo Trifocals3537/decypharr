@@ -61,3 +61,28 @@ type ContextMagnetSubmitter interface {
 type ContextStatusChecker interface {
 	CheckStatusContext(context.Context, *types.Torrent) (*types.Torrent, error)
 }
+
+// ContextDownloadLinkResolver is the optional cancellation-aware playback link
+// capability used by streams and repair probes.
+type ContextDownloadLinkResolver interface {
+	GetDownloadLinkContext(context.Context, string, *types.File) (types.DownloadLink, error)
+}
+
+// ResolveDownloadLink prefers cancellation-aware providers while preserving a
+// synchronous fallback for third-party clients that implement only Client.
+func ResolveDownloadLink(ctx context.Context, client Client, id string, file *types.File) (types.DownloadLink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return types.DownloadLink{}, err
+	}
+	if contextual, ok := client.(ContextDownloadLinkResolver); ok {
+		return contextual.GetDownloadLinkContext(ctx, id, file)
+	}
+	link, err := client.GetDownloadLink(id, file)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return link, ctxErr
+	}
+	return link, err
+}

@@ -55,6 +55,7 @@ var _ common.ContextDownloadLinkRefresher = (*DebridLink)(nil)
 var _ common.ContextAccountSyncer = (*DebridLink)(nil)
 var _ common.ContextMagnetSubmitter = (*DebridLink)(nil)
 var _ common.ContextStatusChecker = (*DebridLink)(nil)
+var _ common.ContextDownloadLinkResolver = (*DebridLink)(nil)
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink, error) {
 	cfg := config.Get()
@@ -541,6 +542,13 @@ func (dl *DebridLink) DeleteTorrent(torrentId string) error {
 }
 
 func (dl *DebridLink) fetchDownloadLink(account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	return dl.fetchDownloadLinkContext(context.Background(), account, id, file)
+}
+
+func (dl *DebridLink) fetchDownloadLinkContext(ctx context.Context, account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
+	if err := ctx.Err(); err != nil {
+		return types.DownloadLink{}, err
+	}
 	now := time.Now()
 	link := types.DownloadLink{
 		Debrid:       dl.config.Name,
@@ -557,6 +565,10 @@ func (dl *DebridLink) fetchDownloadLink(account *account.Account, id string, fil
 
 func (dl *DebridLink) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	return dl.accountsManager.GetDownloadLink(id, file, dl.fetchDownloadLink)
+}
+
+func (dl *DebridLink) GetDownloadLinkContext(ctx context.Context, id string, file *types.File) (types.DownloadLink, error) {
+	return dl.accountsManager.GetDownloadLinkContext(ctx, id, file, dl.fetchDownloadLinkContext)
 }
 
 func (dl *DebridLink) GetDownloadUncached() bool {
@@ -801,6 +813,9 @@ func (dl *DebridLink) CheckFile(ctx context.Context, _, link string) error {
 
 	resp, err := dl.repairClient.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		// net/http errors contain the complete signed download URL.
 		return fmt.Errorf("debridlink file check request failed")
 	}

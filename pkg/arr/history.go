@@ -157,9 +157,6 @@ func (a *Arr) GetQueueCtx(ctx context.Context) ([]QueueSchema, error) {
 			return results, err
 		}
 		if resp.StatusCode != http.StatusOK {
-			if resp.Body != nil {
-				_ = resp.Body.Close()
-			}
 			return results, fmt.Errorf("get queue: %s", resp.Status)
 		}
 
@@ -271,6 +268,10 @@ func (a *Arr) CleanupQueueCtx(ctx context.Context) error {
 // history record for the given episode (Sonarr) or movie (Radarr). Returns
 // (0, "", nil) when no grab record is found (e.g. history trimmed, manual import).
 func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
+	return a.FindGrabHistoryIDCtx(context.Background(), mediaDBID)
+}
+
+func (a *Arr) FindGrabHistoryIDCtx(ctx context.Context, mediaDBID int) (int, string, error) {
 	if a == nil {
 		return 0, "", fmt.Errorf("arr not configured")
 	}
@@ -296,7 +297,7 @@ func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
 
 	var data HistorySchema
 	url := "api/v3/history?" + query.Encode()
-	resp, err := a.Request(http.MethodGet, url, nil, &data)
+	resp, err := a.RequestCtx(ctx, http.MethodGet, url, nil, &data)
 	if err != nil {
 		return 0, "", err
 	}
@@ -314,6 +315,10 @@ func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
 // the release in the arr and, if redownload is enabled, triggers a re-search
 // for whatever is currently missing from that grab's scope.
 func (a *Arr) MarkHistoryFailed(historyID int) error {
+	return a.MarkHistoryFailedCtx(context.Background(), historyID)
+}
+
+func (a *Arr) MarkHistoryFailedCtx(ctx context.Context, historyID int) error {
 	if a == nil {
 		return fmt.Errorf("arr not configured")
 	}
@@ -321,10 +326,11 @@ func (a *Arr) MarkHistoryFailed(historyID int) error {
 		return nil
 	}
 	url := fmt.Sprintf("api/v3/history/failed/%d", historyID)
-	resp, err := a.Request(http.MethodPost, url, nil, nil)
+	resp, err := a.RequestCtx(ctx, http.MethodPost, url, nil, nil)
 	if err != nil {
 		return err
 	}
+	defer closeArrResponse(resp)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("history/failed %d: %s", historyID, resp.Status)
 	}
@@ -355,9 +361,7 @@ func (a *Arr) removeQueueItemsCtx(ctx context.Context, items map[int]bool, block
 	if err != nil {
 		return err
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
+	defer closeArrResponse(resp)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("remove queue items: %s", resp.Status)
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	json "github.com/bytedance/sonic"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -36,10 +37,12 @@ var (
 	sharedClient *request.Client
 )
 
+const arrRequestTimeout = 2 * time.Minute
+
 func getSharedClient() *request.Client {
 	sharedOnce.Do(func() {
 		sharedClient = request.New(
-			request.WithTimeout(0),
+			request.WithTimeout(arrRequestTimeout),
 			request.WithMaxRetries(5),
 		)
 	})
@@ -118,16 +121,31 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload a
 
 	// Parse success result if provided. Stream-decode directly from the
 	// response body so large payloads (e.g. full Sonarr series lists) don't
-	// sit on the heap as raw bytes alongside the decoded object graph.
-	if res != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		defer resp.Body.Close()
-		dec := json.ConfigDefault.NewDecoder(resp.Body)
-		if err := dec.Decode(res); err != nil && err != io.EOF {
-			return resp, fmt.Errorf("failed to decode response: %w", err)
+	// sit on the heap as raw bytes alongside the decoded object graph. When a
+	// decode target is provided, RequestCtx owns the body; response-only callers
+	// receive ownership and must close it.
+	if res != nil {
+		defer closeArrResponse(resp)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			dec := json.ConfigDefault.NewDecoder(resp.Body)
+			if err := dec.Decode(res); err != nil && err != io.EOF {
+				return resp, fmt.Errorf("failed to decode response: %w", err)
+			}
 		}
 	}
 
 	return resp, nil
+}
+
+// closeArrResponse releases response-only Arr command connection slots. It
+// reads only a bounded prefix so callers do not retain large API payloads just
+// to make pooled connections reusable.
+func closeArrResponse(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.CopyN(io.Discard, resp.Body, 64<<10)
 }
 
 // Request is the no-context shim for legacy callers. Prefer RequestCtx for
@@ -148,9 +166,7 @@ func (a *Arr) Validate() error {
 	if err != nil {
 		return err
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
+	defer closeArrResponse(resp)
 	// If response is not 200 or 404(this is the case for Lidarr, etc), return an error
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("failed to validate arr %s: %s", a.Name, resp.Status)
@@ -328,9 +344,7 @@ func (a *Arr) Refresh() error {
 	if err != nil {
 		return err
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
+	defer closeArrResponse(resp)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("failed to refresh monitored downloads: %s", resp.Status)
 	}

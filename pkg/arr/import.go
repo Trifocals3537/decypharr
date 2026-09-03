@@ -172,9 +172,6 @@ func (a *Arr) ImportCtx(ctx context.Context, downloadID string) (io.ReadCloser, 
 		return nil, fmt.Errorf("failed to import: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
 		return nil, fmt.Errorf("failed to import: %s", resp.Status)
 	}
 	var files []ManualImportRequestFile
@@ -215,9 +212,7 @@ func (a *Arr) ImportCtx(ctx context.Context, downloadID string) (io.ReadCloser, 
 		return nil, fmt.Errorf("failed to import: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
+		closeArrResponse(resp)
 		return nil, fmt.Errorf("failed to import: %s", resp.Status)
 	}
 	return resp.Body, nil

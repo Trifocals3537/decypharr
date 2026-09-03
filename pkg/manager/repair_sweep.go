@@ -707,7 +707,7 @@ func (r *Repair) repairArrFiles(ctx context.Context, run *storage.RepairRun, sta
 			needSearch = append(needSearch, f)
 			continue
 		}
-		id, _, herr := a.FindGrabHistoryID(mediaID)
+		id, _, herr := a.FindGrabHistoryIDCtx(ctx, mediaID)
 		if herr != nil || id == 0 {
 			needSearch = append(needSearch, f)
 			continue
@@ -733,7 +733,7 @@ func (r *Repair) repairArrFiles(ctx context.Context, run *storage.RepairRun, sta
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
-		if err := a.MarkHistoryFailed(id); err != nil {
+		if err := a.MarkHistoryFailedCtx(ctx, id); err != nil {
 			r.logger.Warn().Err(err).Str("arr", a.Name).Int("history_id", id).Msg("Repair: MarkHistoryFailed failed")
 		}
 	}

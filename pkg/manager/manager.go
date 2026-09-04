@@ -86,6 +86,8 @@ type Manager struct {
 
 	customFolders *CustomFolders
 	mountManager  MountManager
+	cacheWarmMu   sync.Mutex
+	cacheWarmSem  chan struct{}
 
 	startTime     time.Time
 	usenetTimeout time.Duration

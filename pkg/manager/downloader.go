@@ -287,8 +287,15 @@ func (d *Downloader) processSymlink(ctx context.Context, entry *storage.Entry, m
 			probeFiles = probeFiles[:MaxNZBPreCacheFiles]
 		}
 		d.logger.Debug().Int("files", len(probeFiles)).Msgf("Warming cache for %s", entry.Name)
-		if err := d.manager.WarmFileCache(probeFiles); err != nil {
-			d.logger.Error().Msgf("Failed to warm cache: %s", err)
+		if err := d.manager.WarmFileCache(ctx, probeFiles); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, ErrCacheWarmUnavailable) {
+				d.logger.Debug().Err(err).Str("entry", entry.Name).Msg("Cache warm skipped")
+			} else {
+				d.logger.Warn().Err(err).Str("entry", entry.Name).Msg("Cache warm did not complete")
+			}
 		} else {
 			d.logger.Debug().Str("entry", entry.Name).Msgf("Warmed cache for %d/%d files", len(probeFiles), len(filePaths))
 		}
@@ -733,19 +740,14 @@ func verifySymlinkFileReady(path string) error {
 		return fmt.Errorf("path is not a symlink")
 	}
 
-	targetInfo, err := os.Stat(path)
+	target, err := os.Readlink(path)
 	if err != nil {
-		return fmt.Errorf("symlink target not available: %w", err)
+		return fmt.Errorf("symlink target cannot be read: %w", err)
 	}
-	if targetInfo.IsDir() {
-		return fmt.Errorf("symlink target is a directory")
+	if _, err := resolveSymlinkTarget(path, target); err != nil {
+		return fmt.Errorf("symlink target is invalid: %w", err)
 	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("symlink target cannot be opened: %w", err)
-	}
-	return f.Close()
+	return nil
 }
 
 func (d *Downloader) sleepUntilNextSymlinkAttempt(ctx context.Context, delay time.Duration, deadline time.Time) error {

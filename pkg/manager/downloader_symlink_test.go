@@ -201,6 +201,19 @@ func TestCreateOwnedTorrentSymlinkCanUseRelativeTarget(t *testing.T) {
 	}
 }
 
+func TestVerifySymlinkFileReadyDoesNotFollowTarget(t *testing.T) {
+	downloadRoot := t.TempDir()
+	linkPath := filepath.Join(downloadRoot, "movie.mkv")
+	missingTarget := filepath.Join(downloadRoot, "missing-target.mkv")
+	if err := os.Symlink(missingTarget, linkPath); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	if err := verifySymlinkFileReady(linkPath); err != nil {
+		t.Fatalf("verifySymlinkFileReady() error = %v, want local symlink verification only", err)
+	}
+}
+
 func requireSymlinkCapability(t *testing.T, target, directory string) {
 	t.Helper()
 	probe := filepath.Join(directory, "relative-symlink-capability-probe")

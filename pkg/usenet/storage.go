@@ -323,7 +323,7 @@ func (s *NZBStorage) DeleteNZB(id string) error {
 		return fmt.Errorf("failed to stat NZB meta file before delete: %w", statErr)
 	}
 
-	if err := removeMetadataFile(s.metaDir, path); err != nil && !os.IsNotExist(err) {
+	if err := removeMetadataFile(s.metaDir, path); err != nil {
 		return fmt.Errorf("failed to delete NZB meta file: %w", err)
 	}
 

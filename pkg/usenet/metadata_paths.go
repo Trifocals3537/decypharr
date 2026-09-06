@@ -243,6 +243,8 @@ func statMetadataFile(root, target string) (os.FileInfo, error) {
 	return info, nil
 }
 
+// removeMetadataFile durably removes an exact leaf, including retrying an
+// already-absent leaf. Root validation and sync/close failures remain errors.
 func removeMetadataFile(root, target string) error {
 	absoluteRoot, leaf, err := metadataDirectLeaf(root, target)
 	if err != nil {
@@ -252,36 +254,42 @@ func removeMetadataFile(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("open NZB metadata root: %w", err)
 	}
+	syncRoot := func() error { return syncWatchedNZBRoot(rooted) }
 	info, err := rooted.Lstat(leaf)
 	if err != nil {
-		closeErr := rooted.Close()
-		return errors.Join(err, closeErr)
+		return finishMetadataRemoval(err, syncRoot, rooted.Close)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		closeErr := rooted.Close()
-		return errors.Join(
+		return finishMetadataRemoval(
 			fmt.Errorf("NZB metadata file %q is not a regular file", target),
-			closeErr,
+			syncRoot,
+			rooted.Close,
 		)
 	}
-	removeErr := rooted.Remove(leaf)
-	if removeErr != nil {
-		closeErr := rooted.Close()
-		return errors.Join(removeErr, closeErr)
+	return finishMetadataRemoval(rooted.Remove(leaf), syncRoot, rooted.Close)
+}
+
+func finishMetadataRemoval(operationErr error, syncRoot, closeRoot func() error) error {
+	// Normalize only the leaf syscall's error before joining independent
+	// failures. An ENOENT from sync or close must never make cleanup succeed.
+	if os.IsNotExist(operationErr) {
+		operationErr = nil
 	}
-	syncErr := syncWatchedNZBRoot(rooted)
-	closeErr := rooted.Close()
-	return errors.Join(syncErr, closeErr)
+	var syncErr error
+	if operationErr == nil {
+		// Also sync an absent leaf: a prior attempt may have removed it but
+		// failed before the directory change became durable.
+		syncErr = syncRoot()
+	}
+	closeErr := closeRoot()
+	return errors.Join(operationErr, syncErr, closeErr)
 }
 
 func removeMetadataFileIfExists(root, target string) error {
 	if target == "" {
 		return nil
 	}
-	if err := removeMetadataFile(root, target); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return removeMetadataFile(root, target)
 }
 
 func renameMetadataFile(root, oldTarget, newTarget string) error {

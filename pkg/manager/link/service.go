@@ -296,7 +296,7 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 			linkErr := NewLinkError(
 				fmt.Errorf("download link refresh deferred for %s", delay.Round(time.Millisecond)),
 				CategoryThrottled,
-				"link_refresh_cooldown",
+				CodeLinkRefreshCooldown,
 			)
 			linkErr.RetryAfter = delay
 			return emptyDownloadLink, linkErr
@@ -314,6 +314,9 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 					Str("debrid", entry.ActiveProvider).
 					Str("infohash", entry.InfoHash).
 					Str("filename", rejected.Filename).
+					Str("error_code", safeRefetchLogCode(linkErr.Code)).
+					Str("error_category", linkErr.Category.String()).
+					Str("failure_scope", "download_link").
 					Int("failures", failures).
 					Dur("retry_after", delay).
 					Msg("Download link replacement was rejected; deferring provider refresh")

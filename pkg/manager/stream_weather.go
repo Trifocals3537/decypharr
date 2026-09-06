@@ -273,6 +273,11 @@ func classifyStreamProviderFailure(err error) (string, bool) {
 		return "", false
 	}
 	if linkErr := link.GetLinkError(err); linkErr != nil {
+		// Retry policy and provider-health evidence are separate: this delay
+		// suppresses refresh work for one file without observing a new failure.
+		if linkErr.Code == link.CodeLinkRefreshCooldown {
+			return "local_cooldown", false
+		}
 		switch linkErr.Category {
 		case link.CategoryThrottled:
 			return "throttled", true

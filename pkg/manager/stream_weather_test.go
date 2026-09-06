@@ -83,10 +83,17 @@ func TestProviderWeatherOnlyCountsProviderWideFailures(t *testing.T) {
 	}{
 		{name: "503", err: retryableStreamFailure(), class: "upstream_status", count: true},
 		{name: "429", err: StreamError{Err: link.ErrorCodeToLinkError("429"), Retryable: true}, class: "throttled", count: true},
+		{name: "local refresh cooldown", err: localRefreshCooldownError(), class: "local_cooldown"},
+		{name: "wrapped local refresh cooldown", err: StreamError{Err: localRefreshCooldownError(), Retryable: true}, class: "local_cooldown"},
+		{name: "account cooldown", err: link.NewLinkError(link.ErrNoActiveAccount, link.CategoryThrottled, "account_cooldown"), class: "throttled", count: true},
+		{name: "account pressure", err: link.NewAccountError(link.ErrBandwidthExceeded, "bandwidth_exceeded"), class: "account_issue", count: true},
 		{name: "connection", err: StreamError{Err: errors.New("connection reset by peer"), Retryable: true}, class: "connection", count: true},
 		{name: "stale link", err: StreamError{Err: link.ErrorCodeToLinkError("404"), LinkError: true}, class: "refetchable"},
 		{name: "range", err: StreamError{Err: link.ClassifyHTTPStatus(http.StatusRequestedRangeNotSatisfiable, nil)}, class: "permanent"},
 		{name: "cancel", err: context.Canceled},
+		{name: "deadline", err: context.DeadlineExceeded},
+		{name: "wrapped cancel", err: link.NewLinkError(context.Canceled, link.CategoryThrottled, "link_refresh_cooldown")},
+		{name: "wrapped deadline", err: link.NewLinkError(context.DeadlineExceeded, link.CategoryThrottled, "link_refresh_cooldown")},
 		{name: "internal", err: errors.New("bad state"), class: "internal"},
 	}
 	for _, test := range tests {

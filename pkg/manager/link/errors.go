@@ -11,6 +11,10 @@ import (
 // ErrorCategory defines the type of link error and its retry behavior
 type ErrorCategory int
 
+// CodeLinkRefreshCooldown identifies local, per-file refresh suppression, not
+// an observed provider throttle. It still uses the normal backoff semantics.
+const CodeLinkRefreshCooldown = "link_refresh_cooldown"
+
 const (
 	// CategoryPermanent - Don't retry (file deleted, unauthorized)
 	CategoryPermanent ErrorCategory = iota
@@ -46,8 +50,8 @@ func (c ErrorCategory) String() string {
 type Error struct {
 	Err        error
 	Category   ErrorCategory
-	Code       string        // Error code from provider (e.g., "bandwidth_exceeded", "404")
-	RetryAfter time.Duration // server-requested delay for throttled responses
+	Code       string        // Stable code from a provider or local link policy
+	RetryAfter time.Duration // delay from a throttled response or local cooldown
 }
 
 // Error implements the error interface
@@ -229,4 +233,18 @@ func GetLinkError(err error) *Error {
 		return linkErr
 	}
 	return nil
+}
+
+// safeRefetchLogCode permits only known rejection codes, never arbitrary
+// provider text that might contain signed links or account credentials.
+func safeRefetchLogCode(code string) string {
+	switch code {
+	case "400", "401", "403", "404", "410",
+		"link_not_found", "link_expired", "invalid_download_code",
+		"range_probe_status", "range_probe_encoding", "range_probe_content_range",
+		"range_probe_content_length", "range_probe_body_length":
+		return code
+	default:
+		return "unknown"
+	}
 }

@@ -2,6 +2,7 @@ package link
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,5 +50,38 @@ func TestProviderErrorCodesKeepThrottleSeparateFromRefresh(t *testing.T) {
 	}
 	if err := ErrorCodeToLinkError("link_not_found"); !err.ShouldRefetch() {
 		t.Fatalf("link_not_found classification = %s, want refetchable", err.Category)
+	}
+}
+
+func TestLocalRefreshCooldownKeepsBackoffSemantics(t *testing.T) {
+	err := NewLinkError(ErrLinkExpired, CategoryThrottled, CodeLinkRefreshCooldown)
+	err.RetryAfter = 30 * time.Second
+	if !err.ShouldBackoff() || !err.IsRetryable() || err.ShouldRetry() || err.ShouldRefetch() || err.ShouldSuspendAccount() || err.IsPermanent() {
+		t.Fatalf("local cooldown changed retry or account behavior: %+v", err)
+	}
+	if err.RetryAfter != 30*time.Second || err.Unwrap() != ErrLinkExpired {
+		t.Fatal("local cooldown lost its delay or underlying error")
+	}
+}
+
+func TestSafeRefetchLogCode(t *testing.T) {
+	for _, code := range []string{
+		"400", "401", "403", "404", "410",
+		"link_not_found", "link_expired", "invalid_download_code",
+		"range_probe_status", "range_probe_encoding", "range_probe_content_range",
+		"range_probe_content_length", "range_probe_body_length",
+	} {
+		if got := safeRefetchLogCode(code); got != code {
+			t.Errorf("known rejection %q logged as %q", code, got)
+		}
+	}
+	for _, code := range []string{
+		"", "unknown", "synthetic-account-token",
+		"https://example.invalid/file?token=synthetic", "403\ncredential=synthetic",
+		strings.Repeat("x", 4096),
+	} {
+		if got := safeRefetchLogCode(code); got != "unknown" {
+			t.Errorf("unrecognized rejection exposed raw code: %q", got)
+		}
 	}
 }

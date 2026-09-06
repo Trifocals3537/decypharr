@@ -1,11 +1,14 @@
 package link
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -489,6 +492,8 @@ func TestRejectedReplacementStartsRefreshCooldown(t *testing.T) {
 		lifecycleDownloadLink(server.URL + "/unexpected"),
 	}}
 	service := newLifecycleService(client, server.Client(), 0)
+	var logs bytes.Buffer
+	service.logger = zerolog.New(&logs)
 	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	entry := lifecycleTestEntry()
@@ -517,6 +522,18 @@ func TestRejectedReplacementStartsRefreshCooldown(t *testing.T) {
 	}
 	if got := probes.Load(); got != 4 {
 		t.Fatalf("range probes = %d, want 4 so the cached CDN URL remains probeable", got)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event); err != nil {
+		t.Fatalf("decode replacement warning: %v", err)
+	}
+	if event["error_code"] != "403" || event["error_category"] != "refetchable" || event["failure_scope"] != "download_link" {
+		t.Fatalf("replacement warning lacks scoped rejection cause: %v", event)
+	}
+	for _, sensitive := range []string{server.URL, "restricted-link", "token"} {
+		if strings.Contains(logs.String(), sensitive) {
+			t.Fatalf("replacement warning exposed link credentials or URL: %s", logs.String())
+		}
 	}
 }
 

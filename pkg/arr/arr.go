@@ -119,16 +119,13 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload a
 		return nil, err
 	}
 
-	// Parse success result if provided. Stream-decode directly from the
-	// response body so large payloads (e.g. full Sonarr series lists) don't
-	// sit on the heap as raw bytes alongside the decoded object graph. When a
-	// decode target is provided, RequestCtx owns the body; response-only callers
-	// receive ownership and must close it.
+	// Decode successful responses without Sonic's per-read buffer growth or
+	// response-backed strings. RequestCtx owns the body when a decode target
+	// is provided; response-only callers receive ownership and must close it.
 	if res != nil {
 		defer closeArrResponse(resp)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			dec := json.ConfigDefault.NewDecoder(resp.Body)
-			if err := dec.Decode(res); err != nil && err != io.EOF {
+			if err := request.DecodeJSON(resp, res); err != nil && err != io.EOF {
 				return resp, fmt.Errorf("failed to decode response: %w", err)
 			}
 		}

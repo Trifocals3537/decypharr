@@ -46,6 +46,7 @@ type Client struct {
 	headers          map[string]string
 	headersMu        sync.RWMutex
 	maxRetries       int
+	singleAttempt    bool
 	timeout          time.Duration
 	retryableStatus  map[int]struct{}
 	logger           zerolog.Logger
@@ -59,6 +60,25 @@ type Client struct {
 func WithMaxRetries(maxRetries int) ClientOption {
 	return func(c *Client) {
 		c.maxRetries = maxRetries
+	}
+}
+
+// WithSingleAttempt returns the first HTTP response as-is, including 429/5xx,
+// so durable mutation callers can distinguish rejection from an unknown result.
+func WithSingleAttempt() ClientOption {
+	return func(c *Client) {
+		c.maxRetries = 0
+		c.singleAttempt = true
+	}
+}
+
+// WithNoRedirects keeps a mutation on its configured endpoint. A redirect is
+// returned to the caller rather than silently replaying a non-idempotent POST.
+func WithNoRedirects() ClientOption {
+	return func(c *Client) {
+		c.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
 	}
 }
 
@@ -361,6 +381,9 @@ func New(options ...ClientOption) *Client {
 
 	// Custom retry policy based on retryable status codes
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if client.singleAttempt {
+			return false, nil
+		}
 		// Don't retry on context errors
 		if ctx.Err() != nil {
 			return false, ctx.Err()

@@ -20,6 +20,7 @@ var storeNames = []string{
 	"storage_state",
 	"repair_state",
 	"repair_runs",
+	"repair_recoveries",
 	"entry_tombstones",
 	"queue_tombstones",
 	"migration_cleanups",
@@ -37,6 +38,7 @@ type Storage struct {
 	storageState     *hybrid.Store
 	repairState      *hybrid.Store
 	repairRuns       *hybrid.Store
+	repairRecoveries *hybrid.Store
 	entryTombstones  *hybrid.Store
 	queueTombstones  *hybrid.Store
 	migrationCleanup *hybrid.Store
@@ -59,6 +61,10 @@ func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hyb
 	items := make(map[string]*hybrid.Store)
 	for _, name := range storeNames {
 		config := baseConfig
+		if name == "repair_recoveries" {
+			// Arr mutations must never outrun their durable intent record.
+			config.SyncInterval = 0
+		}
 		config.DataPath = filepath.Join(baseDir, name+".db")
 		store, err := hybrid.New(config)
 		if err != nil {
@@ -114,6 +120,7 @@ func NewStorage(dbPath string) (*Storage, error) {
 		storageState:     itemStores["storage_state"],
 		repairState:      itemStores["repair_state"],
 		repairRuns:       itemStores["repair_runs"],
+		repairRecoveries: itemStores["repair_recoveries"],
 		entryTombstones:  itemStores["entry_tombstones"],
 		queueTombstones:  itemStores["queue_tombstones"],
 		migrationCleanup: itemStores["migration_cleanups"],
@@ -166,6 +173,7 @@ func (s *Storage) Close() error {
 		s.storageState,
 		s.repairState,
 		s.repairRuns,
+		s.repairRecoveries,
 		s.entryTombstones,
 		s.queueTombstones,
 		s.migrationCleanup,
@@ -194,6 +202,7 @@ func (s *Storage) DiskSize() int64 {
 		s.storageState,
 		s.repairState,
 		s.repairRuns,
+		s.repairRecoveries,
 		s.entryTombstones,
 		s.queueTombstones,
 		s.migrationCleanup,

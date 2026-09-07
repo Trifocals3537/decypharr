@@ -109,7 +109,7 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 
 ### Sources
 
-- **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers so repair can call `DeleteFiles` + `SearchMissing` directly.
+- **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers for the durable recovery flow below.
 - **`managed`** — walks managed entries directly. Used when you don't have an Arr in front, or for entries imported outside the Arr flow. NZB-only managed brokens have no Arr re-acquire path; they stay `broken` with `failure_reason=usenet_segment_missing` for you to react to manually.
 
 ### Optional NZB content verification
@@ -154,10 +154,61 @@ and review the results.
 2. Candidates are selected per the rules above.
 3. For each candidate, the entry is marked `repairing` and probed by a worker.
 4. The entry's health is updated with the probe outcome (`healthy` / `broken` / `unknown`), broken files, fingerprint, and timestamps.
-5. If `auto_repair` is on and the entry has Arr-known broken files, they are batched per Arr and submitted via delete + search. After the repair attempt, only those entries are re-probed.
+5. If `auto_repair` is on and the entry has Arr-known broken files, repair saves a durable recovery record before deleting the exact Arr file and requesting its replacement. Later repair runs check whether Arr has imported a new file for the same movie or episodes.
 6. The run record's stats are updated live throughout, so the status panel reflects progress without needing to wait for completion.
 
 A failure to persist a single entry's health update is logged but never aborts the sweep.
+
+### Durable Arr recovery
+
+Recovery is backend-only and supports Sonarr and Radarr. It is inspired by
+upstream beta's exact-binding and mutation-intent approach, without replacing
+this fork's storage, mount, or UI.
+
+- Before any deletion, Decypharr saves the old Arr file ID, path, size, and
+  media identities to a synchronously flushed `repair_recoveries.db` store.
+  Sonarr multi-episode files retain **all** their episode IDs.
+- History blocklisting requires the **exact original download ID** and matching
+  media. A newer grab for the same movie or episode is never substituted.
+  Unavailable or incomplete history stops preflight before deletion. If exact
+  grab history is absent, repair uses an explicit, targeted search.
+- Automatic failed-download redownload settings, including interactive-search
+  settings, determine whether a separate search is necessary.
+- Each non-idempotent request has a saved intent. Transport failures, server
+  errors, redirects, and missing search receipts have an uncertain outcome.
+  Repair checks exact failed history or a matching command before proceeding;
+  it does not blindly resend those requests. Definitive rejections can be
+  retried on a later eligible run, no sooner than five minutes.
+- Pending work survives restarts, run-history pruning, health-state clearing,
+  and disappearance from Arr's library enumeration. Automatic replay runs only
+  during repair-enabled sweeps; detect-only sweeps send no recovery mutations.
+  Current Arr exclusions, protocol scope, and manually selected entry names
+  still apply. A changed Arr endpoint stops the old job.
+- Restart recovery can reconcile an already-deleted file. It cannot newly
+  delete an existing file solely on the basis of stale persisted health; a
+  fresh broken probe or an explicit **Fix Broken** action must authorize that.
+- An accepted search means **waiting for import**, not repaired. The run's
+  `repaired` counter increases only when Arr reports a different imported file
+  ID for the exact movie or every affected episode. This confirms an Arr import,
+  not playback or provider health.
+- Source entries are retained, even after import confirmation. Repair no longer
+  deletes a whole source entry merely because Arr accepted a replacement
+  request, and never performs a second local unlink after Arr deletes its file.
+
+The existing status API includes `recovery_counts` for `pending`,
+`waiting_for_import`, `needs_attention`, and `import_confirmed`. Run statistics
+also include `repair_pending`; a completed *run* can still have pending recovery.
+Errors are logged with an opaque recovery ID, Arr name, and phase, without URLs,
+API tokens, or response bodies.
+
+Uncertain requests remain `needs_attention` until their outcome can be
+reconciled or the replacement is imported. A request with no observed import
+after 24 hours also needs attention; it is not repeatedly searched. Check Arr's
+history and command results, resolve any rejection there, or search/import the
+specific media in Arr. The next eligible run recognizes the replacement.
+Disable repair or exclude that Arr to stop automatic recovery; clearing health
+badges or run history is not cancellation of unfinished recovery work.
+Completed receipts expire after 30 days; unfinished intent is never age-pruned.
 
 ## Stop and disable
 

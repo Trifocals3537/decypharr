@@ -46,15 +46,16 @@ const (
 )
 
 type RepairRunStats struct {
-	Candidates   int `json:"candidates"`
-	SkippedFresh int `json:"skipped_fresh"`
-	Probed       int `json:"probed"`
-	Healthy      int `json:"healthy"`
-	Broken       int `json:"broken"`
-	Unknown      int `json:"unknown"`
-	Repaired     int `json:"repaired"`
-	Cleared      int `json:"cleared,omitempty"`
-	RepairFailed int `json:"repair_failed"`
+	Candidates    int `json:"candidates"`
+	SkippedFresh  int `json:"skipped_fresh"`
+	Probed        int `json:"probed"`
+	Healthy       int `json:"healthy"`
+	Broken        int `json:"broken"`
+	Unknown       int `json:"unknown"`
+	Repaired      int `json:"repaired"`
+	Cleared       int `json:"cleared,omitempty"`
+	RepairFailed  int `json:"repair_failed"`
+	RepairPending int `json:"repair_pending,omitempty"`
 }
 
 // RepairRun is the append-only history record produced by a single sweep.

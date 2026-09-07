@@ -34,6 +34,18 @@ type Decoder struct {
 	Meta DecoderMeta
 }
 
+// AcquireNNTPDecoder consumes one dot-terminated article from the connection's
+// shared reader. Standalone yEnc input should use AcquireDecoder instead.
+func AcquireNNTPDecoder(r *bufio.Reader) *Decoder {
+	dec := AcquireDecoder(r)
+	if pure, ok := dec.Reader.(*pureGoYencDecoder); ok {
+		// Do not hide read-ahead for the next response in a private buffer.
+		pure.r = r
+		pure.nntp = true
+	}
+	return dec
+}
+
 // DecoderMeta holds yEnc header metadata, matching the fields from rapidyenc.Meta.
 type DecoderMeta struct {
 	FileName   string
@@ -63,7 +75,10 @@ type pureGoYencDecoder struct {
 	outPos   int
 	scratch  []byte // reused buffer for lines longer than the bufio buffer (rare)
 	sawBegin bool
+	sawEnd   bool
+	nntp     bool
 	done     bool
+	readErr  error
 }
 
 func newPureGoYencDecoder(r io.Reader, meta *DecoderMeta) *pureGoYencDecoder {
@@ -77,6 +92,9 @@ func newPureGoYencDecoder(r io.Reader, meta *DecoderMeta) *pureGoYencDecoder {
 func (d *pureGoYencDecoder) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+	if d.readErr != nil {
+		return 0, d.readErr
 	}
 
 	n := 0
@@ -107,6 +125,10 @@ func (d *pureGoYencDecoder) Read(p []byte) (int, error) {
 					return n, nil
 				}
 				return 0, io.EOF
+			}
+			if d.nntp {
+				// A later drain must not read beyond a malformed response.
+				d.readErr = err
 			}
 			if n > 0 {
 				return n, err
@@ -147,6 +169,9 @@ func (d *pureGoYencDecoder) fill() error {
 		if err != nil && err != io.EOF {
 			return err
 		}
+		if d.nntp && err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
 
 		if len(line) > 0 {
 			done, lineErr := d.processLine(line)
@@ -176,11 +201,17 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 	// Handle raw NNTP article termination / dot-stuffing when present.
 	if line[0] == '.' {
 		if len(line) == 1 {
+			if d.nntp && !d.sawEnd {
+				return false, io.ErrUnexpectedEOF
+			}
 			return true, nil
 		}
 		if line[1] == '.' {
 			line = line[1:]
 		}
+	}
+	if d.sawEnd {
+		return false, nil
 	}
 
 	switch {
@@ -193,7 +224,10 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 		return false, nil
 	case bytes.HasPrefix(line, []byte("=yend ")):
 		parseYEndLine(line, d.meta)
-		return true, nil
+		d.sawEnd = true
+		// yEnc ends before the NNTP response does. Drain any epilogue and the
+		// terminator before allowing this connection to return to its pool.
+		return !d.nntp, nil
 	}
 
 	if !d.sawBegin {

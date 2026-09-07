@@ -451,7 +451,7 @@ func (c *Connection) GetHeader(messageID string, maxSnippet int) (*YencMetadata,
 	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	dec := nntpyenc.AcquireDecoder(c.reader)
+	dec := nntpyenc.AcquireNNTPDecoder(c.reader)
 	defer nntpyenc.ReleaseDecoder(dec)
 
 	// Read snippet to trigger header parsing and capture metadata.
@@ -515,7 +515,7 @@ func (c *Connection) GetHeaderPrefix(messageID string, maxSnippet int) (*YencMet
 	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	dec := nntpyenc.AcquireDecoder(c.reader)
+	dec := nntpyenc.AcquireNNTPDecoder(c.reader)
 	defer nntpyenc.ReleaseDecoder(dec)
 
 	var snippet []byte
@@ -589,7 +589,7 @@ func (c *Connection) GetDecodedBodyWithMetadata(messageID string) ([]byte, *Yenc
 		return nil, nil, classifyNNTPError(code, string(message))
 	}
 
-	dec := nntpyenc.AcquireDecoder(c.reader)
+	dec := nntpyenc.AcquireNNTPDecoder(c.reader)
 	// Always release decoder back to pool, even on panic
 	defer nntpyenc.ReleaseDecoder(dec)
 
@@ -620,7 +620,7 @@ func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 		return 0, classifyNNTPError(code, string(message))
 	}
 
-	dec := nntpyenc.AcquireDecoder(c.reader)
+	dec := nntpyenc.AcquireNNTPDecoder(c.reader)
 	// Always release decoder back to pool, even on panic
 	defer nntpyenc.ReleaseDecoder(dec)
 	n, err := c.copyBodyWithIdleDeadline(w, dec, timeouts.StreamBodyTimeout)

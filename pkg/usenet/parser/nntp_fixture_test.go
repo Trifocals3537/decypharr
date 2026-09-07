@@ -17,11 +17,34 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 )
 
 var contentTestTLSOnce sync.Once
 var contentTestCertificate tls.Certificate
+
+// The process-wide logger must outlive individual fixture directories.
+// Windows cannot remove a directory while its log file is still open.
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp("", "decypharr-parser-tests-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	config.SetConfigPath(root)
+	_ = logger.New("parser-test")
+	code := m.Run()
+	if err := logger.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := os.RemoveAll(root); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
+}
 
 // The loopback protocol and yEnc fixture follow upstream's nntpd test helper,
 // without its benchmark pacing or production-facing dependencies.

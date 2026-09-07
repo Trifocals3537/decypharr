@@ -97,6 +97,13 @@ func (d *Downloader) download(ctx context.Context, torrent *storage.Entry) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Recheck persisted entries against the current naming policy before
+	// changing queue state or creating output, including multi-season parents.
+	if torrent.IsTorrent() {
+		if err := validateTorrentSourceFolder(torrent, config.Get().FolderNaming, false); err != nil {
+			return err
+		}
+	}
 	// Mark as in-flight up front so the queue scheduler skips this entry while
 	// we're iterating seasons / creating symlinks (processSymlink only flips
 	// this flag after its own directory scan, which is too late for the parent

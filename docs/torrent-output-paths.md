@@ -22,6 +22,12 @@ library are not changed by this feature.
   folder. Only a recognized provider release-root prefix is stripped from nested
   file paths. Nested folders and media filenames still require safe, portable
   components; this is not a general media-file renamer.
+- Symlink imports still require a portable mounted source folder, independently
+  of the output folder. The selected filename, original-name or hash naming
+  policy is checked at admission, after provider resolution, and before local
+  processing. An unsafe source is rejected, not silently renamed. Download and
+  STRM actions do not require a mounted source; hash-named mounts can also avoid
+  title-based source restrictions. Existing mount names are never rewritten.
 - Traversal, absolute paths, malformed titles, symlink escapes and foreign
   ownership remain blocked. A saved output name never grants deletion authority.
 - Ambiguous or nonportable legacy paths that still fail validation remain blocked

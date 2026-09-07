@@ -383,7 +383,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		return nil
 	}
 
-	if err := validateTorrentRootName(debridTorrent.Name, false); err != nil {
+	if err := m.validateResolvedTorrentNames(debridTorrent, entry.Action); err != nil {
 		err = errors.Join(err, m.deleteProviderTorrent(client, debridTorrent.Id))
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Provider returned unsafe torrent name")
 		entry.MarkAsError(err)
@@ -704,7 +704,7 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			errs = append(errs, errors.Join(statusErr, rollbackErr))
 			continue
 		}
-		if err := validateTorrentRootName(torrent.Name, false); err != nil {
+		if err := m.validateResolvedTorrentNames(torrent, importRequest.Action); err != nil {
 			rollbackErr := m.deleteProviderTorrent(db, torrent.Id)
 			errs = append(errs, errors.Join(
 				fmt.Errorf("%s returned an unsafe torrent name: %w", providerName, err),

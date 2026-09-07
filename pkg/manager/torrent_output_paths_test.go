@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,100 @@ import (
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
+
+func TestTorrentOutputPathMountSourceRemainsPortable(t *testing.T) {
+	for _, naming := range []config.WebDavFolderNaming{
+		"", config.WebDavUseFileName, config.WebDavUseOriginalName,
+		config.WebDavUseFileNameNoExt, config.WebDavUseOriginalNameNoExt,
+	} {
+		t.Run(string(naming), func(t *testing.T) {
+			for _, name := range []string{"Movie: Part Two", "CON", "movie?", "movie<", "movie>", "movie\"", "movie|", "movie*", "trailing.", "trailing ", "a/../movie", `a\movie`} {
+				entry := &storage.Entry{
+					Name: name, OriginalFilename: name, InfoHash: "safe-hash",
+					OutputName: storage.NewTorrentOutputName(name, "safe-hash"),
+				}
+				for _, action := range []config.DownloadAction{config.DownloadActionSymlink, "", "unknown"} {
+					entry.Action = action
+					if err := validateTorrentSourceFolder(entry, naming, false); err == nil {
+						t.Errorf("accepted unsafe %q mount source %q with action %q", naming, name, action)
+					}
+				}
+			}
+			entry := &storage.Entry{Name: "Movie.mkv", OriginalFilename: "Original.mkv", Action: config.DownloadActionSymlink}
+			if err := validateTorrentSourceFolder(entry, naming, false); err != nil {
+				t.Fatalf("portable source rejected: %v", err)
+			}
+		})
+	}
+	entry := &storage.Entry{Name: "Movie: Part Two", OriginalFilename: "Original?", InfoHash: "safe-hash", Action: config.DownloadActionSymlink}
+	if err := validateTorrentSourceFolder(entry, config.WebdavUseHash, false); err != nil {
+		t.Fatalf("safe hash source rejected because of unused titles: %v", err)
+	}
+	entry.InfoHash = "../escape"
+	if err := validateTorrentSourceFolder(entry, config.WebdavUseHash, false); err == nil {
+		t.Fatal("unsafe hash source accepted")
+	}
+	for _, action := range []config.DownloadAction{config.DownloadActionDownload, config.DownloadActionStrm, config.DownloadActionNone} {
+		entry.Action = action
+		if err := validateTorrentSourceFolder(entry, config.WebDavUseFileName, false); err != nil {
+			t.Fatalf("mount-free action %q rejected a display title: %v", action, err)
+		}
+	}
+}
+
+func TestTorrentOutputPathValidatesSourceAtAdmissionAndProviderUpdate(t *testing.T) {
+	request := asyncAdmissionTestRequest(t.TempDir(), "source-check", nil)
+	request.Action = config.DownloadActionSymlink
+	request.Magnet.Name = "Movie: Part Two"
+	manager := &Manager{config: &config.Config{DownloadFolder: request.DownloadFolder}}
+	if err := manager.validateTorrentImportRequest(request); err == nil {
+		t.Fatal("unsafe title-based symlink source admitted")
+	}
+	request.Action = config.DownloadActionDownload
+	if err := manager.validateTorrentImportRequest(request); err != nil {
+		t.Fatalf("mount-free download rejected: %v", err)
+	}
+	request.Action = config.DownloadActionSymlink
+	request.Magnet.Name = ""
+	if err := manager.validateTorrentImportRequest(request); err != nil {
+		t.Fatalf("nameless magnet rejected before provider resolution: %v", err)
+	}
+	resolved := &debridTypes.Torrent{Name: "Movie: Part Two", OriginalFilename: "Original.mkv", InfoHash: "safe-hash"}
+	if err := manager.validateResolvedTorrentNames(resolved, request.Action); err == nil {
+		t.Fatal("unsafe provider-updated symlink source accepted")
+	}
+	manager.config.FolderNaming = config.WebDavUseOriginalName
+	if err := manager.validateResolvedTorrentNames(resolved, request.Action); err != nil {
+		t.Fatalf("portable selected original filename rejected: %v", err)
+	}
+	resolved.Name, resolved.OriginalFilename = "Movie.mkv", "CON"
+	if err := manager.validateResolvedTorrentNames(resolved, request.Action); err == nil {
+		t.Fatal("unsafe provider original filename accepted")
+	}
+	resolved.OriginalFilename = ""
+	if err := manager.validateResolvedTorrentNames(resolved, request.Action); err == nil {
+		t.Fatal("missing resolved source accepted")
+	}
+	manager.config.FolderNaming = config.WebdavUseHash
+	if err := manager.validateResolvedTorrentNames(resolved, request.Action); err != nil {
+		t.Fatalf("hash source incorrectly required an original filename: %v", err)
+	}
+}
+
+func TestTorrentOutputPathRechecksSourceBeforeLocalWork(t *testing.T) {
+	entry := torrentOwnershipTestEntry(t.TempDir(), "../unsafe-hash", config.DownloadActionSymlink)
+	entry.Name, entry.OriginalFilename = "CON", "CON"
+	entry.OutputName = storage.NewTorrentOutputName(entry.Name, entry.InfoHash)
+	// No manager/queue is needed: rejection must happen before any queue or
+	// filesystem side effects, for every current mount-naming policy.
+	downloader := &Downloader{}
+	if err := downloader.download(context.Background(), entry); err == nil {
+		t.Fatal("unsafe persisted source reached local processing")
+	}
+	if entry.IsDownloading {
+		t.Fatal("source validation changed queue state")
+	}
+}
 
 func TestTorrentOutputPathPreservesLegacyLeadingWhitespace(t *testing.T) {
 	root := t.TempDir()

@@ -357,8 +357,10 @@ type EntryProto struct {
 	// Opaque durable identity for one queue-row incarnation. Main-entry
 	// lifecycle authorization remains transient and is never serialized.
 	QueueIncarnation string `protobuf:"bytes,40,opt,name=queue_incarnation,json=queueIncarnation,proto3" json:"queue_incarnation,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Local torrent output component. Empty preserves the legacy title layout.
+	OutputName    string `protobuf:"bytes,41,opt,name=output_name,json=outputName,proto3" json:"output_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EntryProto) Reset() {
@@ -667,6 +669,13 @@ func (x *EntryProto) GetHasLastErrorTime() bool {
 func (x *EntryProto) GetQueueIncarnation() string {
 	if x != nil {
 		return x.QueueIncarnation
+	}
+	return ""
+}
+
+func (x *EntryProto) GetOutputName() string {
+	if x != nil {
+		return x.OutputName
 	}
 	return ""
 }
@@ -1283,7 +1292,7 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x120\n" +
-	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\x9b\f\n" +
+	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\xbc\f\n" +
 	"\n" +
 	"EntryProto\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12\x1b\n" +
@@ -1330,7 +1339,9 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"errorCount\x12/\n" +
 	"\x14last_error_time_unix\x18& \x01(\x03R\x11lastErrorTimeUnix\x12-\n" +
 	"\x13has_last_error_time\x18' \x01(\bR\x10hasLastErrorTime\x12+\n" +
-	"\x11queue_incarnation\x18( \x01(\tR\x10queueIncarnation\x1aY\n" +
+	"\x11queue_incarnation\x18( \x01(\tR\x10queueIncarnation\x12\x1f\n" +
+	"\voutput_name\x18) \x01(\tR\n" +
+	"outputName\x1aY\n" +
 	"\x0eProvidersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x121\n" +
 	"\x05value\x18\x02 \x01(\v2\x1b.storage.ProviderEntryProtoR\x05value:\x028\x01\x1aL\n" +

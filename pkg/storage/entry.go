@@ -1180,6 +1180,7 @@ func (s *Storage) AddQueue(entry *Entry) error {
 	case err == nil:
 		entry.QueueIncarnation = current.QueueIncarnation
 		entry.CreatedAt = current.CreatedAt
+		PreserveTorrentOutputPath(current, entry)
 		if state.retired &&
 			(entry.QueueIncarnation == "" ||
 				entry.QueueIncarnation != state.authorizedQueueIncarn) {

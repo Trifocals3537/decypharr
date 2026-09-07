@@ -160,6 +160,7 @@ func EntryToProto(e *Entry) *EntryProto {
 		LastError:        e.LastError,
 		ErrorCount:       int32(e.ErrorCount),
 		QueueIncarnation: e.QueueIncarnation,
+		OutputName:       e.OutputName,
 	}
 
 	// Timestamps
@@ -229,6 +230,7 @@ func ProtoToEntry(pb *EntryProto) *Entry {
 		LastError:        pb.LastError,
 		ErrorCount:       int(pb.ErrorCount),
 		QueueIncarnation: pb.QueueIncarnation,
+		OutputName:       pb.OutputName,
 	}
 
 	// Timestamps

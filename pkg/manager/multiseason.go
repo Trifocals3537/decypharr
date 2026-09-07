@@ -105,6 +105,9 @@ func convertToMultiSeason(torrent *storage.Entry, seasons []SeasonInfo) []*stora
 		}
 
 		// Copy placement
+		if torrent.IsTorrent() && torrent.OutputName != "" {
+			seasonTorrent.OutputName = storage.NewTorrentOutputName(seasonTorrent.Name, seasonTorrent.InfoHash)
+		}
 		maps.Copy(seasonTorrent.Providers, torrent.Providers)
 		seasonResults = append(seasonResults, seasonTorrent)
 	}

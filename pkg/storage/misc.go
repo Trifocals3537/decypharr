@@ -15,6 +15,7 @@ func HandleExistingEntryMerge(existing, incoming *Entry) *Entry {
 	if incoming.Protocol == config.ProtocolNZB {
 		return incoming
 	}
+	PreserveTorrentOutputPath(existing, incoming)
 	incoming.Files = mergeFiles(existing.Files, incoming.Files)
 	incoming.ActiveProvider = selectActivePlacement(existing, incoming)
 	incoming.Providers = mergeProviders(existing.Providers, incoming.Providers)

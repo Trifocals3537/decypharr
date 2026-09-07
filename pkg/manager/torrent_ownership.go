@@ -92,10 +92,15 @@ func safeTorrentEntryDownloadPath(downloadRoot string, entry *storage.Entry) (st
 	if err != nil {
 		return "", err
 	}
+	// Output identity does not make an unsafe display title safe to use as a
+	// mount/source path. Preserve the independent title traversal check.
 	if err := validateTorrentRootName(entry.Name, false); err != nil {
 		return "", err
 	}
-	rootName := strings.TrimSpace(removeTorrentFilenameExtension(entry.Name))
+	rootName := entry.OutputComponent()
+	if err := safepath.ValidateIdentifier(rootName); err != nil {
+		return "", fmt.Errorf("invalid torrent output component %q: %w", rootName, err)
+	}
 	if isReservedTorrentPrivateName(rootName) {
 		return "", fmt.Errorf("torrent root name %q is reserved for internal ownership state", rootName)
 	}
@@ -154,7 +159,7 @@ func torrentEntryFileLayouts(entry *storage.Entry) ([]torrentFileLayout, error) 
 		if err != nil {
 			return nil, err
 		}
-		logicalName, err := normalizeTorrentRelativePath(strings.TrimSpace(file.Name))
+		logicalName, err := normalizeTorrentFileOutputPath(entry, strings.TrimSpace(file.Name))
 		if err != nil {
 			return nil, fmt.Errorf("invalid torrent file name %q: %w", file.Name, err)
 		}
@@ -223,21 +228,12 @@ func torrentFileRelativePath(entry *storage.Entry, file *storage.File) (string, 
 	if raw == "" {
 		raw = strings.TrimSpace(file.Name)
 	}
-	relative, err := normalizeTorrentRelativePath(raw)
+	relative, err := normalizeTorrentFileOutputPath(entry, raw)
 	if err != nil {
 		return "", fmt.Errorf("invalid torrent file path %q: %w", raw, err)
 	}
 
-	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) {
-		parts = parts[1:]
-		relative, err = normalizeTorrentRelativePath(strings.Join(parts, "/"))
-		if err != nil {
-			return "", fmt.Errorf("invalid torrent file path after removing release root: %w", err)
-		}
-	}
-
-	logicalName, err := normalizeTorrentRelativePath(strings.TrimSpace(file.Name))
+	logicalName, err := normalizeTorrentFileOutputPath(entry, strings.TrimSpace(file.Name))
 	if err != nil {
 		return "", fmt.Errorf("invalid torrent file name %q: %w", file.Name, err)
 	}
@@ -247,10 +243,34 @@ func torrentFileRelativePath(entry *storage.Entry, file *storage.File) (string, 
 	return relative, nil
 }
 
+// Strip only an identified provider release root, never an arbitrary unsafe
+// path component. New output names let a display root such as "Movie: Part Two"
+// be represented on disk without relaxing validation of nested directories or
+// media filenames. Legacy records keep their previous strict interpretation.
+func normalizeTorrentFileOutputPath(entry *storage.Entry, raw string) (string, error) {
+	if entry != nil && entry.OutputName != "" {
+		parts := strings.Split(strings.ReplaceAll(raw, `\`, "/"), "/")
+		if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) && validateTorrentRootName(parts[0], false) == nil {
+			raw = strings.Join(parts[1:], "/")
+		}
+		return normalizeTorrentRelativePath(raw)
+	}
+	relative, err := normalizeTorrentRelativePath(raw)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(filepath.ToSlash(relative), "/")
+	if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) {
+		return normalizeTorrentRelativePath(strings.Join(parts[1:], "/"))
+	}
+	return relative, nil
+}
+
 func torrentPathFirstComponentIsEntryRoot(component string, entry *storage.Entry) bool {
 	if entry == nil {
 		return false
 	}
+	component = strings.TrimSpace(component)
 	candidates := []string{
 		entry.Name,
 		entry.OriginalFilename,

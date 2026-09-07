@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // validateTorrentDownloadFolder accepts the configured download root itself or
@@ -43,13 +44,19 @@ func validateTorrentDownloadFolder(configuredRoot, requested string) (string, er
 }
 
 func validateTorrentRootName(name string, allowEmpty bool) error {
+	// Display titles are not disk components. Allow punctuation that the
+	// persisted output name can safely represent, but never accept traversal,
+	// absolute paths, controls or malformed text as provider titles.
+	if !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return fmt.Errorf("invalid torrent title encoding or control character")
+	}
 	name = strings.TrimSpace(name)
 	if name == "" && allowEmpty {
 		return nil
 	}
-	rootName := utils.RemoveExtension(name)
-	if err := safepath.ValidateIdentifier(rootName); err != nil {
-		return fmt.Errorf("invalid torrent root name %q: %w", name, err)
+	if strings.Trim(name, " .") == "" || strings.ContainsAny(name, `/\`) ||
+		(len(name) >= 2 && name[1] == ':') {
+		return fmt.Errorf("invalid torrent display title %q", name)
 	}
 	return nil
 }

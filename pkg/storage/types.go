@@ -68,6 +68,10 @@ type Entry struct {
 	// current durable queue row. It is never serialized.
 	MainReimportIncarnation string `msgpack:"-" json:"-"`
 
+	// OutputName pins the local torrent output component independently of its
+	// display title. Empty means legacy name-derived layout; never auto-rename.
+	OutputName string `msgpack:"output_name,omitempty" json:"output_name,omitempty"`
+
 	Protocol         config.Protocol `msgpack:"protocol" json:"protocol"`                   // torrent or nzb
 	InfoHash         string          `msgpack:"info_hash" json:"info_hash"`                 // Primary key - torrent hash
 	Name             string          `msgpack:"name" json:"name"`                           // Entry name
@@ -547,7 +551,7 @@ func (e *Entry) IsValid() bool {
 
 // DownloadPath returns the expected download/symlink path for this entry
 func (e *Entry) DownloadPath() string {
-	return filepath.Join(e.SavePath, utils.RemoveExtension(e.Name))
+	return filepath.Join(e.SavePath, e.OutputComponent())
 }
 
 // SwitcherJob tracks the progress of a migration operation

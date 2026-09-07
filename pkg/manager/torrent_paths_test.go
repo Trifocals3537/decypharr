@@ -64,7 +64,13 @@ func TestValidateTorrentRootName(t *testing.T) {
 		{name: "resolved name required", wantErr: true},
 		{name: "slash", value: "../escape", wantErr: true},
 		{name: "backslash", value: `season\episode`, wantErr: true},
-		{name: "portable colon", value: "Movie: Part Two", wantErr: true},
+		{name: "display punctuation", value: "Movie: Part Two"},
+		{name: "display device name", value: "CON"},
+		{name: "display trailing space", value: " Movie.mkv "},
+		{name: "control", value: "Movie\n", wantErr: true},
+		{name: "invalid utf8", value: "Movie\xff", wantErr: true},
+		{name: "drive path", value: "C:movie", wantErr: true},
+		{name: "dot traversal", value: "..", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateTorrentRootName(test.value, test.allowEmpty)

@@ -211,6 +211,7 @@ func newTorrentQueueEntry(importReq *ImportRequest, status debridTypes.TorrentSt
 	if importReq.DownloadUncached != nil {
 		torrent.DownloadUncached = *importReq.DownloadUncached
 	}
+	torrent.OutputName = storage.NewTorrentOutputName(torrent.Name, torrent.InfoHash)
 	torrent.ContentPath = torrent.DownloadPath()
 	return torrent
 }

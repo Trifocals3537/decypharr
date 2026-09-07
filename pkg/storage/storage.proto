@@ -96,6 +96,8 @@ message EntryProto {
   // Opaque durable identity for one queue-row incarnation. Main-entry
   // lifecycle authorization remains transient and is never serialized.
   string queue_incarnation = 40;
+  // Local torrent output component. Empty preserves the legacy title layout.
+  string output_name = 41;
 }
 
 // ============================================================================

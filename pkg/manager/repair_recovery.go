@@ -114,9 +114,9 @@ func (r *Repair) resumeRecoveries(ctx context.Context, run *storage.RepairRun, n
 }
 
 func (r *Repair) processRecovery(ctx context.Context, run *storage.RepairRun, statsMu *sync.Mutex, job *storage.RepairRecovery, allowDelete bool) bool {
-	if !allowDelete && !job.Prepared {
-		return false
-	}
+	// Replay may finish read-only preflight after a crash between saving the
+	// initial intent and its binding. advanceRecovery still requires fresh
+	// broken confirmation before deleting an existing Arr file.
 	if job.State == storage.RecoveryComplete || job.LastRunID == run.ID || time.Now().Before(job.NextCheckAt) {
 		return false
 	}

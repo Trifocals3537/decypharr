@@ -422,3 +422,36 @@ func TestRecoveryCancelledBeforeStartSendsNoRequests(t *testing.T) {
 		t.Fatal("cancelled job sent requests")
 	}
 }
+
+func TestRecoveryReplayPreparesInitialIntentWithoutDeleting(t *testing.T) {
+	r, f, job, dir := newRecoveryFixture(t)
+	// Only the initial durable intent exists: the process died before preflight
+	// could persist Prepared. No health record or new probe drives this replay.
+	if err := r.manager.storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := storage.NewStorage(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r = NewRepair(&Manager{storage: s, arr: r.manager.arr})
+	r.logger = zerolog.Nop()
+	run := &storage.RepairRun{ID: "initial-intent-restart"}
+	if err := r.resumeRecoveries(context.Background(), run, nil, "all"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRepairRecovery(job.ID)
+	if err != nil || got == nil {
+		t.Fatalf("read recovery: %v", err)
+	}
+	if !got.Prepared || got.File.ID != f.file.ID || got.Deleted {
+		t.Fatalf("preflight not recovered safely: %+v", got)
+	}
+	if got.ErrorCode != "awaiting_broken_confirmation" || got.LastRunID != "" || !got.NextCheckAt.IsZero() {
+		t.Fatalf("fresh probe cannot continue this job: %+v", got)
+	}
+	if f.deletes != 0 || f.searches != 0 || f.failures != 0 || run.Stats.Repaired != 0 {
+		t.Fatalf("read-only preflight mutated Arr or claimed success: deletes=%d searches=%d failures=%d stats=%+v", f.deletes, f.searches, f.failures, run.Stats)
+	}
+}

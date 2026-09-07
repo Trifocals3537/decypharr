@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -943,54 +944,79 @@ func (p *NZBParser) detectFileTypeByContent(ctx context.Context, file nzbparser.
 		}
 	}
 
-	return p.detectFileTypeFromContent(data.Snippet), data.Name, nil
+	fileType, ext := p.detectFileTypeAndExtensionFromContent(data.Snippet)
+	name := data.Name
+	if fileType == storage.NZBFileTypeMedia && ext != "" {
+		if name == "" {
+			name = file.Filename
+		}
+		// Keep the original obfuscated component; only append a known media
+		// extension when neither the yEnc name nor the fallback identifies it.
+		if p.detectFileType(name) == storage.NZBFileTypeUnknown {
+			name += ext
+		}
+	}
+	return fileType, name, nil
 }
 
-func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {
+func (p *NZBParser) detectFileTypeAndExtensionFromContent(data []byte) (storage.NZBFileType, string) {
 	if len(data) == 0 {
-		return storage.NZBFileTypeUnknown
+		return storage.NZBFileTypeUnknown, ""
 	}
 
 	// Check for RAR signatures (both RAR 4.x and 5.x)
 	if len(data) >= 7 {
 		// RAR 4.x signature
 		if bytes.Equal(data[:7], []byte("Rar!\x1A\x07\x00")) {
-			return storage.NZBFileTypeRar
+			return storage.NZBFileTypeRar, ""
 		}
 	}
 	if len(data) >= 8 {
 		// RAR 5.x signature
 		if bytes.Equal(data[:8], []byte("Rar!\x1A\x07\x01\x00")) {
-			return storage.NZBFileTypeRar
+			return storage.NZBFileTypeRar, ""
 		}
 	}
 
 	// Check for ZIP signature
 	if len(data) >= 4 && bytes.Equal(data[:4], []byte{0x50, 0x4B, 0x03, 0x04}) {
-		return storage.NZBFileTypeZip
+		return storage.NZBFileTypeZip, ""
 	}
 
 	// Check for 7z signature
 	if len(data) >= 6 && bytes.Equal(data[:6], []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}) {
-		return storage.NZBFileTypeSevenZip
+		return storage.NZBFileTypeSevenZip, ""
 	}
 
 	// Check for common media file signatures
 	if len(data) >= 4 {
 		// Matroska (MKV/WebM)
 		if bytes.Equal(data[:4], []byte{0x1A, 0x45, 0xDF, 0xA3}) {
-			return storage.NZBFileTypeMedia
+			return storage.NZBFileTypeMedia, ".mkv"
 		}
 
 		// MP4/MOV (check for 'ftyp' at offset 4)
 		if len(data) >= 8 && bytes.Equal(data[4:8], []byte("ftyp")) {
-			return storage.NZBFileTypeMedia
+			// ftyp also identifies image containers (HEIF/AVIF). Preserve the
+			// existing type classification, but infer an extension only from a
+			// recognized media major brand in a complete fixed-size header.
+			if len(data) >= 16 && binary.BigEndian.Uint32(data[:4]) >= 16 {
+				switch string(data[8:12]) {
+				case "isom", "iso2", "mp41", "mp42", "avc1":
+					return storage.NZBFileTypeMedia, ".mp4"
+				case "qt  ":
+					return storage.NZBFileTypeMedia, ".mov"
+				case "M4A ":
+					return storage.NZBFileTypeMedia, ".m4a"
+				}
+			}
+			return storage.NZBFileTypeMedia, ""
 		}
 
 		// AVI
 		if len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) &&
 			bytes.Equal(data[8:12], []byte("AVI ")) {
-			return storage.NZBFileTypeMedia
+			return storage.NZBFileTypeMedia, ".avi"
 		}
 	}
 
@@ -998,12 +1024,12 @@ func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {
 	if len(data) >= 4 {
 		// MPEG-1/2 Program Stream
 		if bytes.Equal(data[:4], []byte{0x00, 0x00, 0x01, 0xBA}) {
-			return storage.NZBFileTypeMedia
+			return storage.NZBFileTypeMedia, ".mpg"
 		}
 
 		// MPEG-1/2 Video Stream
 		if bytes.Equal(data[:4], []byte{0x00, 0x00, 0x01, 0xB3}) {
-			return storage.NZBFileTypeMedia
+			return storage.NZBFileTypeMedia, ".mpg"
 		}
 	}
 
@@ -1012,9 +1038,9 @@ func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {
 		// Additional validation: TS packets are 188 bytes, so the next
 		// sync byte sits at index 188 (requires at least 189 bytes).
 		if len(data) > 188 && data[188] == 0x47 {
-			return storage.NZBFileTypeMedia
+			return storage.NZBFileTypeMedia, ".ts"
 		}
 	}
 
-	return storage.NZBFileTypeUnknown
+	return storage.NZBFileTypeUnknown, ""
 }

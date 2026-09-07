@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,62 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
+
+// recoverInterruptedDownloads clears process-local work left in the durable
+// queue by a stopped process. It must run synchronously before constructing the
+// JobQueue or starting any scheduler/intake: a background reset could clear a
+// flag that a new worker has already claimed. Provider placements, progress and
+// download states remain intact; normal restoration resumes the existing work.
+func (m *Manager) recoverInterruptedDownloads(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.queue == nil || m.queue.storage == nil {
+		return fmt.Errorf("download queue storage is unavailable")
+	}
+	interrupted := func(entry *storage.Entry) bool {
+		return entry.State == storage.EntryStateDownloading && entry.IsDownloading
+	}
+	// Unlike ListFilter, propagate a failed scan instead of starting workers
+	// with a partially recovered (or apparently empty) queue.
+	entries, err := m.queue.storage.FilterQueued(interrupted)
+	if err != nil {
+		return err
+	}
+	recovered := 0
+	for _, snapshot := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Re-read through the lifecycle gate; never bind a scanned payload to a
+		// newer generation or resurrect a row hidden by an explicit deletion.
+		entry, err := m.queue.GetTorrent(snapshot.InfoHash)
+		if storage.IsQueuedEntryNotFound(err) || errors.Is(err, ErrQueueEntryDeleting) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read interrupted download %s: %w", snapshot.InfoHash, err)
+		}
+		if !interrupted(entry) {
+			continue
+		}
+		entry.IsDownloading = false
+		if err := m.queue.Update(entry); err != nil {
+			return fmt.Errorf("reset interrupted download %s: %w", entry.InfoHash, err)
+		}
+		recovered++
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if recovered > 0 {
+		if err := m.queue.Sync(); err != nil {
+			return fmt.Errorf("sync recovered download queue: %w", err)
+		}
+		m.logger.Info().Int("count", recovered).Msg("Recovered interrupted local downloads")
+	}
+	return nil
+}
 
 func (m *Manager) restoreActiveDownloadJobs(ctx context.Context) {
 	if ctx.Err() != nil {

@@ -525,6 +525,11 @@ func (m *Manager) initializeActiveDownloads(adopt func() error) {
 			Err(residual).
 			Msg("Interrupted queue deletions retained cleanup tombstones")
 	}
+	if err := m.recoverInterruptedDownloads(m.ctx); err != nil {
+		m.initializationErr = fmt.Errorf("recover interrupted downloads: %w", err)
+		m.jobQueue = nil
+		return
+	}
 	m.initJobQueue()
 }
 

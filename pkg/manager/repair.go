@@ -27,11 +27,12 @@ import (
 
 // RepairStatus is the snapshot returned by the /api/repair/status endpoint.
 type RepairStatus struct {
-	Enabled      bool                         `json:"enabled"`
-	NextRunAt    *time.Time                   `json:"next_run_at,omitempty"`
-	ActiveRun    *storage.RepairRun           `json:"active_run,omitempty"`
-	LastRun      *storage.RepairRun           `json:"last_run,omitempty"`
-	HealthCounts map[storage.HealthStatus]int `json:"health_counts"`
+	Enabled        bool                          `json:"enabled"`
+	NextRunAt      *time.Time                    `json:"next_run_at,omitempty"`
+	ActiveRun      *storage.RepairRun            `json:"active_run,omitempty"`
+	LastRun        *storage.RepairRun            `json:"last_run,omitempty"`
+	HealthCounts   map[storage.HealthStatus]int  `json:"health_counts"`
+	RecoveryCounts map[storage.RecoveryState]int `json:"recovery_counts,omitempty"`
 }
 
 // RepairRunOptions are one-off options for a manually-started repair run.
@@ -85,6 +86,9 @@ type Repair struct {
 	runStopping    bool
 	stopMu         sync.Mutex
 	stopTimeout    time.Duration
+	// Serializes Arr recovery intent across parallel entry probes. Network work
+	// is bounded by a per-job timeout; ordinary file probing remains parallel.
+	recoveryMu sync.Mutex
 }
 
 // NewRepair builds the repair service for the given manager. Call
@@ -391,6 +395,9 @@ func (r *Repair) Status() RepairStatus {
 	st := RepairStatus{
 		Enabled:      cfg.Enabled,
 		HealthCounts: r.manager.storage.CountEntryHealthByStatus(),
+	}
+	if counts, err := r.manager.storage.RepairRecoveryCounts(); err == nil {
+		st.RecoveryCounts = counts
 	}
 	if next := r.nextScheduledRun(); next != nil {
 		st.NextRunAt = next

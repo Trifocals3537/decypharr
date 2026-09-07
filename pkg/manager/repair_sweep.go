@@ -96,6 +96,19 @@ func (r *Repair) executeSweep(ctx context.Context, run *storage.RepairRun, opts 
 		autoRepair = *opts.AutoRepair
 	}
 
+	// Library deletion may remove a file from enumeration. Resume durable work
+	// independently, but never perform mutations during a health-only sweep.
+	if autoRepair {
+		if err := r.resumeRecoveries(ctx, run, nil, r.effectiveProtocolScope(opts)); err != nil {
+			if ctx.Err() != nil {
+				r.finalizeRun(run, storage.RepairRunCancelled, "", "context cancelled during recovery")
+			} else {
+				r.finalizeRun(run, storage.RepairRunFailed, "repair recovery storage unavailable", "")
+			}
+			return
+		}
+	}
+
 	log.Info().Str("source", string(cfg.Source)).Msg("Sweep: selecting candidates")
 	candidates, err := r.enumerateCandidates(ctx, cfg)
 	if err != nil {
@@ -627,175 +640,6 @@ func (r *Repair) repairBroken(ctx context.Context, run *storage.RepairRun, healt
 	})
 }
 
-// healBrokenEntry runs the Arr delete + blocklist + re-search for one broken
-// entry, then deletes the entry when it's fully broken and every file was
-// handled. It does not verify the outcome: SearchMissing/MarkHistoryFailed only
-// queue a download in the Arr — the replacement lands minutes-to-hours later,
-// so the next scheduled sweep is where verification happens. statsMu guards
-// run.Stats across concurrent entries.
-func (r *Repair) healBrokenEntry(ctx context.Context, run *storage.RepairRun, statsMu *sync.Mutex, name string, h *storage.EntryHealth) {
-	if h == nil || h.Status != storage.HealthBroken {
-		return
-	}
-
-	// An entry's broken files normally all belong to one Arr, but a merged
-	// candidate can span more — group defensively.
-	byArr := make(map[string][]arr.ContentFile)
-	for _, bf := range h.BrokenFiles {
-		if bf.ArrName == "" || bf.ArrFileID == 0 {
-			continue
-		}
-		byArr[bf.ArrName] = append(byArr[bf.ArrName], arr.ContentFile{
-			Id:        bf.MediaID,
-			EpisodeId: bf.EpisodeID,
-			FileId:    bf.ArrFileID,
-			Name:      bf.FileName,
-			Path:      bf.SourcePath,
-			Size:      bf.Size,
-			IsBroken:  true,
-		})
-	}
-	if len(byArr) == 0 {
-		return
-	}
-
-	succeeded := make(map[string]struct{}, len(byArr))
-	for arrName, files := range byArr {
-		if ctx != nil && ctx.Err() != nil {
-			return
-		}
-		a := r.manager.arr.Get(arrName)
-		if a == nil {
-			continue
-		}
-		if r.repairArrFiles(ctx, run, statsMu, a, files) {
-			succeeded[arrName] = struct{}{}
-		}
-	}
-
-	r.finalizeEntryRepair(name, h, succeeded)
-}
-
-// repairArrFiles deletes the broken files in one Arr, blocklists their grabs,
-// and re-searches anything without a grab record. Returns true when the delete
-// succeeded (so the caller may consider the files handled). Concurrency is
-// bounded by the sweep's worker count; Sonarr/Radarr handle that many in-flight
-// API calls fine, and the actual search/grab work is paced by the Arr's own
-// command queue regardless of how the calls arrive.
-func (r *Repair) repairArrFiles(ctx context.Context, run *storage.RepairRun, statsMu *sync.Mutex, a *arr.Arr, files []arr.ContentFile) bool {
-	// Look up the grab history per broken file. Files whose grab record exists
-	// get blocklisted via MarkHistoryFailed (which Sonarr/Radarr auto-re-searches
-	// when "Redownload Failed" is on — the default). Files with no grab record
-	// (history trimmed, manual import) fall back to an explicit SearchMissing.
-	//
-	// HistoryIDs are deduped per arr — a season-pack grab covers multiple broken
-	// files but only needs one history/failed POST.
-	historyIDs := make(map[int]struct{})
-	needSearch := make([]arr.ContentFile, 0)
-	for _, f := range files {
-		if ctx != nil && ctx.Err() != nil {
-			return false
-		}
-		var mediaID int
-		switch a.Type {
-		case arr.Sonarr:
-			mediaID = f.EpisodeId
-		case arr.Radarr:
-			mediaID = f.Id
-		}
-		if mediaID == 0 {
-			needSearch = append(needSearch, f)
-			continue
-		}
-		id, _, herr := a.FindGrabHistoryIDCtx(ctx, mediaID)
-		if herr != nil || id == 0 {
-			needSearch = append(needSearch, f)
-			continue
-		}
-		historyIDs[id] = struct{}{}
-	}
-
-	// Clear the EpisodeFile/MovieFile rows first so the upcoming re-search isn't
-	// rejected by upgrade-only quality logic.
-	if err := a.DeleteFiles(ctx, files); err != nil {
-		r.logger.Warn().Err(err).Str("arr", a.Name).Msg("Repair: DeleteFiles failed")
-		statsMu.Lock()
-		run.Stats.RepairFailed += len(files)
-		r.saveRun(run)
-		statsMu.Unlock()
-		return false
-	}
-
-	// Blocklist each unique grab. Errors here are non-fatal: a missing blocklist
-	// is bad but DeleteFiles already cleared the rows, so the fallback
-	// SearchMissing below still has a chance to recover.
-	for id := range historyIDs {
-		if ctx != nil && ctx.Err() != nil {
-			break
-		}
-		if err := a.MarkHistoryFailedCtx(ctx, id); err != nil {
-			r.logger.Warn().Err(err).Str("arr", a.Name).Int("history_id", id).Msg("Repair: MarkHistoryFailed failed")
-		}
-	}
-
-	// SearchMissing only for files without a grab record. With one,
-	// MarkHistoryFailed's auto-re-search covers the same ground without creating
-	// an extra command row.
-	if len(needSearch) > 0 {
-		if err := a.SearchMissing(ctx, needSearch); err != nil {
-			r.logger.Warn().Err(err).Str("arr", a.Name).Msg("Repair: SearchMissing fallback failed")
-		}
-	}
-
-	statsMu.Lock()
-	run.Stats.Repaired += len(files)
-	r.saveRun(run)
-	statsMu.Unlock()
-	return true
-}
-
-// finalizeEntryRepair stamps LastRepairAt and, when the entry is fully broken
-// and every broken file was handled (Arr-deleted + re-searched), deletes it.
-// Partial-broken entries are left in place so their healthy files survive.
-func (r *Repair) finalizeEntryRepair(name string, h *storage.EntryHealth, succeeded map[string]struct{}) {
-	now := time.Now()
-
-	shouldDelete := h.BrokenCount > 0 && h.BrokenCount == h.FileCount
-	hashes := make(map[string]struct{})
-	if shouldDelete {
-		for _, bf := range h.BrokenFiles {
-			if bf.ArrName == "" || bf.ArrFileID == 0 {
-				shouldDelete = false
-				break
-			}
-			if _, ok := succeeded[bf.ArrName]; !ok {
-				shouldDelete = false
-				break
-			}
-			if bf.InfoHash != "" {
-				hashes[bf.InfoHash] = struct{}{}
-			}
-		}
-		if len(hashes) == 0 {
-			shouldDelete = false
-		}
-	}
-
-	if !shouldDelete {
-		h.LastRepairAt = now
-		r.saveHealth(h)
-		return
-	}
-
-	for hash := range hashes {
-		if err := r.manager.DeleteEntry(hash, true); err != nil {
-			r.logger.Warn().Err(err).Str("entry", name).Str("infohash", hash).Msg("Repair: failed to delete fully-broken entry after re-search")
-			continue
-		}
-		r.logger.Info().Str("entry", name).Str("infohash", hash).Msg("Repair: deleted fully-broken entry after re-search")
-	}
-}
-
 // === Candidate enumeration ===
 
 func (r *Repair) enumerateCandidates(ctx context.Context, cfg config.RepairConfig) (map[string]*candidate, error) {
@@ -1140,7 +984,11 @@ func (r *Repair) FixBroken(ctx context.Context, names []string) (*storage.Repair
 	// Skip entries with no Arr-known broken files — there's nothing the fix
 	// pass can delete and re-search for them.
 	healths, wantedCount := r.collectBrokenHealths(names, true)
-	if healths.Size() == 0 {
+	pending, err := r.manager.storage.PendingRepairRecoveryIDs(names)
+	if err != nil {
+		return nil, fmt.Errorf("load pending repair recovery: %w", err)
+	}
+	if healths.Size() == 0 && len(pending) == 0 {
 		return nil, errors.New("no fixable broken entries")
 	}
 
@@ -1192,6 +1040,14 @@ func (r *Repair) FixBroken(ctx context.Context, names []string) (*storage.Repair
 			r.mu.Unlock()
 			cancel()
 		}()
+		if err := r.resumeRecoveries(runCtx, run, names, "all"); err != nil {
+			if runCtx.Err() != nil {
+				r.finalizeRun(run, storage.RepairRunCancelled, "", "context cancelled during recovery")
+			} else {
+				r.finalizeRun(run, storage.RepairRunFailed, "repair recovery storage unavailable", "")
+			}
+			return
+		}
 		r.repairBroken(runCtx, run, healths)
 		if runCtx.Err() != nil {
 			r.finalizeRun(run, storage.RepairRunCancelled, "", "context cancelled during repair")

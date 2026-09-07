@@ -86,6 +86,10 @@ func New(name, host, token string, skipRepair bool, downloadUncached *bool, sele
 // cancels the in-flight HTTP call — this is what lets the repair pipeline
 // abort long Sonarr enumerations when a user presses Stop.
 func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload any, res any) (*http.Response, error) {
+	return a.requestCtx(ctx, getSharedClient(), method, endpoint, payload, res)
+}
+
+func (a *Arr) requestCtx(ctx context.Context, client *request.Client, method, endpoint string, payload any, res any) (*http.Response, error) {
 	if a.Token == "" || a.Host == "" {
 		return nil, fmt.Errorf("arr not configured")
 	}
@@ -114,7 +118,7 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload a
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", a.Token)
 
-	resp, err := getSharedClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

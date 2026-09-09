@@ -167,12 +167,23 @@ func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename st
 // Refresh evicts a rejected URL from local caches and returns a validated
 // replacement. Concurrent refreshes for the same file are coalesced, and a
 // refresh never calls a provider-side deletion endpoint.
-func (s *Service) Refresh(ctx context.Context, entry *storage.Entry, bad types.DownloadLink) (types.DownloadLink, error) {
-	if bad.Filename == "" {
+// filename is the requested entry file, not bad.Filename: providers may return
+// an archive name or rename the underlying object without changing its media files.
+func (s *Service) Refresh(ctx context.Context, entry *storage.Entry, filename string, bad types.DownloadLink) (types.DownloadLink, error) {
+	if err := ctx.Err(); err != nil {
+		return emptyDownloadLink, err
+	}
+	if filename == "" {
 		return emptyDownloadLink, NewPermanentError(ErrEmptyLink, "empty_link")
 	}
+	if _, err := entry.GetFile(filename); err != nil {
+		return emptyDownloadLink, NewPermanentError(
+			fmt.Errorf("file %s not found in entry %s: %w", filename, entry.Name, err),
+			"file_not_found",
+		)
+	}
 
-	return s.refreshRejectedLink(ctx, entry, bad, 0, 0)
+	return s.refreshRejectedLink(ctx, entry, filename, bad, 0, 0)
 }
 
 func (s *Service) getClient(provider string) (debrid.Client, error) {
@@ -212,7 +223,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 	}
 	link, err := s.fetchLink(ctx, entry, filename, repairAttempt, linkRefreshes)
 	if err != nil {
-		return s.handleBadLink(ctx, err, entry, link, repairAttempt, linkRefreshes)
+		return s.handleBadLink(ctx, err, entry, filename, link, repairAttempt, linkRefreshes)
 	}
 
 	// Only successful validations are memoized. Transient failures must be
@@ -259,7 +270,7 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 					// until its bounded cooldown expires.
 					return emptyDownloadLink, validationErr
 				}
-				return s.refreshRejectedLink(ctx, entry, link, repairAttempt, linkRefreshes)
+				return s.refreshRejectedLink(ctx, entry, filename, link, repairAttempt, linkRefreshes)
 			}
 		} else {
 			s.failRecoveryProbe(link, validationErr)
@@ -286,8 +297,8 @@ func (s *Service) fetchAndValidate(ctx context.Context, entry *storage.Entry, fi
 // recovery paths. A rejected replacement starts an adaptive per-file cooldown:
 // callers continue probing the cached CDN URL for recovery, but do not repeatedly
 // regenerate provider links while that URL remains rejected.
-func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry, rejected types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
-	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, rejected.Filename))
+func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry, filename string, rejected types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
+	key := lifecyclePolicyKey(ctx, linkLifecycleKey(entry, filename))
 	return doLinkFlight(ctx, &s.refreshflight, key, func(sharedCtx context.Context) (types.DownloadLink, error) {
 		if err := sharedCtx.Err(); err != nil {
 			return emptyDownloadLink, err
@@ -305,7 +316,7 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 			return emptyDownloadLink, err
 		}
 
-		replacement, err := s.fetchAndValidate(sharedCtx, entry, rejected.Filename, repairAttempt, linkRefreshes+1)
+		replacement, err := s.fetchAndValidate(sharedCtx, entry, filename, repairAttempt, linkRefreshes+1)
 		if err != nil {
 			if linkErr := GetLinkError(err); linkErr != nil && linkErr.ShouldRefetch() &&
 				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -313,7 +324,7 @@ func (s *Service) refreshRejectedLink(ctx context.Context, entry *storage.Entry,
 				s.logger.Warn().
 					Str("debrid", entry.ActiveProvider).
 					Str("infohash", entry.InfoHash).
-					Str("filename", rejected.Filename).
+					Str("filename", filename).
 					Str("error_code", safeRefetchLogCode(linkErr.Code)).
 					Str("error_category", linkErr.Category.String()).
 					Str("failure_scope", "download_link").
@@ -435,7 +446,7 @@ func refreshBackoffDelay(failures int) time.Duration {
 	return delay
 }
 
-func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.Entry, dl types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
+func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.Entry, filename string, dl types.DownloadLink, repairAttempt, linkRefreshes int) (types.DownloadLink, error) {
 	if errors.Is(err, customerror.HosterUnavailableError) {
 		if repairDisabled(ctx) {
 			return dl, err
@@ -444,8 +455,8 @@ func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.E
 			return emptyDownloadLink, fmt.Errorf("can't repair %s since it's been marked as bad", entry.GetFolder())
 		}
 		if repairAttempt >= MaxReinsertionAttempt {
-			s.markEntryBad(entry, dl.Filename, repairAttempt, "hoster_unavailable")
-			return emptyDownloadLink, fmt.Errorf("entry %s file %s still unresolvable after %d re-insertion attempts", entry.GetFolder(), dl.Filename, repairAttempt)
+			s.markEntryBad(entry, filename, repairAttempt, "hoster_unavailable")
+			return emptyDownloadLink, fmt.Errorf("entry %s file %s still unresolvable after %d re-insertion attempts", entry.GetFolder(), filename, repairAttempt)
 		}
 		if err := s.repairer(ctx, entry); err != nil {
 			return emptyDownloadLink, err
@@ -456,7 +467,7 @@ func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.E
 			return emptyDownloadLink, fmt.Errorf("entry %s(%s) still bad after repair, un-repairable", entry.GetFolder(), dl.Link)
 		}
 		// Bypass singleflight re-entry to avoid deadlock
-		return s.fetchAndValidate(ctx, entry, dl.Filename, repairAttempt+1, linkRefreshes)
+		return s.fetchAndValidate(ctx, entry, filename, repairAttempt+1, linkRefreshes)
 	}
 	// Just return the error
 	return dl, err

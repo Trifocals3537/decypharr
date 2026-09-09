@@ -138,7 +138,7 @@ type Manager struct {
 
 type downloadLinkService interface {
 	GetLink(context.Context, *storage.Entry, string) (debridTypes.DownloadLink, error)
-	Refresh(context.Context, *storage.Entry, debridTypes.DownloadLink) (debridTypes.DownloadLink, error)
+	Refresh(context.Context, *storage.Entry, string, debridTypes.DownloadLink) (debridTypes.DownloadLink, error)
 	Clear()
 }
 

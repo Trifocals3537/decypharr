@@ -16,10 +16,11 @@ import (
 )
 
 type streamLifecycleLinkService struct {
-	initial   debridTypes.DownloadLink
-	refreshed debridTypes.DownloadLink
-	gets      atomic.Int32
-	refreshes atomic.Int32
+	initial         debridTypes.DownloadLink
+	refreshed       debridTypes.DownloadLink
+	gets            atomic.Int32
+	refreshes       atomic.Int32
+	refreshFilename atomic.Value
 }
 
 func (s *streamLifecycleLinkService) GetLink(context.Context, *storage.Entry, string) (debridTypes.DownloadLink, error) {
@@ -27,8 +28,9 @@ func (s *streamLifecycleLinkService) GetLink(context.Context, *storage.Entry, st
 	return s.initial, nil
 }
 
-func (s *streamLifecycleLinkService) Refresh(context.Context, *storage.Entry, debridTypes.DownloadLink) (debridTypes.DownloadLink, error) {
+func (s *streamLifecycleLinkService) Refresh(_ context.Context, _ *storage.Entry, filename string, _ debridTypes.DownloadLink) (debridTypes.DownloadLink, error) {
 	s.refreshes.Add(1)
+	s.refreshFilename.Store(filename)
 	return s.refreshed, nil
 }
 
@@ -127,6 +129,50 @@ func TestStreamThrottleRetriesSameLink(t *testing.T) {
 	}
 	if len(waits) != 1 || waits[0] != 4*time.Second {
 		t.Fatalf("waits = %v, want [4s]", waits)
+	}
+}
+
+func TestArchiveStreamRefreshPreservesLogicalFilenameAndOffsets(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got := r.Header.Get("Range"); got != "bytes=2-3" {
+			t.Errorf("upstream Range = %q, want bytes=2-3", got)
+		}
+		if r.URL.Path == "/old" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Length", "2")
+		w.Header().Set("Content-Range", "bytes 2-3/8")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("at"))
+	}))
+	defer server.Close()
+	links := &streamLifecycleLinkService{
+		initial:   debridTypes.DownloadLink{Filename: "bundle.rar", Size: 8, DownloadLink: server.URL + "/old"},
+		refreshed: debridTypes.DownloadLink{Filename: "bundle.rar", Size: 8, DownloadLink: server.URL + "/new"},
+	}
+	manager := &Manager{linkService: links, streamClient: server.Client(), config: &config.Config{Retries: 0}}
+	entry := streamLifecycleEntry()
+	entry.Files["video.mkv"].ByteRange = &[2]int64{1, 4}
+	var output bytes.Buffer
+	var metadata *StreamMetadata
+	err := manager.Stream(context.Background(), entry, "video.mkv", 1, 2, &output, func(m *StreamMetadata) error {
+		metadata = m
+		return nil
+	}, "test")
+	if err != nil || output.String() != "at" {
+		t.Fatalf("Stream() = %q, %v; want at", output.String(), err)
+	}
+	if links.refreshFilename.Load() != "video.mkv" || links.refreshes.Load() != 1 || requests.Load() != 2 {
+		t.Fatalf("refresh filename/count/requests = %v/%d/%d", links.refreshFilename.Load(), links.refreshes.Load(), requests.Load())
+	}
+	if metadata == nil || metadata.ContentLength != 2 || metadata.StatusCode != http.StatusPartialContent || metadata.Header.Get("Content-Range") != "bytes 1-2/4" {
+		t.Fatalf("client metadata = %+v, want logical range 1-2/4", metadata)
+	}
+	if *entry.Files["video.mkv"].ByteRange != [2]int64{1, 4} || links.refreshed.Size != 8 || links.refreshed.Filename != "bundle.rar" {
+		t.Fatal("archive offsets or provider identity changed")
 	}
 }
 

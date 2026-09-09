@@ -51,8 +51,8 @@ func (s *failoverLinkService) GetLink(_ context.Context, entry *storage.Entry, _
 	return linkValue, nil
 }
 
-func (s *failoverLinkService) Refresh(_ context.Context, entry *storage.Entry, bad debridTypes.DownloadLink) (debridTypes.DownloadLink, error) {
-	return s.GetLink(context.Background(), entry, bad.Filename)
+func (s *failoverLinkService) Refresh(ctx context.Context, entry *storage.Entry, filename string, _ debridTypes.DownloadLink) (debridTypes.DownloadLink, error) {
+	return s.GetLink(ctx, entry, filename)
 }
 
 func (*failoverLinkService) Clear() {}

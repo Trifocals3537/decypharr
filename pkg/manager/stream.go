@@ -379,7 +379,7 @@ func (m *Manager) streamHTTPFromCandidate(
 						LinkError: true,
 					}
 				}
-				downloadLink, err = m.linkService.Refresh(ctx, candidateEntry, downloadLink)
+				downloadLink, err = m.linkService.Refresh(ctx, candidateEntry, filename, downloadLink)
 				if err != nil {
 					return false, fmt.Errorf("failed to refresh rejected download link: %w", err)
 				}

@@ -151,10 +151,10 @@ func lifecycleDownloadLink(url string) types.DownloadLink {
 }
 
 func writeValidLinkProbe(w http.ResponseWriter) {
-	w.Header().Set("Content-Length", "1")
-	w.Header().Set("Content-Range", "bytes 0-0/4")
+	w.Header().Set("Content-Length", "2")
+	w.Header().Set("Content-Range", "bytes 0-1/4")
 	w.WriteHeader(http.StatusPartialContent)
-	_, _ = w.Write([]byte("d"))
+	_, _ = w.Write([]byte("da"))
 }
 
 func newLifecycleService(client *lifecycleTestClient, httpClient *http.Client, retries int) *Service {
@@ -774,7 +774,7 @@ func TestRefreshBackoffDelayCapsAtMaximum(t *testing.T) {
 	}
 }
 
-func TestValidationUsesOneByteRangeProbe(t *testing.T) {
+func TestValidationUsesTwoByteRangeProbe(t *testing.T) {
 	var methods []string
 	var encoding string
 	var cacheControl string
@@ -791,7 +791,7 @@ func TestValidationUsesOneByteRangeProbe(t *testing.T) {
 	if _, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv"); err != nil {
 		t.Fatalf("GetLink() error = %v", err)
 	}
-	want := []string{"GET:bytes=0-0"}
+	want := []string{"GET:bytes=0-1"}
 	if fmt.Sprint(methods) != fmt.Sprint(want) {
 		t.Fatalf("requests = %v, want %v", methods, want)
 	}
@@ -841,7 +841,7 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 			name: "wrong total",
 			response: func(w http.ResponseWriter) {
 				w.Header().Set("Content-Length", "1")
-				w.Header().Set("Content-Range", "bytes 0-0/99")
+				w.Header().Set("Content-Range", "bytes 0-1/99")
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write([]byte("d"))
 			},
@@ -850,17 +850,17 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 		{
 			name: "wrong content length",
 			response: func(w http.ResponseWriter) {
-				w.Header().Set("Content-Length", "2")
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Length", "3")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write([]byte("dd"))
+				_, _ = w.Write([]byte("ddd"))
 			},
 			code: "range_probe_content_length",
 		},
 		{
 			name: "empty chunked body",
 			response: func(w http.ResponseWriter) {
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
 				w.(http.Flusher).Flush()
 			},
@@ -869,10 +869,10 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 		{
 			name: "overlong chunked body",
 			response: func(w http.ResponseWriter) {
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
 				w.(http.Flusher).Flush()
-				_, _ = w.Write([]byte("dd"))
+				_, _ = w.Write([]byte("ddd"))
 			},
 			code: "range_probe_body_length",
 		},
@@ -881,7 +881,7 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 			response: func(w http.ResponseWriter) {
 				w.Header().Set("Content-Encoding", "gzip")
 				w.Header().Set("Content-Length", "1")
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write([]byte("d"))
 			},

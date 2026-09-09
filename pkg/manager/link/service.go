@@ -667,7 +667,13 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 			"request_creation_failed",
 		)
 	}
-	req.Header.Set("Range", "bytes=0-0")
+	// Avoid a zero end for ordinary objects: some CDNs misinterpret 0-0
+	// as an unbounded read. Still probe genuinely one-byte objects exactly.
+	probeEnd := int64(1)
+	if link.Size == 1 {
+		probeEnd = 0
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", probeEnd))
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Cache-Control", "no-cache")
 
@@ -704,51 +710,59 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 			"range_probe_encoding",
 		)
 	}
-	if err := validateLinkProbeContentRange(resp.Header.Get("Content-Range"), link.Size); err != nil {
+	probeLength, err := validateLinkProbeContentRange(resp.Header.Get("Content-Range"), link.Size, probeEnd)
+	if err != nil {
 		return NewRefetchableError(err, "range_probe_content_range")
 	}
-	if resp.ContentLength >= 0 && resp.ContentLength != 1 {
+	if resp.ContentLength >= 0 && resp.ContentLength != probeLength {
 		return NewRefetchableError(
-			fmt.Errorf("range probe Content-Length is %d, want 1", resp.ContentLength),
+			fmt.Errorf("range probe Content-Length is %d, want %d", resp.ContentLength, probeLength),
 			"range_probe_content_length",
 		)
 	}
 
-	// Read the complete one-byte response plus at most one sentinel byte. This
+	// Read the complete tiny response plus at most one sentinel byte. This
 	// proves the body is neither empty nor overlong and lets compliant transports
 	// reuse the connection without risking a full-file download when Range was
 	// ignored.
-	probe, err := io.ReadAll(io.LimitReader(resp.Body, 2))
+	probe, err := io.ReadAll(io.LimitReader(resp.Body, probeLength+1))
 	if err != nil {
 		return NewRetryableError(fmt.Errorf("range probe body failed: %w", err), "range_probe_body")
 	}
-	if len(probe) != 1 {
+	if int64(len(probe)) != probeLength {
 		return NewRefetchableError(
-			fmt.Errorf("range probe returned %d body bytes, want 1", len(probe)),
+			fmt.Errorf("range probe returned %d body bytes, want %d", len(probe), probeLength),
 			"range_probe_body_length",
 		)
 	}
 	return nil
 }
 
-func validateLinkProbeContentRange(value string, expectedSize int64) error {
+// validateLinkProbeContentRange returns the exact bounded body length. When
+// size is unknown, a one-byte object may legitimately clamp the requested end
+// at EOF; no other undersized range is accepted.
+func validateLinkProbeContentRange(value string, expectedSize, requestedEnd int64) (int64, error) {
 	value = strings.TrimSpace(value)
 	fields := strings.Fields(value)
 	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
-		return fmt.Errorf("range probe returned invalid Content-Range %q", value)
+		return 0, fmt.Errorf("range probe returned invalid Content-Range %q", value)
 	}
 	bounds, totalText, found := strings.Cut(fields[1], "/")
-	if !found || bounds != "0-0" || totalText == "" {
-		return fmt.Errorf("range probe returned invalid Content-Range %q", value)
+	if !found || totalText == "" {
+		return 0, fmt.Errorf("range probe returned invalid Content-Range %q", value)
 	}
 	total, err := strconv.ParseInt(totalText, 10, 64)
 	if err != nil || total <= 0 {
-		return fmt.Errorf("range probe returned invalid Content-Range %q", value)
+		return 0, fmt.Errorf("range probe returned invalid Content-Range %q", value)
 	}
 	if expectedSize > 0 && total != expectedSize {
-		return fmt.Errorf("range probe total %d does not match expected size %d", total, expectedSize)
+		return 0, fmt.Errorf("range probe total %d does not match expected size %d", total, expectedSize)
 	}
-	return nil
+	end := min(requestedEnd, total-1)
+	if bounds != "0-"+strconv.FormatInt(end, 10) {
+		return 0, fmt.Errorf("range probe returned invalid Content-Range %q", value)
+	}
+	return end + 1, nil
 }
 
 func (s *Service) validateWithRetry(ctx context.Context, link *types.DownloadLink) error {

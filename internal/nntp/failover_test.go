@@ -69,6 +69,7 @@ func TestFailoverArticleOutcomes(t *testing.T) {
 		{"missing then timeout", 1, []config.UsenetProvider{a, b}, map[string]error{a.Host: missing, b.Host: temporary}, temporary, []string{a.Host, b.Host, b.Host}},
 		{"retry switches backbone", 1, []config.UsenetProvider{a, b, c}, map[string]error{a.Host: temporary, b.Host: missing}, nil, []string{a.Host, b.Host, a.Host, c.Host}},
 		{"retry preserves missing exclusion", 1, []config.UsenetProvider{a, b, {Host: "provider-c", Backbone: "c"}}, map[string]error{a.Host: missing, b.Host: temporary}, nil, []string{a.Host, b.Host, "provider-c"}},
+		{"retry prefers untried provider", 2, []config.UsenetProvider{a, b, c}, map[string]error{a.Host: temporary, b.Host: temporary}, nil, []string{a.Host, b.Host, c.Host}},
 		{"same backbone resolves uncertainty", 1, []config.UsenetProvider{a, c}, map[string]error{a.Host: temporary, c.Host: missing}, missing, []string{a.Host, c.Host}},
 		{"unlabelled providers are independent", 1, []config.UsenetProvider{{Host: a.Host}, {Host: b.Host}}, map[string]error{a.Host: temporary, b.Host: missing}, temporary, nil},
 		{"backup follows missing primary", 1, []config.UsenetProvider{a, {Host: b.Host, Backup: true}}, map[string]error{a.Host: missing}, nil, []string{a.Host, b.Host}},

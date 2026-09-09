@@ -405,6 +405,9 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 			c.returnOrReleaseConn(currentConn, currentProvider)
 			return nil
 		}
+		// Remember transiently failed hosts throughout this retry sequence so
+		// an untried provider is preferred over cycling between failed hosts.
+		retryExclusions := exclusions.clone()
 		err = retry.Do(
 			func() error {
 				execErr := pendingErr
@@ -414,13 +417,13 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 					// Acquire only when another attempt will actually execute, after
 					// backoff. Never hold a connection slot while sleeping, or reset
 					// exclusions accumulated by earlier provider attempts.
-					retryExclusions := exclusions.clone()
 					retryExclusions.excludeHost(currentProvider.Host)
 					newConn, newProvider, connErr := c.getAnyAvailableConnection(ctx, retryExclusions)
 					if connErr != nil && ctx.Err() == nil {
-						// No usable alternative: allow the failed host again, but
-						// keep previously exhausted hosts and missing backbones out.
-						newConn, newProvider, connErr = c.getAnyAvailableConnection(ctx, exclusions)
+						// No usable untried alternative: retry only the last failed
+						// host, which was eligible under the outer exclusions. Do
+						// not reopen exhausted hosts or missing backbones.
+						newConn, newProvider, connErr = c.getConnectionFromProvider(ctx, currentProvider)
 					}
 					if connErr != nil {
 						acquisitionFailed = true

@@ -149,6 +149,35 @@ func TestFailoverPanicReleasesConnection(t *testing.T) {
 	}
 }
 
+func TestFailoverReturnsRetryAcquisitionFailure(t *testing.T) {
+	provider := config.UsenetProvider{Host: "127.0.0.1", Port: -1}
+	client := newFailoverTestClient(t, 1, config.UsenetProvider{Host: "provider-a"}, provider)
+	pool := client.pools[provider.Host]
+	// Only one existing session is usable. After it times out, reconnecting
+	// fails locally; that acquisition error must not become an older 430 or
+	// callback timeout, nor permit the excluded provider to be queried again.
+	for _, entry := range pool.conns[1:] {
+		_ = entry.conn.Close()
+		releaseConnectionEntry(entry)
+	}
+	pool.conns = pool.conns[:1]
+	var visited []string
+	err := client.ExecuteWithFailover(context.Background(), func(conn *Connection) error {
+		visited = append(visited, conn.address)
+		if conn.address == "provider-a" {
+			return classifyNNTPError(430, "article missing")
+		}
+		return NewTimeoutError(errors.New("temporary callback timeout"))
+	})
+	var nntpErr *Error
+	if !errors.As(err, &nntpErr) || nntpErr.Type != ErrorTypeConnection {
+		t.Fatalf("got %v, want retry acquisition failure", err)
+	}
+	if !slices.Equal(visited, []string{"provider-a", provider.Host}) {
+		t.Fatalf("unexpected extra callbacks: %v", visited)
+	}
+}
+
 func TestFailoverBusyPrimaryDoesNotUseBackup(t *testing.T) {
 	primary := config.UsenetProvider{Host: "provider-a"}
 	client := newFailoverTestClient(t, 1, primary, config.UsenetProvider{Host: "provider-b", Backup: true})

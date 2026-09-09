@@ -488,8 +488,13 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		}
 		if acquisitionFailed {
 			// Acquisition can fail on a different host from the last callback;
-			// do not attribute that error to the callback's provider.
-			continue
+			// do not attribute that error to the callback's provider or start
+			// another outer retry cycle after acquisition already exhausted
+			// both the alternative and original provider selections.
+			if IsArticleNotFoundError(err) {
+				return NewConnectionError(fmt.Errorf("acquire retry connection: %w", err))
+			}
+			return err
 		}
 
 		// Check if we should exclude this provider

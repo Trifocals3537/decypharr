@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/textproto"
 	"sort"
@@ -368,10 +369,14 @@ func (c *Client) isIdleExpired(lastUsed time.Time, now time.Time) bool {
 // ExecuteWithFailover executes an operation with automatic provider failover and retry logic.
 // Uses exclusion-based connection acquisition: gets ANY available connection,
 // and on retryable errors, retries with exponential backoff before excluding the provider.
-// Uses avast/retry-go for retry handling.
+// Article absence is conclusive only after every configured provider/backbone
+// has returned not-found; exhausted or unreachable providers are not evidence.
 func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connection) error) error {
 	var lastErr error
+	var lastTransientErr error
+	var lastMissingErr error
 	var exclusions providerExclusions
+	var missing providerExclusions
 
 	for providerAttempts := 0; providerAttempts < len(c.providers); providerAttempts++ {
 		if ctx.Err() != nil {
@@ -389,6 +394,7 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		// returnOrReleaseConn always releases the right semaphore slot.
 		var currentConn = conn
 		var currentProvider = connProvider
+		var acquisitionFailed bool
 		// Healthy streaming is the overwhelmingly common case. Avoid building
 		// retry configuration and invoking retry.Do unless the first execution
 		// actually fails. When it does fail, pendingErr lets the retry closure
@@ -399,12 +405,32 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 			c.returnOrReleaseConn(currentConn, currentProvider)
 			return nil
 		}
+		// Remember transiently failed hosts throughout this retry sequence so
+		// an untried provider is preferred over cycling between failed hosts.
+		retryExclusions := exclusions.clone()
 		err = retry.Do(
 			func() error {
 				execErr := pendingErr
 				if execErr != nil {
 					pendingErr = nil
 				} else {
+					// Acquire only when another attempt will actually execute, after
+					// backoff. Never hold a connection slot while sleeping, or reset
+					// exclusions accumulated by earlier provider attempts.
+					retryExclusions.excludeHost(currentProvider.Host)
+					newConn, newProvider, connErr := c.getAnyAvailableConnection(ctx, retryExclusions)
+					if connErr != nil && ctx.Err() == nil {
+						// No usable untried alternative: retry only the last failed
+						// host, which was eligible under the outer exclusions. Do
+						// not reopen exhausted hosts or missing backbones.
+						newConn, newProvider, connErr = c.getConnectionFromProvider(ctx, currentProvider)
+					}
+					if connErr != nil {
+						acquisitionFailed = true
+						return retry.Unrecoverable(connErr)
+					}
+					currentConn = newConn
+					currentProvider = newProvider
 					execErr = c.safeExecute(currentConn, fn)
 				}
 				if execErr == nil {
@@ -415,30 +441,12 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 				if errors.As(execErr, &nntpErr) {
 					switch nntpErr.Type {
 					case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
+						lastTransientErr = execErr
 						// Retriable error - release the potentially dead connection.
 						// Nil currentConn first to prevent double slot-release if new connection acquisition fails.
 						releasedConn := currentConn
-						failedProvider := currentProvider
 						currentConn = nil
 						c.release(releasedConn)
-
-						// Get a fresh connection for retry. Prefer a different
-						// provider after a connection/timeout/server-busy error;
-						// otherwise one slow provider can consume the whole DFS
-						// no-progress window before failover gets a chance. If
-						// there is no alternative provider, fall back to retrying
-						// the same one.
-						retryExclusions := providerExclusions{}
-						retryExclusions.excludeHost(failedProvider.Host)
-						newConn, newProvider, connErr := c.getAnyAvailableConnection(ctx, retryExclusions)
-						if connErr != nil {
-							newConn, newProvider, connErr = c.getAnyAvailableConnection(ctx, providerExclusions{})
-						}
-						if connErr != nil {
-							return retry.Unrecoverable(connErr)
-						}
-						currentConn = newConn
-						currentProvider = newProvider
 						return execErr // Retriable
 
 					case ErrorTypeArticleNotFound:
@@ -450,6 +458,7 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 						return retry.Unrecoverable(execErr)
 					}
 				} else if customerror.IsPanicError(execErr) {
+					lastTransientErr = execErr
 					// Panic error - release connection.
 					// Nil currentConn first to prevent double slot-release after retry loop.
 					releasedConn := currentConn
@@ -477,27 +486,66 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		// Handle failure
 		c.returnOrReleaseConn(currentConn, currentProvider)
 		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if acquisitionFailed {
+			// Acquisition can fail on a different host from the last callback;
+			// do not attribute that error to the callback's provider or start
+			// another outer retry cycle after acquisition already exhausted
+			// both the alternative and original provider selections.
+			if IsArticleNotFoundError(err) {
+				return NewConnectionError(fmt.Errorf("acquire retry connection: %w", err))
+			}
+			return err
+		}
 
 		// Check if we should exclude this provider
 		var nntpErr *Error
 		if errors.As(err, &nntpErr) {
 			switch nntpErr.Type {
 			case ErrorTypeArticleNotFound:
-				excludeForArticleNotFound(&exclusions, connProvider)
+				excludeForArticleNotFound(&exclusions, currentProvider)
+				excludeForArticleNotFound(&missing, currentProvider)
+				lastMissingErr = err
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
-				exclusions.excludeHost(connProvider.Host)
+				exclusions.excludeHost(currentProvider.Host)
 			default:
 				// Non-retriable error, return immediately
 				return err
 			}
 		} else if customerror.IsPanicError(err) {
-			exclusions.excludeHost(connProvider.Host)
+			exclusions.excludeHost(currentProvider.Host)
 		} else {
 			// Unknown error type - return immediately
 			return err
 		}
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if lastMissingErr != nil {
+		allMissing := true
+		for _, provider := range c.providers {
+			if !missing.excludes(provider) {
+				allMissing = false
+				break
+			}
+		}
+		if allMissing {
+			return lastMissingErr
+		}
+	}
+	if lastTransientErr != nil {
+		return lastTransientErr
+	}
+	if IsArticleNotFoundError(lastErr) {
+		// An acquisition failure may have been hidden by a later successful
+		// acquisition on another host. Missing evidence must cover every group,
+		// not merely the last callback that happened to run.
+		return NewConnectionError(errors.New("article availability could not be verified on all providers"))
+	}
 	if lastErr != nil {
 		return lastErr
 	}
@@ -1175,6 +1223,10 @@ type batchStatState struct {
 type providerExclusions struct {
 	hosts     map[string]struct{}
 	backbones map[string]struct{}
+}
+
+func (e providerExclusions) clone() providerExclusions {
+	return providerExclusions{hosts: maps.Clone(e.hosts), backbones: maps.Clone(e.backbones)}
 }
 
 func (e *providerExclusions) excludeHost(host string) {

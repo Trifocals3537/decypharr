@@ -151,10 +151,10 @@ func lifecycleDownloadLink(url string) types.DownloadLink {
 }
 
 func writeValidLinkProbe(w http.ResponseWriter) {
-	w.Header().Set("Content-Length", "1")
-	w.Header().Set("Content-Range", "bytes 0-0/4")
+	w.Header().Set("Content-Length", "2")
+	w.Header().Set("Content-Range", "bytes 0-1/4")
 	w.WriteHeader(http.StatusPartialContent)
-	_, _ = w.Write([]byte("d"))
+	_, _ = w.Write([]byte("da"))
 }
 
 func newLifecycleService(client *lifecycleTestClient, httpClient *http.Client, retries int) *Service {
@@ -245,7 +245,7 @@ func TestRefreshOwnerCancellationDoesNotCancelSharedRegeneration(t *testing.T) {
 	ownerCtx, cancelOwner := context.WithCancel(context.Background())
 	ownerResult := make(chan error, 1)
 	go func() {
-		_, err := service.Refresh(ownerCtx, entry, rejected)
+		_, err := service.Refresh(ownerCtx, entry, "video.mkv", rejected)
 		ownerResult <- err
 	}()
 	<-requestStarted
@@ -262,7 +262,7 @@ func TestRefreshOwnerCancellationDoesNotCancelSharedRegeneration(t *testing.T) {
 	waiterCtx := newDoneObservedContext(context.Background())
 	waiterResult := make(chan result, 1)
 	go func() {
-		link, err := service.Refresh(waiterCtx, entry, rejected)
+		link, err := service.Refresh(waiterCtx, entry, "video.mkv", rejected)
 		waiterResult <- result{link: link, err: err}
 	}()
 	<-waiterCtx.observed
@@ -644,6 +644,7 @@ func TestGetLinkAndRefreshShareOneProviderRegeneration(t *testing.T) {
 	old := lifecycleDownloadLink(server.URL + "/old")
 	replacement := lifecycleDownloadLink(server.URL + "/replacement")
 	unexpected := lifecycleDownloadLink(server.URL + "/unexpected")
+	old.Filename, replacement.Filename, unexpected.Filename = "bundle.rar", "bundle.rar", "bundle.rar"
 	client := &lifecycleTestClient{cacheLinks: true, links: []types.DownloadLink{old, replacement, unexpected}}
 	service := newLifecycleService(client, server.Client(), 0)
 	entry := lifecycleTestEntry()
@@ -660,7 +661,7 @@ func TestGetLinkAndRefreshShareOneProviderRegeneration(t *testing.T) {
 	<-replacementStarted
 
 	releaseTimer := time.AfterFunc(100*time.Millisecond, func() { close(releaseReplacement) })
-	secondLink, secondErr := service.Refresh(context.Background(), entry, old)
+	secondLink, secondErr := service.Refresh(context.Background(), entry, "video.mkv", old)
 	first := <-firstResult
 	_ = releaseTimer.Stop()
 	if first.err != nil || secondErr != nil {
@@ -682,7 +683,7 @@ func TestCanceledRefreshDoesNotCreateBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := service.Refresh(ctx, entry, lifecycleDownloadLink("https://cdn.example/rejected"))
+	_, err := service.Refresh(ctx, entry, "video.mkv", lifecycleDownloadLink("https://cdn.example/rejected"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Refresh() error = %v, want context cancellation", err)
 	}
@@ -774,7 +775,7 @@ func TestRefreshBackoffDelayCapsAtMaximum(t *testing.T) {
 	}
 }
 
-func TestValidationUsesOneByteRangeProbe(t *testing.T) {
+func TestValidationUsesTwoByteRangeProbe(t *testing.T) {
 	var methods []string
 	var encoding string
 	var cacheControl string
@@ -791,7 +792,7 @@ func TestValidationUsesOneByteRangeProbe(t *testing.T) {
 	if _, err := service.GetLink(context.Background(), lifecycleTestEntry(), "video.mkv"); err != nil {
 		t.Fatalf("GetLink() error = %v", err)
 	}
-	want := []string{"GET:bytes=0-0"}
+	want := []string{"GET:bytes=0-1"}
 	if fmt.Sprint(methods) != fmt.Sprint(want) {
 		t.Fatalf("requests = %v, want %v", methods, want)
 	}
@@ -841,7 +842,7 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 			name: "wrong total",
 			response: func(w http.ResponseWriter) {
 				w.Header().Set("Content-Length", "1")
-				w.Header().Set("Content-Range", "bytes 0-0/99")
+				w.Header().Set("Content-Range", "bytes 0-1/99")
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write([]byte("d"))
 			},
@@ -850,17 +851,17 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 		{
 			name: "wrong content length",
 			response: func(w http.ResponseWriter) {
-				w.Header().Set("Content-Length", "2")
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Length", "3")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write([]byte("dd"))
+				_, _ = w.Write([]byte("ddd"))
 			},
 			code: "range_probe_content_length",
 		},
 		{
 			name: "empty chunked body",
 			response: func(w http.ResponseWriter) {
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
 				w.(http.Flusher).Flush()
 			},
@@ -869,10 +870,10 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 		{
 			name: "overlong chunked body",
 			response: func(w http.ResponseWriter) {
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
 				w.(http.Flusher).Flush()
-				_, _ = w.Write([]byte("dd"))
+				_, _ = w.Write([]byte("ddd"))
 			},
 			code: "range_probe_body_length",
 		},
@@ -881,7 +882,7 @@ func TestValidationRejectsMalformedRangeProbe(t *testing.T) {
 			response: func(w http.ResponseWriter) {
 				w.Header().Set("Content-Encoding", "gzip")
 				w.Header().Set("Content-Length", "1")
-				w.Header().Set("Content-Range", "bytes 0-0/4")
+				w.Header().Set("Content-Range", "bytes 0-1/4")
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write([]byte("d"))
 			},

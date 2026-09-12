@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -70,31 +71,6 @@ type FileGroup struct {
 	metadata       *fileAnalysisResult
 	fileMeta       map[string]filePartMeta
 	Groups         map[string]struct{}
-}
-
-func (f *FileGroup) getMetadata() *fileAnalysisResult {
-	if f.metadata != nil {
-		return f.metadata
-	}
-	// Heuristic: assume segment is ~97% of reported bytes (yEnc overhead)
-	if len(f.Files) == 0 || len(f.Files[0].Segments) == 0 {
-		return &fileAnalysisResult{}
-	}
-
-	metadata := &fileAnalysisResult{}
-	// Estimate actual segment size from reported bytes (account for ~3% yEnc overhead)
-	reportedBytes := int64(f.Files[0].Segments[0].Bytes)
-	if reportedBytes <= 0 {
-		reportedBytes = 750000 // Default 750KB segment
-	}
-	metadata.segmentSize = int64(float64(reportedBytes) * 0.97)
-	if metadata.segmentSize <= 0 {
-		metadata.segmentSize = reportedBytes
-	}
-	metadata.fileSize = metadata.segmentSize * int64(len(f.Files[0].Segments))
-	metadata.lastFileSize = metadata.segmentSize * int64(len(f.Files[len(f.Files)-1].Segments))
-	f.metadata = metadata
-	return f.metadata
 }
 
 // NewParser creates a new simplified NZB parser with a connection manager
@@ -216,9 +192,12 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 	}()
 
 	// Parse each group (with deferred archive option)
-	files := p.processFileGroups(ctx, groups, nzb.Password)
+	files, groupErr := p.processFileGroups(ctx, groups, nzb.Password)
 
 	if len(files) == 0 {
+		if groupErr != nil {
+			return nil, fmt.Errorf("no valid files found in NZB: %w", groupErr)
+		}
 		return nil, fmt.Errorf("no valid files found in NZB")
 	}
 
@@ -244,6 +223,9 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 			skippedFiles++
 			skippedErr = err
 			continue
+		}
+		if err := p.verifyImportFile(ctx, &file, cfg.Usenet.ImportAvailabilitySamplePercent); err != nil {
+			return nil, err
 		}
 		nzb.TotalSize += file.Size
 		file.NzbID = nzb.ID
@@ -668,9 +650,9 @@ func (p *NZBParser) isRarFile(filename string) bool {
 		rarVolumePattern.MatchString(filename)
 }
 
-func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*FileGroup, password string) []storage.NZBFile {
+func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*FileGroup, password string) ([]storage.NZBFile, error) {
 	if len(groups) == 0 {
-		return nil
+		return nil, nil
 	}
 	rarCounts, sevenZCounts, zipCounts, mediaCounts, deferredCounts := 0, 0, 0, 0, 0
 
@@ -685,23 +667,31 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 
 	// Use a Mapper with limited concurrency to prevent goroutine explosion
 	// when nested with RAR/archive parsers that also use parallel processing
-	mapper := iter.Mapper[FileGroup, []*storage.NZBFile]{
+	type groupResult struct {
+		files []*storage.NZBFile
+		err   error
+	}
+	mapper := iter.Mapper[FileGroup, groupResult]{
 		MaxGoroutines: p.maxConcurrent,
 	}
 
-	results := mapper.Map(fileGroups, func(g *FileGroup) []*storage.NZBFile {
+	results := mapper.Map(fileGroups, func(g *FileGroup) groupResult {
 		files, err := p.processFileGroup(ctx, g, password)
 		if err != nil {
 			p.logger.Warn().Err(err).Str("group", g.BaseName).Msg("Failed to process file group")
-			return nil
+			return groupResult{err: err}
 		}
-		return files
+		return groupResult{files: files}
 	})
 
 	// Filter nils
 	var files []storage.NZBFile
-	for _, groupFiles := range results {
-		for _, f := range groupFiles {
+	var failures []error
+	for _, result := range results {
+		if result.err != nil {
+			failures = append(failures, result.err)
+		}
+		for _, f := range result.files {
 			if f != nil {
 				files = append(files, *f)
 				// Count types
@@ -727,7 +717,7 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 		}
 	}
 
-	return files
+	return files, errors.Join(failures...)
 }
 
 // Simplified individual group processing
@@ -754,118 +744,7 @@ func (p *NZBParser) processFileGroup(ctx context.Context, group *FileGroup, pass
 }
 
 func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGroup) error {
-	sort.Slice(group.Files, func(i, j int) bool {
-		if group.Files[i].Number != group.Files[j].Number {
-			return group.Files[i].Number < group.Files[j].Number
-		}
-		return group.Files[i].Filename < group.Files[j].Filename
-	})
-
-	firstFile := group.Files[0]
-	// Find the file with the most segments to use as the reference for segment size
-	// This avoids issues where the first file is a small NFO/NZB with different characteristics
-	maxSegments := 0
-	for _, f := range group.Files {
-		if len(f.Segments) > maxSegments {
-			maxSegments = len(f.Segments)
-			firstFile = f
-		}
-	}
-
-	if len(firstFile.Segments) == 0 {
-		return fmt.Errorf("no Segments in reference file of group %s", group.BaseName)
-	}
-	firstSegment := firstFile.Segments[0]
-
-	lastFile := group.Files[len(group.Files)-1]
-	lastSegment := lastFile.Segments[0]
-
-	// If first and last are the same file, only need one fetch
-	sameFile := len(group.Files) == 1
-
-	type headerResult struct {
-		data *nntp.YencMetadata
-		err  error
-	}
-
-	// Fetch both headers in parallel
-	firstCh := make(chan headerResult, 1)
-	lastCh := make(chan headerResult, 1)
-
-	go func() {
-		var data *nntp.YencMetadata
-		// GetHeaderPrefix drains the body and returns the connection to the pool;
-		// we only need yEnc metadata (name/size/offsets), not a decoded snippet.
-		err := p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
-			d, e := conn.GetHeaderPrefix(firstSegment.Id, metadataOnly)
-			data = d
-			return e
-		})
-		firstCh <- headerResult{data, err}
-	}()
-
-	if !sameFile {
-		go func() {
-			var data *nntp.YencMetadata
-			err := p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
-				d, e := conn.GetHeaderPrefix(lastSegment.Id, metadataOnly)
-				data = d
-				return e
-			})
-			lastCh <- headerResult{data, err}
-		}()
-	}
-
-	// Wait for first result
-	var firstResult headerResult
-	select {
-	case firstResult = <-firstCh:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	if firstResult.err != nil {
-		return fmt.Errorf("failed to fetch first segment header: %w", firstResult.err)
-	}
-	yencData := firstResult.data
-
-	// Update the group's filename if the header provides a better one
-	// This fixes issues where the group name is based on a small .nzb file or similar
-	if yencData.Name != "" && group.Type == storage.NZBFileTypeMedia {
-		// Only update if it looks like a valid filename
-		cleanName := utils.RemoveInvalidChars(yencData.Name)
-		if cleanName != "" {
-			group.ActualFilename = cleanName
-		}
-	}
-
-	segmentSize := yencData.End - yencData.Begin + 1
-	fileSize := yencData.Size
-
-	// get last file size
-	var lastFileSize int64
-	if sameFile {
-		lastFileSize = fileSize
-	} else {
-		var lastResult headerResult
-		select {
-		case lastResult = <-lastCh:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		if lastResult.err != nil {
-			return fmt.Errorf("failed to fetch last segment header: %w", lastResult.err)
-		}
-		lastFileSize = lastResult.data.Size
-	}
-
-	group.metadata = &fileAnalysisResult{
-		fileSize:     fileSize,
-		lastFileSize: lastFileSize,
-		segmentSize:  segmentSize,
-	}
-	return nil
+	return p.analyzeFileGeometry(ctx, group)
 }
 
 // Process regular media files
@@ -910,6 +789,10 @@ func (p *NZBParser) processMediaFile(group *FileGroup, password string) *storage
 				Str("file", nzbFile.Filename).
 				Msg("Incomplete or inconsistent segment numbering; rejecting media file")
 			return nil
+		}
+		for i := range segments {
+			segments[i].StartOffset += currentOffset
+			segments[i].EndOffset += currentOffset
 		}
 		file.Segments = append(file.Segments, segments...)
 		currentOffset += totalSize

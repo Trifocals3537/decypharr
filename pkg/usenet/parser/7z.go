@@ -251,7 +251,10 @@ func (p *SevenZParser) processRARFilesFromPositions(
 	}
 
 	// Aggregate file parts across volumes (files spanning multiple volumes will have multiple entries)
-	rarFileEntries := p.rarParser.aggregateFileParts(allRawFiles)
+	rarFileEntries, err := p.rarParser.aggregateFileParts(allRawFiles)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build a map of RAR filename -> offset in 7z
 	rarFileOffsets := make(map[string]int64)

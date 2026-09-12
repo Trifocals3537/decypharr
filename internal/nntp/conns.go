@@ -433,18 +433,8 @@ func (c *Connection) GetArticle(messageID string) (*Article, error) {
 
 func (c *Connection) GetHeader(messageID string, maxSnippet int) (*YencMetadata, error) {
 	messageID = FormatMessageID(messageID)
-	// Send BODY command to start streaming
-	if err := c.sendCommandArg("BODY", messageID); err != nil {
-		return nil, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
-	}
-
-	code, message, err := c.readResponseCodeWithDeadline(timeouts.StreamBodyTimeout)
-	if err != nil {
-		return nil, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
-	}
-
-	if code != 222 {
-		return nil, classifyNNTPError(code, string(message))
+	if err := c.requestBody(messageID); err != nil {
+		return nil, err
 	}
 
 	// Set read deadline to prevent hanging on stalled servers
@@ -499,17 +489,8 @@ func metadataFromDecoder(dec *nntpyenc.Decoder, snippet []byte) *YencMetadata {
 // while keeping the NNTP connection reusable by draining the decoder to EOF.
 func (c *Connection) GetHeaderPrefix(messageID string, maxSnippet int) (*YencMetadata, error) {
 	messageID = FormatMessageID(messageID)
-	if err := c.sendCommandArg("BODY", messageID); err != nil {
-		return nil, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
-	}
-
-	code, message, err := c.readResponseCodeWithDeadline(timeouts.StreamBodyTimeout)
-	if err != nil {
-		return nil, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
-	}
-
-	if code != 222 {
-		return nil, classifyNNTPError(code, string(message))
+	if err := c.requestBody(messageID); err != nil {
+		return nil, err
 	}
 
 	_ = c.conn.SetReadDeadline(utils.Now().Add(timeouts.StreamBodyTimeout))
@@ -529,28 +510,22 @@ func (c *Connection) GetHeaderPrefix(messageID string, maxSnippet int) (*YencMet
 		snippet = snippet[:n]
 	}
 
-	if _, err := c.copyBodyWithIdleDeadline(io.Discard, dec, timeouts.StreamBodyTimeout); err != nil {
+	drained, err := c.copyBodyWithIdleDeadline(io.Discard, dec, timeouts.StreamBodyTimeout)
+	if err != nil {
 		_ = c.conn.Close()
 		return nil, classifyTransferError("failed to drain article body", err)
 	}
 
-	return metadataFromDecoder(dec, snippet), nil
+	meta := metadataFromDecoder(dec, snippet)
+	meta.DecodedSize = int64(len(snippet)) + drained
+	return meta, nil
 }
 
 // GetBody retrieves article body by message ID as raw bytes (used by GetHeader)
 func (c *Connection) GetBody(messageID string) ([]byte, error) {
 	messageID = FormatMessageID(messageID)
-	if err := c.sendCommandArg("BODY", messageID); err != nil {
-		return nil, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
-	}
-
-	code, message, err := c.readResponseCodeWithDeadline(timeouts.StreamBodyTimeout)
-	if err != nil {
-		return nil, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
-	}
-
-	if code != 222 {
-		return nil, classifyNNTPError(code, string(message))
+	if err := c.requestBody(messageID); err != nil {
+		return nil, err
 	}
 
 	// Set read deadline to prevent hanging on stalled servers
@@ -576,17 +551,8 @@ func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 // returning the parsed yEnc metadata from the same pass.
 func (c *Connection) GetDecodedBodyWithMetadata(messageID string) ([]byte, *YencMetadata, error) {
 	messageID = FormatMessageID(messageID)
-	if err := c.sendCommandArg("BODY", messageID); err != nil {
-		return nil, nil, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
-	}
-
-	code, message, err := c.readResponseCodeWithDeadline(timeouts.StreamBodyTimeout)
-	if err != nil {
-		return nil, nil, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
-	}
-
-	if code != 222 {
-		return nil, nil, classifyNNTPError(code, string(message))
+	if err := c.requestBody(messageID); err != nil {
+		return nil, nil, err
 	}
 
 	dec := nntpyenc.AcquireNNTPDecoder(c.reader)
@@ -595,29 +561,22 @@ func (c *Connection) GetDecodedBodyWithMetadata(messageID string) ([]byte, *Yenc
 
 	// Pre-allocate output buffer for decoded data (~700KB typical)
 	output := bytes.NewBuffer(make([]byte, 0, 750*1024))
-	_, err = c.copyBodyWithIdleDeadline(output, dec, timeouts.StreamBodyTimeout)
+	_, err := c.copyBodyWithIdleDeadline(output, dec, timeouts.StreamBodyTimeout)
 
 	if err != nil {
 		return nil, nil, classifyTransferError("streaming yenc decode failed", err)
 	}
 	decoded := output.Bytes()
 
-	return decoded, metadataFromDecoder(dec, nil), nil
+	meta := metadataFromDecoder(dec, nil)
+	meta.DecodedSize = int64(len(decoded))
+	return decoded, meta, nil
 }
 
 func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 	messageID = FormatMessageID(messageID)
-	if err := c.sendCommandArg("BODY", messageID); err != nil {
-		return 0, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
-	}
-
-	code, message, err := c.readResponseCodeWithDeadline(timeouts.StreamBodyTimeout)
-	if err != nil {
-		return 0, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
-	}
-
-	if code != 222 {
-		return 0, classifyNNTPError(code, string(message))
+	if err := c.requestBody(messageID); err != nil {
+		return 0, err
 	}
 
 	dec := nntpyenc.AcquireNNTPDecoder(c.reader)

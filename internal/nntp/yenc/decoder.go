@@ -3,6 +3,8 @@ package yenc
 import (
 	"bufio"
 	"bytes"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"strconv"
@@ -11,16 +13,17 @@ import (
 
 // Metadata contains yEnc header information and snippet bytes.
 type Metadata struct {
-	Name     string // filename
-	Size     int64  // total file size
-	Part     int64  // part number
-	Total    int64  // total parts
-	Begin    int64  // part start byte
-	End      int64  // part end byte
-	Offset   int64  // part offset within the file
-	PartSize int64  // part size (decoded)
-	LineSize int    // line length
-	Snippet  []byte
+	Name        string // filename
+	Size        int64  // total file size
+	Part        int64  // part number
+	Total       int64  // total parts
+	Begin       int64  // part start byte
+	End         int64  // part end byte
+	Offset      int64  // part offset within the file
+	PartSize    int64  // part size (decoded)
+	DecodedSize int64  // Actual decoded body length, set only after a complete body read.
+	LineSize    int    // line length
+	Snippet     []byte
 }
 
 // UsePureGo forces the pure-Go yEnc decoder even when CGO/rapidyenc is available.
@@ -69,16 +72,18 @@ func (m DecoderMeta) End() int64 {
 // pureGoYencDecoder is a streaming yEnc decoder implemented in pure Go.
 // It consumes yEnc control lines and decodes payload bytes incrementally.
 type pureGoYencDecoder struct {
-	r        *bufio.Reader
-	meta     *DecoderMeta
-	out      []byte
-	outPos   int
-	scratch  []byte // reused buffer for lines longer than the bufio buffer (rare)
-	sawBegin bool
-	sawEnd   bool
-	nntp     bool
-	done     bool
-	readErr  error
+	r            *bufio.Reader
+	meta         *DecoderMeta
+	out          []byte
+	outPos       int
+	scratch      []byte // reused buffer for lines longer than the bufio buffer (rare)
+	sawBegin     bool
+	sawEnd       bool
+	nntp         bool
+	done         bool
+	readErr      error
+	decodedBytes int64
+	checksum     uint32
 }
 
 func newPureGoYencDecoder(r io.Reader, meta *DecoderMeta) *pureGoYencDecoder {
@@ -223,7 +228,21 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 		parseYPartLine(line, d.meta)
 		return false, nil
 	case bytes.HasPrefix(line, []byte("=yend ")):
+		expected := d.meta.PartSize
 		parseYEndLine(line, d.meta)
+		if d.meta.PartSize != d.decodedBytes || (expected > 0 && expected != d.decodedBytes) {
+			return false, fmt.Errorf("yEnc decoded size does not match header/footer")
+		}
+		for field := range strings.FieldsSeq(string(line)) {
+			key, value, ok := strings.Cut(field, "=")
+			if !ok || (key != "pcrc32" && (key != "crc32" || d.meta.PartNumber > 0)) {
+				continue
+			}
+			want, err := strconv.ParseUint(value, 16, 32)
+			if err != nil || uint32(want) != d.checksum {
+				return false, fmt.Errorf("yEnc CRC32 mismatch")
+			}
+		}
 		d.sawEnd = true
 		// yEnc ends before the NNTP response does. Drain any epilogue and the
 		// terminator before allowing this connection to return to its pool.
@@ -249,6 +268,11 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 		}
 		d.out = append(d.out, b-42)
 	}
+	if escaped {
+		return false, fmt.Errorf("truncated yEnc escape")
+	}
+	d.decodedBytes += int64(len(d.out))
+	d.checksum = crc32.Update(d.checksum, crc32.IEEETable, d.out)
 
 	return false, nil
 }

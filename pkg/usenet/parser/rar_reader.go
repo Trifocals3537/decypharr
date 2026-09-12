@@ -292,11 +292,9 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 					}
 					file.SplitBefore = encHeader.Flags&RAR5HeaderFlagSplitBefore != 0
 					file.SplitAfter = encHeader.Flags&RAR5HeaderFlagSplitAfter != 0
-					if file != nil {
-						// Note: file.IsEncrypted is now set correctly from extra area parsing
-						// Headers being encrypted does NOT mean data is encrypted
-						result.Files = append(result.Files, file)
-					}
+					// Headers being encrypted does NOT mean data is encrypted;
+					// file.IsEncrypted is set from the file's extra area instead.
+					result.Files = append(result.Files, file)
 				}
 
 				// Skip data section

@@ -28,7 +28,8 @@ type SegmentMeta struct {
 	EndOffset   int64 // Inclusive end offset
 
 	// yEnc decoding hints
-	SegmentDataStart int64 // Offset within decoded data where actual file data begins
+	SegmentDataStart int64                       // Offset within decoded data where actual file data begins
+	Source           *storage.NZBArticleGeometry // Original posted-file geometry, nil for legacy maps.
 }
 
 // NewSegmentMeta creates a SegmentMeta from a storage.NZBSegment.
@@ -40,6 +41,7 @@ func NewSegmentMeta(seg storage.NZBSegment) SegmentMeta {
 		StartOffset:      seg.StartOffset,
 		EndOffset:        seg.EndOffset,
 		SegmentDataStart: seg.SegmentDataStart,
+		Source:           seg.Source,
 	}
 }
 

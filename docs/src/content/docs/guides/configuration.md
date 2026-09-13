@@ -365,7 +365,7 @@ configured. The key is redacted from the configuration API and is never shown
 in the Web UI. Changing it invalidates existing `.strm` URLs; use a new empty
 export directory if deliberate key rotation is required.
 
-See the [STRM Library guide](/guides/mounting/strm/) for media-server setup,
+See the [STRM Library guide](../mounting/strm/) for media-server setup,
 delivery choices, and ownership safeguards.
 
 ## Health Checker
@@ -399,7 +399,7 @@ delivery choices, and ownership safeguards.
 | `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled repair sweeps                   | `false`     |
 | `nntp_connection_percent` | Share of NNTP connections probes may use, to avoid starving downloads      | `20`        |
 
-See the [Health Checker & Repair guide](/guides/repair/) for the full model, API, and Browse-page integration.
+See the [Health Checker & Repair guide](../repair/) for the full model, API, and Browse-page integration.
 
 ## Arr Configuration
 

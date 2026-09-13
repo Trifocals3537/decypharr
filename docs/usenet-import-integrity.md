@@ -14,6 +14,17 @@ It must not estimate missing bytes or join disconnected archive fragments.
   Required AES block padding is distinct from the advertised logical size.
 - Actual sampled article bodies before the parser returns an importable result.
   Both decoder backends check supplied per-article CRCs and decoded sizes.
+- Sampled bodies must match the original posted file's size, byte range, and
+  supplied part counters, not just be internally consistent. This source
+  geometry survives archive slicing and is checked on subsequent streaming
+  reads before bytes are published to the cache. Zero-based NZB numbering is
+  normalized once; it does not permit neighboring yEnc parts to substitute.
+- A genuinely empty RAR member is skipped after archive-chain validation. It
+  cannot invalidate a separate complete media member or excuse missing bytes
+  from a nonempty member. Empty-only archives are not successful media imports.
+- The pure-Go decoder independently parses the required yEnc footer size. It
+  rejects missing, malformed, overflowing, or duplicate sizes even if the
+  article's supplied CRC matches its decoded payload.
 
 An article listing is not proof of a readable body: some servers answer `STAT`
 successfully while retrieval fails. When `BODY` returns 430, Decypharr tries
@@ -43,6 +54,20 @@ These changes affect new parses. They do not rewrite existing metadata, replace
 library files, perform automatic PAR2 repair, or migrate a deployment. Existing
 failures should be reparsed and compared in isolation before any approved,
 checkpointed replacement.
+
+## Saved-map compatibility
+
+New maps retain source geometry in an optional extension to the existing v2
+numeric metadata region. Header-only scans and sampled message-ID scans do not
+read that region, and streaming validation uses the existing decode pass with
+no additional article request. There is a small per-segment metadata cost.
+
+Legacy maps remain readable, but their missing source geometry is not guessed;
+they retain the existing checksum and requested-slice checks rather than the
+new source-position guarantee. Reparse them in isolation to validate stronger
+maps. Older readers can read the unchanged v2 columns, but an older writer will
+drop the optional geometry if it rewrites a map. Keep a metadata checkpoint
+before any deployment or rollback; no automatic metadata migration is performed.
 
 Format references: [RAR 5 specification](https://www.rarlab.com/technote.htm),
 [NNTP article retrieval, RFC 3977](https://datatracker.ietf.org/doc/html/rfc3977#section-6.2).

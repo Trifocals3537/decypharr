@@ -193,6 +193,12 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 			hasNoneStored = true
 			continue
 		}
+		// A valid empty member has no byte range to map. Do not let an empty
+		// sidecar reject the media beside it. Split-chain and declared/packed
+		// size validation has already run; mismatched nonzero sizes still fail.
+		if rarFile.UncompressedSize == 0 && rarFile.PackedSize == 0 {
+			continue
+		}
 
 		name := utils.RemoveInvalidChars(path.Base(rarFile.Name))
 		if name == "" {

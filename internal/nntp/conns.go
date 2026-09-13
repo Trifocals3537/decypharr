@@ -574,9 +574,16 @@ func (c *Connection) GetDecodedBodyWithMetadata(messageID string) ([]byte, *Yenc
 }
 
 func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
+	n, _, err := c.StreamBodyWithMetadata(messageID, w)
+	return n, err
+}
+
+// StreamBodyWithMetadata returns geometry from the same decoding pass. Callers
+// using a staging writer must validate it before publishing the cached slice.
+func (c *Connection) StreamBodyWithMetadata(messageID string, w io.Writer) (int64, *YencMetadata, error) {
 	messageID = FormatMessageID(messageID)
 	if err := c.requestBody(messageID); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	dec := nntpyenc.AcquireNNTPDecoder(c.reader)
@@ -584,9 +591,11 @@ func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 	defer nntpyenc.ReleaseDecoder(dec)
 	n, err := c.copyBodyWithIdleDeadline(w, dec, timeouts.StreamBodyTimeout)
 	if err != nil {
-		return n, classifyTransferError("streaming yenc decode failed", err)
+		return n, nil, classifyTransferError("streaming yenc decode failed", err)
 	}
-	return n, nil
+	meta := metadataFromDecoder(dec, nil)
+	meta.DecodedSize = n
+	return n, meta, nil
 }
 
 // readDotBytes reads dot-terminated NNTP data using textproto.DotReader

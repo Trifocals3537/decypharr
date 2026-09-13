@@ -214,7 +214,7 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		}
 
 		// Stream the decoded body into the chosen tier.
-		n, err := conn.StreamBody(messageID, writer)
+		n, meta, err := conn.StreamBodyWithMetadata(messageID, writer)
 		if err != nil {
 			writer.Discard()
 			if ctxErr := downloadCtx.Err(); ctxErr != nil {
@@ -225,6 +225,13 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		if ctxErr := downloadCtx.Err(); ctxErr != nil {
 			writer.Discard()
 			return ctxErr
+		}
+		// New imports retain raw article geometry separately from logical
+		// archive offsets. Never publish a CRC-valid but misplaced article.
+		// Legacy maps without provenance keep their existing slice checks.
+		if seg.Source != nil && (meta == nil || meta.PartSize != n || !seg.Source.Matches(meta.Size, meta.Begin, meta.End, meta.Part, meta.Total, n)) {
+			writer.Discard()
+			return &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "article yEnc geometry does not match expected source"}
 		}
 
 		// Treat zero-byte articles as missing — the article exists on the

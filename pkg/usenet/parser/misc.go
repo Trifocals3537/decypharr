@@ -119,10 +119,13 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 		return 0, nil
 	}
 	segments := make([]storage.NZBSegment, 0, len(file.Segments))
+	// One backing allocation for immutable provenance, retained through slices.
+	sources := make([]storage.NZBArticleGeometry, len(file.Segments))
 	var offset int64
-	for _, s := range file.Segments {
+	for i, s := range file.Segments {
 		size := min(segmentSize, fileSize-offset)
-		segments = append(segments, storage.NZBSegment{Number: s.Number, MessageID: s.Id, Bytes: size, StartOffset: offset, EndOffset: offset + size - 1, Group: group.BaseName})
+		sources[i] = storage.NZBArticleGeometry{Size: fileSize, Offset: offset, Bytes: size, Part: int64(i + 1), Total: int64(len(file.Segments))}
+		segments = append(segments, storage.NZBSegment{Number: s.Number, MessageID: s.Id, Bytes: size, StartOffset: offset, EndOffset: offset + size - 1, Group: group.BaseName, Source: &sources[i]})
 		offset += size
 	}
 	return offset, segments

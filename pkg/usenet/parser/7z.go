@@ -466,6 +466,7 @@ func sliceSegmentsForRange(
 			relStart := overlapStart - segAbsStart
 
 			slicedSeg := storage.NZBSegment{
+				Source:           seg.Source,
 				Number:           seg.Number,
 				MessageID:        seg.MessageID,
 				Bytes:            overlapEnd - overlapStart + 1,

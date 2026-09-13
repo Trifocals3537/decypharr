@@ -1197,6 +1197,7 @@ func (p *RARParser) buildSegmentsForVolumePart(
 		// Create a new segment descriptor
 		// StartOffset/EndOffset will be set by buildSegmentsForFile as file output positions
 		slicedSegment := storage.NZBSegment{
+			Source:           seg.Source,
 			Number:           seg.Number,
 			MessageID:        seg.MessageID,
 			Bytes:            bytesToRead,
@@ -1278,6 +1279,7 @@ func sliceSegmentsForRangeSimple(
 
 		// Create sliced segment
 		slicedSeg := storage.NZBSegment{
+			Source:           seg.Source,
 			Number:           seg.Number,
 			MessageID:        seg.MessageID,
 			Bytes:            bytesToRead,

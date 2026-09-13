@@ -279,6 +279,7 @@ func TestImportPreservesOnlyRequiredEncryptionPadding(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newContentTestParser(t, map[string][]byte{"<part@fixture.invalid>": encodeContentTestArticle(make([]byte, 64), "video.mkv")})
 			file := &storage.NZBFile{Name: "video.mkv", Size: tc.size, IsEncrypted: tc.encrypted, Segments: []storage.NZBSegment{{Number: 1, MessageID: "part@fixture.invalid", Bytes: 64, StartOffset: 0, EndOffset: 63}}}
+			file.Segments[0].Source = &storage.NZBArticleGeometry{Size: 64, Bytes: 64, Part: 1, Total: 1}
 			if err := p.verifyImportFile(t.Context(), file, 1); (err == nil) != tc.valid {
 				t.Fatalf("err=%v valid=%v", err, tc.valid)
 			}

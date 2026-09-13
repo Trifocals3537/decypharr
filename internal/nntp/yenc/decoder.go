@@ -229,10 +229,14 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 		return false, nil
 	case bytes.HasPrefix(line, []byte("=yend ")):
 		expected := d.meta.PartSize
-		parseYEndLine(line, d.meta)
-		if d.meta.PartSize != d.decodedBytes || (expected > 0 && expected != d.decodedBytes) {
+		footerSize, err := parseYEndSize(line)
+		if err != nil {
+			return false, err
+		}
+		if footerSize != d.decodedBytes || (expected > 0 && expected != d.decodedBytes) {
 			return false, fmt.Errorf("yEnc decoded size does not match header/footer")
 		}
+		d.meta.PartSize = footerSize
 		for field := range strings.FieldsSeq(string(line)) {
 			key, value, ok := strings.Cut(field, "=")
 			if !ok || (key != "pcrc32" && (key != "crc32" || d.meta.PartNumber > 0)) {
@@ -345,10 +349,11 @@ func parseYPartLine(line []byte, meta *DecoderMeta) {
 	}
 }
 
-func parseYEndLine(line []byte, meta *DecoderMeta) {
+func parseYEndSize(line []byte) (int64, error) {
 	s := strings.TrimSpace(string(line))
 	rest := strings.TrimSpace(strings.TrimPrefix(s, "=yend "))
-
+	var size int64
+	found := false
 	for field := range strings.FieldsSeq(rest) {
 		k, v, ok := strings.Cut(field, "=")
 		if !ok {
@@ -357,10 +362,19 @@ func parseYEndLine(line []byte, meta *DecoderMeta) {
 		if k != "size" {
 			continue
 		}
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			meta.PartSize = n
+		if found {
+			return 0, fmt.Errorf("duplicate yEnc footer size")
 		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("invalid yEnc footer size")
+		}
+		size, found = n, true
 	}
+	if !found {
+		return 0, fmt.Errorf("missing yEnc footer size")
+	}
+	return size, nil
 }
 
 func acquirePureGoDecoder(r io.Reader) *Decoder {

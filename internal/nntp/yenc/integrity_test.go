@@ -21,6 +21,11 @@ func TestPureGoRejectsCorruptArticleIntegrity(t *testing.T) {
 		{"malformed CRC", begin + "=yend size=4 part=1 pcrc32=wrong\r\n", false},
 		{"short decoded data", strings.Replace(begin, "kkkk", "kkk", 1) + goodEnd, false},
 		{"inconsistent footer size", begin + strings.Replace(goodEnd, "size=4", "size=5", 1), false},
+		{"missing footer size", begin + strings.Replace(goodEnd, "size=4 ", "", 1), false},
+		{"nonnumeric footer size", begin + strings.Replace(goodEnd, "size=4", "size=invalid", 1), false},
+		{"overflowing footer size", begin + strings.Replace(goodEnd, "size=4", "size=9223372036854775808", 1), false},
+		{"negative footer size", begin + strings.Replace(goodEnd, "size=4", "size=-4", 1), false},
+		{"duplicate footer size", begin + strings.Replace(goodEnd, "size=4", "size=5 size=4", 1), false},
 		{"inconsistent part size", strings.Replace(begin, "end=4", "end=5", 1) + goodEnd, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

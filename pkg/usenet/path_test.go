@@ -21,19 +21,29 @@ func TestFlattenLogicalNZBFileName(t *testing.T) {
 			want:  "[Group] Show Name - S01E02 [1080p].mkv",
 		},
 		{
-			name:  "archive slash path",
-			input: "Season 01/Episode 01.mkv",
-			want:  "Episode 01.mkv",
+			name:  "pokemon whosawhatsit",
+			input: "Pokemon.1997.S20E15.Someone.We.Cant.See!.Whosawhatsit?!.English.Dub.1080p.HDTV.x265.10bit.AAC.2.0.Sonarr.TVDB-Vengeance.mkv",
+			want:  "Pokemon.1997.S20E15.Someone.We.Cant.See!.Whosawhatsit_!.English.Dub.1080p.HDTV.x265.10bit.AAC.2.0.Sonarr.TVDB-Vengeance.mkv",
 		},
 		{
-			name:  "archive backslash path",
-			input: `Season 01\Episode 01.mkv`,
-			want:  "Episode 01.mkv",
+			name:  "pokemon prickly floragato",
+			input: "Pokemon.1997.S20E51.A.Prickly.Floragato?!.The.Mysterious.Flower.Pillar.English.Dub.1080p.HDTV.x265.10bit.AAC.2.0.Sonarr.TVDB-Vengeance.mkv",
+			want:  "Pokemon.1997.S20E51.A.Prickly.Floragato_!.The.Mysterious.Flower.Pillar.English.Dub.1080p.HDTV.x265.10bit.AAC.2.0.Sonarr.TVDB-Vengeance.mkv",
 		},
 		{
-			name:  "archive traversal is flattened",
-			input: "../../Episode 01.mkv",
-			want:  "Episode 01.mkv",
+			name:  "colon",
+			input: "Episode: The Return.mkv",
+			want:  "Episode_ The Return.mkv",
+		},
+		{
+			name:  "all sanitizable punctuation",
+			input: `Bad"<>|*?.mp4`,
+			want:  "Bad______.mp4",
+		},
+		{
+			name:  "unicode title",
+			input: "Pokémon – Déjà Vu?.srt",
+			want:  "Pokémon – Déjà Vu_.srt",
 		},
 		{
 			name:    "empty",
@@ -41,8 +51,68 @@ func TestFlattenLogicalNZBFileName(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "archive slash path",
+			input:   "Season 01/Episode 01.mkv",
+			wantErr: true,
+		},
+		{
+			name:    "archive backslash path",
+			input:   `Season 01\Episode 01.mkv`,
+			wantErr: true,
+		},
+		{
+			name:    "traversal",
+			input:   "../../Episode 01.mkv",
+			wantErr: true,
+		},
+		{
+			name:    "absolute path",
+			input:   "/tmp/Episode 01.mkv",
+			wantErr: true,
+		},
+		{
+			name:    "windows drive path",
+			input:   `C:\Episode 01.mkv`,
+			wantErr: true,
+		},
+		{
+			name:    "windows drive relative path",
+			input:   `C:Episode 01.mkv`,
+			wantErr: true,
+		},
+		{
+			name:    "dot",
+			input:   ".",
+			wantErr: true,
+		},
+		{
+			name:    "dot dot",
+			input:   "..",
+			wantErr: true,
+		},
+		{
 			name:    "control character leaf",
-			input:   "Season 01/bad\nname.mkv",
+			input:   "bad\nname.mkv",
+			wantErr: true,
+		},
+		{
+			name:    "nul byte",
+			input:   "bad\x00name.mkv",
+			wantErr: true,
+		},
+		{
+			name:    "reserved device",
+			input:   "CON.mkv",
+			wantErr: true,
+		},
+		{
+			name:    "trailing dot",
+			input:   "Episode.mkv.",
+			wantErr: true,
+		},
+		{
+			name:    "trailing space",
+			input:   "Episode.mkv ",
 			wantErr: true,
 		},
 	}
@@ -68,13 +138,16 @@ func TestFlattenLogicalNZBFileName(t *testing.T) {
 	}
 }
 
-func TestNormalizeLogicalNZBFileNamesRejectsFlattenedCollision(t *testing.T) {
+func TestNormalizeLogicalNZBFileNamesRejectsSanitizationCollision(t *testing.T) {
 	files := []storage.NZBFile{
-		{Name: "Season 01/Episode.mkv"},
-		{Name: "Extras/Episode.mkv"},
+		{Name: "Episode?.mkv"},
+		{Name: "Episode*.mkv"},
 	}
 	if err := normalizeLogicalNZBFileNames(files); err == nil {
-		t.Fatal("normalizeLogicalNZBFileNames() accepted colliding flattened names")
+		t.Fatal("normalizeLogicalNZBFileNames() accepted colliding sanitized names")
+	}
+	if files[0].Name != "Episode?.mkv" || files[1].Name != "Episode*.mkv" {
+		t.Fatalf("collision partially mutated names: %#v", files)
 	}
 }
 
@@ -85,5 +158,19 @@ func TestNormalizeLogicalNZBFileNamesRejectsPortableCaseCollision(t *testing.T) 
 	}
 	if err := normalizeLogicalNZBFileNames(files); err == nil {
 		t.Fatal("normalizeLogicalNZBFileNames() accepted a case-insensitive collision")
+	}
+}
+
+func TestNormalizeLogicalNZBFileNamesLeavesValidNamesUnchanged(t *testing.T) {
+	files := []storage.NZBFile{
+		{Name: "Pokémon.S20E01.The.Pendant.of.Beginning.mkv"},
+		{Name: "Pokemon.S20E01.English.srt"},
+	}
+	if err := normalizeLogicalNZBFileNames(files); err != nil {
+		t.Fatal(err)
+	}
+	if files[0].Name != "Pokémon.S20E01.The.Pendant.of.Beginning.mkv" ||
+		files[1].Name != "Pokemon.S20E01.English.srt" {
+		t.Fatalf("valid names changed: %#v", files)
 	}
 }

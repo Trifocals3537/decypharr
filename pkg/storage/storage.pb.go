@@ -358,9 +358,17 @@ type EntryProto struct {
 	// lifecycle authorization remains transient and is never serialized.
 	QueueIncarnation string `protobuf:"bytes,40,opt,name=queue_incarnation,json=queueIncarnation,proto3" json:"queue_incarnation,omitempty"`
 	// Local torrent output component. Empty preserves the legacy title layout.
-	OutputName    string `protobuf:"bytes,41,opt,name=output_name,json=outputName,proto3" json:"output_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OutputName string `protobuf:"bytes,41,opt,name=output_name,json=outputName,proto3" json:"output_name,omitempty"`
+	// Last successful provider observation. This is separate from updated_at,
+	// which advances on every durable queue write.
+	LastObservedAtUnix int64 `protobuf:"varint,42,opt,name=last_observed_at_unix,json=lastObservedAtUnix,proto3" json:"last_observed_at_unix,omitempty"`
+	HasLastObservedAt  bool  `protobuf:"varint,43,opt,name=has_last_observed_at,json=hasLastObservedAt,proto3" json:"has_last_observed_at,omitempty"`
+	// Last time provider progress changed. A successful poll with unchanged
+	// progress must not refresh this timestamp.
+	LastProgressAtUnix int64 `protobuf:"varint,44,opt,name=last_progress_at_unix,json=lastProgressAtUnix,proto3" json:"last_progress_at_unix,omitempty"`
+	HasLastProgressAt  bool  `protobuf:"varint,45,opt,name=has_last_progress_at,json=hasLastProgressAt,proto3" json:"has_last_progress_at,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *EntryProto) Reset() {
@@ -678,6 +686,34 @@ func (x *EntryProto) GetOutputName() string {
 		return x.OutputName
 	}
 	return ""
+}
+
+func (x *EntryProto) GetLastObservedAtUnix() int64 {
+	if x != nil {
+		return x.LastObservedAtUnix
+	}
+	return 0
+}
+
+func (x *EntryProto) GetHasLastObservedAt() bool {
+	if x != nil {
+		return x.HasLastObservedAt
+	}
+	return false
+}
+
+func (x *EntryProto) GetLastProgressAtUnix() int64 {
+	if x != nil {
+		return x.LastProgressAtUnix
+	}
+	return 0
+}
+
+func (x *EntryProto) GetHasLastProgressAt() bool {
+	if x != nil {
+		return x.HasLastProgressAt
+	}
+	return false
 }
 
 type EntryItemProto struct {
@@ -1292,7 +1328,7 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x120\n" +
-	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\xbc\f\n" +
+	"\x05value\x18\x02 \x01(\v2\x1a.storage.ProviderFileProtoR\x05value:\x028\x01\"\x84\x0e\n" +
 	"\n" +
 	"EntryProto\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12\x1b\n" +
@@ -1341,7 +1377,11 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\x13has_last_error_time\x18' \x01(\bR\x10hasLastErrorTime\x12+\n" +
 	"\x11queue_incarnation\x18( \x01(\tR\x10queueIncarnation\x12\x1f\n" +
 	"\voutput_name\x18) \x01(\tR\n" +
-	"outputName\x1aY\n" +
+	"outputName\x121\n" +
+	"\x15last_observed_at_unix\x18* \x01(\x03R\x12lastObservedAtUnix\x12/\n" +
+	"\x14has_last_observed_at\x18+ \x01(\bR\x11hasLastObservedAt\x121\n" +
+	"\x15last_progress_at_unix\x18, \x01(\x03R\x12lastProgressAtUnix\x12/\n" +
+	"\x14has_last_progress_at\x18- \x01(\bR\x11hasLastProgressAt\x1aY\n" +
 	"\x0eProvidersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x121\n" +
 	"\x05value\x18\x02 \x01(\v2\x1b.storage.ProviderEntryProtoR\x05value:\x028\x01\x1aL\n" +

@@ -113,6 +113,11 @@ type Entry struct {
 	UpdatedAt   time.Time  `msgpack:"updated_at" json:"updated_at"`                         // Last update time
 	CompletedAt *time.Time `msgpack:"completed_at,omitempty" json:"completed_at,omitempty"` // When completed
 	ImportedAt  *time.Time `msgpack:"imported_at,omitempty" json:"imported_at,omitempty"`   // When imported by Arr
+	// LastObservedAt records provider visibility while LastProgressAt advances
+	// only when the reported transfer progress changes. UpdatedAt cannot serve
+	// either purpose because storage writes update it automatically.
+	LastObservedAt *time.Time `msgpack:"last_observed_at,omitempty" json:"last_observed_at,omitempty"`
+	LastProgressAt *time.Time `msgpack:"last_progress_at,omitempty" json:"last_progress_at,omitempty"`
 
 	// Import Request Data (for processing)
 	Action           config.DownloadAction `msgpack:"action,omitempty" json:"action,omitempty"`                       // symlink, download, strm none
@@ -132,6 +137,19 @@ func (e *Entry) IsTorrent() bool {
 
 func (e *Entry) IsNZB() bool {
 	return e.Protocol == config.ProtocolNZB
+}
+
+// ObserveTransfer records a successful provider poll without conflating it
+// with real transfer progress. The first observation starts the progress grace
+// period for legacy rows that predate these timestamps.
+func (e *Entry) ObserveTransfer(progress float64, observedAt time.Time) {
+	observedAt = observedAt.UTC()
+	if e.LastProgressAt == nil || math.Abs(progress-e.Progress) > 1e-9 {
+		progressAt := observedAt
+		e.LastProgressAt = &progressAt
+	}
+	lastObservedAt := observedAt
+	e.LastObservedAt = &lastObservedAt
 }
 
 func (e *Entry) Validate() error {

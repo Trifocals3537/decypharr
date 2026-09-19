@@ -98,6 +98,14 @@ message EntryProto {
   string queue_incarnation = 40;
   // Local torrent output component. Empty preserves the legacy title layout.
   string output_name = 41;
+  // Last successful provider observation. This is separate from updated_at,
+  // which advances on every durable queue write.
+  int64 last_observed_at_unix = 42;
+  bool has_last_observed_at = 43;
+  // Last time provider progress changed. A successful poll with unchanged
+  // progress must not refresh this timestamp.
+  int64 last_progress_at_unix = 44;
+  bool has_last_progress_at = 45;
 }
 
 // ============================================================================

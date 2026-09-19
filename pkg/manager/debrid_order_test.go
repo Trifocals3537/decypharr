@@ -25,6 +25,8 @@ type routingTestClient struct {
 	delete func(string) error
 }
 
+func boolPointer(value bool) *bool { return &value }
+
 func (c *routingTestClient) Config() config.Debrid  { return c.cfg }
 func (c *routingTestClient) Logger() zerolog.Logger { return zerolog.Nop() }
 
@@ -223,5 +225,136 @@ func TestSendToDebridReportsIncompleteProviderResponse(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "%!w") {
 		t.Fatalf("error contains a nil-wrap formatting artifact: %q", err)
+	}
+}
+
+func TestSendToDebridTriesEveryProviderCachedBeforeUncached(t *testing.T) {
+	root := t.TempDir()
+	var attempts []string
+	client := func(name string, cached bool) *routingTestClient {
+		return &routingTestClient{
+			cfg: config.Debrid{Name: name, DownloadUncached: true},
+			submit: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+				mode := "cached"
+				if torrent.DownloadUncached {
+					mode = "uncached"
+				}
+				attempts = append(attempts, name+":"+mode)
+				if !torrent.DownloadUncached && !cached {
+					return nil, customerror.NewTorrentNotCachedError(torrent.Name)
+				}
+				torrent.Id = name + "-id"
+				torrent.Debrid = name
+				torrent.Status = debridTypes.TorrentStatusDownloaded
+				return torrent, nil
+			},
+		}
+	}
+
+	t.Run("later cached provider wins before earlier uncached provider", func(t *testing.T) {
+		attempts = nil
+		clients := xsync.NewMap[string, debrid.Client]()
+		clients.Store("torbox", client("torbox", false))
+		clients.Store("realdebrid", client("realdebrid", true))
+		manager := &Manager{
+			clients: clients,
+			config: &config.Config{DownloadFolder: root, Debrids: []config.Debrid{
+				{Name: "torbox", DownloadUncached: true},
+				{Name: "realdebrid", DownloadUncached: true},
+			}},
+			logger: zerolog.Nop(),
+		}
+
+		result, err := manager.SendToDebrid(context.Background(), &ImportRequest{
+			DownloadFolder: root,
+			Magnet: &utils.Magnet{
+				InfoHash: "0123456789abcdef0123456789abcdef01234567",
+				Name:     "Release",
+				Link:     "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+			},
+			Arr: &arr.Arr{Name: "sonarr"},
+		})
+		if err != nil {
+			t.Fatalf("SendToDebrid() error = %v", err)
+		}
+		if got, want := attempts, []string{"torbox:cached", "realdebrid:cached"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("attempts = %v, want %v", got, want)
+		}
+		if result.Debrid != "realdebrid" || result.DownloadUncached {
+			t.Fatalf("result = %#v, want cached realdebrid placement", result)
+		}
+	})
+
+	t.Run("uncached pass starts only after every cached miss", func(t *testing.T) {
+		attempts = nil
+		clients := xsync.NewMap[string, debrid.Client]()
+		clients.Store("torbox", client("torbox", false))
+		clients.Store("realdebrid", client("realdebrid", false))
+		manager := &Manager{
+			clients: clients,
+			config: &config.Config{DownloadFolder: root, Debrids: []config.Debrid{
+				{Name: "torbox", DownloadUncached: true},
+				{Name: "realdebrid", DownloadUncached: true},
+			}},
+			logger: zerolog.Nop(),
+		}
+
+		result, err := manager.SendToDebrid(context.Background(), &ImportRequest{
+			DownloadFolder:   root,
+			DownloadUncached: boolPointer(true),
+			Magnet: &utils.Magnet{
+				InfoHash: "0123456789abcdef0123456789abcdef01234567",
+				Name:     "Release",
+				Link:     "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+			},
+			Arr: &arr.Arr{Name: "sonarr"},
+		})
+		if err != nil {
+			t.Fatalf("SendToDebrid() error = %v", err)
+		}
+		if got, want := attempts, []string{"torbox:cached", "realdebrid:cached", "torbox:uncached"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("attempts = %v, want %v", got, want)
+		}
+		if result.Debrid != "torbox" || !result.DownloadUncached {
+			t.Fatalf("result = %#v, want uncached torbox placement", result)
+		}
+	})
+}
+
+func TestSendToDebridDoesNotTreatProviderFailureAsCacheMiss(t *testing.T) {
+	root := t.TempDir()
+	var attempts []bool
+	client := &routingTestClient{
+		cfg: config.Debrid{Name: "torbox", DownloadUncached: true},
+		submit: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			attempts = append(attempts, torrent.DownloadUncached)
+			return nil, context.DeadlineExceeded
+		},
+	}
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store("torbox", client)
+	manager := &Manager{
+		clients: clients,
+		config: &config.Config{
+			DownloadFolder: root,
+			Debrids:        []config.Debrid{{Name: "torbox", DownloadUncached: true}},
+		},
+		logger: zerolog.Nop(),
+	}
+
+	_, err := manager.SendToDebrid(context.Background(), &ImportRequest{
+		DownloadFolder: root,
+		Magnet: &utils.Magnet{
+			InfoHash: "0123456789abcdef0123456789abcdef01234567",
+			Name:     "Release",
+			Link:     "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+		},
+		Arr: &arr.Arr{Name: "sonarr"},
+	})
+	if err == nil {
+		t.Fatal("SendToDebrid() error = nil")
+	}
+	if got, want := attempts, []bool{false}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DownloadUncached attempts = %v, want %v", got, want)
 	}
 }

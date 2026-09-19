@@ -118,10 +118,11 @@ response when the bound is reached. Values above `4096` are clamped.
 ## Debrid Providers
 
 Array of Debrid services. When an Arr does not set `selected_debrid`, providers
-are tried in this array order. This makes cache-only preference predictable: for
-example, place TorBox with `download_uncached: false` before a fallback provider
-to use TorBox when it has the hash and continue to the fallback on a definite
-cache miss.
+are tried in this array order. Decypharr makes one cached-only pass over every
+eligible provider before it permits any uncached transfer. If every cached pass
+misses, only providers with `download_uncached: true` enter a second pass, in
+the same configured order. Provider/API failures remain errors and do not count
+as cache misses.
 
 ```json
 {
@@ -153,7 +154,7 @@ cache miss.
 | `name`                            | string | Unique provider instance key and mount-folder name                             | Provider type                   |
 | `api_key`                         | string | API key from provider dashboard                                                | **Required**                    |
 | `download_api_keys`               | array  | Additional keys for download rotation                                          | `[api_key]`                     |
-| `download_uncached`               | bool   | Download torrents not in provider cache                                        | `false`                         |
+| `download_uncached`               | bool   | Permit this provider in the uncached pass after all eligible providers miss     | `false`                         |
 | `rate_limit`                      | string | API rate limit (`200/minute`, `10/second`)                                     | `200/minute`                    |
 | `repair_rate_limit`               | string | Separate limit for repair operations                                           | Same as `rate_limit`            |
 | `download_rate_limit`             | string | Separate limit for downloads                                                   | Same as `rate_limit`            |
@@ -424,7 +425,7 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
 | `host`              | Arr URL                          | Required    |
 | `token`             | Arr API key                      | Required    |
 | `skip_repair`       | Skip repair for this Arr         | `false`     |
-| `download_uncached` | Download uncached torrents       | `false`     |
+| `download_uncached` | Override provider policy; permit an uncached pass only after every eligible provider misses | `false` |
 | `selected_debrid`   | Exact `name` of a Debrid instance | `""` (auto) |
 | `source`            | Config source (`auto`, `config`) | `config`    |
 

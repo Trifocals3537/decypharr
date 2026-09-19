@@ -185,6 +185,14 @@ func EntryToProto(e *Entry) *EntryProto {
 		pb.HasLastErrorTime = true
 		pb.LastErrorTimeUnix = e.LastErrorTime.Unix()
 	}
+	if e.LastObservedAt != nil {
+		pb.HasLastObservedAt = true
+		pb.LastObservedAtUnix = e.LastObservedAt.Unix()
+	}
+	if e.LastProgressAt != nil {
+		pb.HasLastProgressAt = true
+		pb.LastProgressAtUnix = e.LastProgressAt.Unix()
+	}
 
 	// Maps
 	for name, pe := range e.Providers {
@@ -254,6 +262,14 @@ func ProtoToEntry(pb *EntryProto) *Entry {
 	if pb.HasLastErrorTime {
 		t := time.Unix(pb.LastErrorTimeUnix, 0)
 		e.LastErrorTime = &t
+	}
+	if pb.HasLastObservedAt {
+		t := time.Unix(pb.LastObservedAtUnix, 0)
+		e.LastObservedAt = &t
+	}
+	if pb.HasLastProgressAt {
+		t := time.Unix(pb.LastProgressAtUnix, 0)
+		e.LastProgressAt = &t
 	}
 
 	// Maps

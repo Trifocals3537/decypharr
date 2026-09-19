@@ -402,6 +402,9 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		return nil
 	}
 
+	// Record observation before replacing Progress so unchanged successful polls
+	// cannot masquerade as forward transfer progress.
+	entry.ObserveTransfer(debridTorrent.Progress/100.0, time.Now())
 	// Update entry progress
 	entry.Progress = debridTorrent.Progress / 100.0
 	entry.Speed = debridTorrent.Speed
@@ -597,126 +600,152 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		return nil, fmt.Errorf("no debrid clients available")
 	}
 
-	errs := make([]error, 0, len(clients))
+	errs := make([]error, 0, len(clients)*2)
+	cacheMisses := make(map[string]bool, len(clients))
 
-	for _, db := range clients {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		providerConfig := db.Config()
-		providerName := providerConfig.Name
-		if providerName == "" {
-			providerName = providerConfig.Provider
-		}
-		if providerName == "" {
-			providerName = "unnamed provider"
-		}
-		_logger := db.Logger()
-		if rejectionErr := m.cachedSubmissionRejection(providerName, importRequest.Magnet.InfoHash); rejectionErr != nil {
-			_logger.Warn().
-				Str("Provider", providerName).
-				Str("Hash", importRequest.Magnet.InfoHash).
-				Msg("Skipping provider during content-rejection cooldown")
-			errs = append(errs, fmt.Errorf("%s submission: %w", providerName, rejectionErr))
-			continue
-		}
-		overrideDownloadUncached := false
-
-		if importRequest.DownloadUncached != nil {
-			overrideDownloadUncached = *importRequest.DownloadUncached
-		} else {
-			overrideDownloadUncached = providerConfig.DownloadUncached
-		}
-		// Providers are allowed to populate the torrent in place. Construct each
-		// fallback candidate from source fields so an earlier failed provider
-		// cannot leak state into the next attempt. Do not copy Torrent: it owns
-		// synchronization state used by its file map.
-		debridTorrent := &debridTypes.Torrent{
-			InfoHash:         importRequest.Magnet.InfoHash,
-			Magnet:           importRequest.Magnet,
-			Name:             importRequest.Magnet.Name,
-			Arr:              importRequest.Arr,
-			Size:             importRequest.Magnet.Size,
-			Files:            make(map[string]debridTypes.File),
-			DownloadUncached: overrideDownloadUncached,
-		}
-		_logger.Info().
-			Str("Provider", providerName).
-			Str("Arr", importRequest.Arr.Name).
-			Str("Hash", debridTorrent.InfoHash).
-			Str("Name", debridTorrent.Name).
-			Str("Action", string(importRequest.Action)).
-			Msg("Processing torrent")
-
-		dbt, err := submitProviderMagnet(ctx, db, debridTorrent)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			if dbt != nil && dbt.Id != "" {
-				ctxErr = errors.Join(ctxErr, m.deleteProviderTorrent(db, dbt.Id))
+	// Cached-first is a property of the complete provider set, not each
+	// provider in isolation. Trying one provider with uncached downloads enabled
+	// before asking the next provider for a cached placement can start needless
+	// upstream work. Pass one therefore forces cached-only submission everywhere.
+	// Only providers that report a definite cache miss and are explicitly allowed
+	// to download uncached are eligible for pass two.
+	for pass := 0; pass < 2; pass++ {
+		for _, db := range clients {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-			return nil, ctxErr
-		}
-		if err != nil || dbt == nil || dbt.Id == "" {
-			if err == nil {
-				err = fmt.Errorf("provider returned an incomplete submission response")
+			providerConfig := db.Config()
+			providerName := providerConfig.Name
+			if providerName == "" {
+				providerName = providerConfig.Provider
+			}
+			if providerName == "" {
+				providerName = "unnamed provider"
+			}
+			_logger := db.Logger()
+			downloadUncachedAllowed := false
+			if importRequest.DownloadUncached != nil {
+				downloadUncachedAllowed = *importRequest.DownloadUncached
 			} else {
+				downloadUncachedAllowed = providerConfig.DownloadUncached
+			}
+			if pass == 1 && (!downloadUncachedAllowed || !cacheMisses[providerName]) {
+				continue
+			}
+			if rejectionErr := m.cachedSubmissionRejection(providerName, importRequest.Magnet.InfoHash); rejectionErr != nil {
+				_logger.Warn().
+					Str("Provider", providerName).
+					Str("Hash", importRequest.Magnet.InfoHash).
+					Msg("Skipping provider during content-rejection cooldown")
+				errs = append(errs, fmt.Errorf("%s submission: %w", providerName, rejectionErr))
+				continue
+			}
+			overrideDownloadUncached := pass == 1
+			// Providers are allowed to populate the torrent in place. Construct each
+			// fallback candidate from source fields so an earlier failed provider
+			// cannot leak state into the next attempt. Do not copy Torrent: it owns
+			// synchronization state used by its file map.
+			debridTorrent := &debridTypes.Torrent{
+				InfoHash:         importRequest.Magnet.InfoHash,
+				Magnet:           importRequest.Magnet,
+				Name:             importRequest.Magnet.Name,
+				Arr:              importRequest.Arr,
+				Size:             importRequest.Magnet.Size,
+				Files:            make(map[string]debridTypes.File),
+				DownloadUncached: overrideDownloadUncached,
+			}
+			_logger.Info().
+				Str("Provider", providerName).
+				Str("Arr", importRequest.Arr.Name).
+				Str("Hash", debridTorrent.InfoHash).
+				Str("Name", debridTorrent.Name).
+				Str("Action", string(importRequest.Action)).
+				Msg("Processing torrent")
+
+			dbt, err := submitProviderMagnet(ctx, db, debridTorrent)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				if dbt != nil && dbt.Id != "" {
+					ctxErr = errors.Join(ctxErr, m.deleteProviderTorrent(db, dbt.Id))
+				}
+				return nil, ctxErr
+			}
+			if err != nil || dbt == nil || dbt.Id == "" {
+				if err == nil {
+					err = fmt.Errorf("provider returned an incomplete submission response")
+				} else {
+					if pass == 0 && isTorrentNotCachedError(err) {
+						cacheMisses[providerName] = true
+					}
+					m.recordSubmissionRejection(
+						providerName,
+						importRequest.Magnet.InfoHash,
+						importRequest.Magnet.Name,
+						err,
+					)
+				}
+				errs = append(errs, fmt.Errorf("%s submission: %w", providerName, err))
+				continue
+			}
+			dbt.Arr = importRequest.Arr
+			_logger.Info().Str("id", dbt.Id).Msgf("Entry: %s submitted to %s", dbt.Name, providerName)
+
+			torrent, err := checkProviderStatus(ctx, db, dbt)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				rollbackID := dbt.Id
+				if torrent != nil && torrent.Id != "" {
+					rollbackID = torrent.Id
+				}
+				return nil, errors.Join(ctxErr, m.deleteProviderTorrent(db, rollbackID))
+			}
+			if err != nil {
+				if pass == 0 && isTorrentNotCachedError(err) {
+					cacheMisses[providerName] = true
+				}
 				m.recordSubmissionRejection(
 					providerName,
 					importRequest.Magnet.InfoHash,
 					importRequest.Magnet.Name,
 					err,
 				)
+				rollbackID := dbt.Id
+				if torrent != nil && torrent.Id != "" {
+					rollbackID = torrent.Id
+				}
+				rollbackErr := m.deleteProviderTorrent(db, rollbackID)
+				errs = append(errs, errors.Join(
+					fmt.Errorf("%s status check: %w", providerName, err),
+					rollbackErr,
+				))
+				continue
 			}
-			errs = append(errs, fmt.Errorf("%s submission: %w", providerName, err))
-			continue
-		}
-		dbt.Arr = importRequest.Arr
-		_logger.Info().Str("id", dbt.Id).Msgf("Entry: %s submitted to %s", dbt.Name, providerName)
-
-		torrent, err := checkProviderStatus(ctx, db, dbt)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			rollbackID := dbt.Id
-			if torrent != nil && torrent.Id != "" {
-				rollbackID = torrent.Id
+			if torrent == nil {
+				statusErr := fmt.Errorf("%s returned nil after checking torrent %s status", providerName, dbt.Name)
+				rollbackErr := m.deleteProviderTorrent(db, dbt.Id)
+				errs = append(errs, errors.Join(statusErr, rollbackErr))
+				continue
 			}
-			return nil, errors.Join(ctxErr, m.deleteProviderTorrent(db, rollbackID))
-		}
-		if err != nil {
-			m.recordSubmissionRejection(
-				providerName,
-				importRequest.Magnet.InfoHash,
-				importRequest.Magnet.Name,
-				err,
-			)
-			rollbackID := dbt.Id
-			if torrent != nil && torrent.Id != "" {
-				rollbackID = torrent.Id
+			if err := m.validateResolvedTorrentNames(torrent, importRequest.Action); err != nil {
+				rollbackErr := m.deleteProviderTorrent(db, torrent.Id)
+				errs = append(errs, errors.Join(
+					fmt.Errorf("%s returned an unsafe torrent name: %w", providerName, err),
+					rollbackErr,
+				))
+				continue
 			}
-			rollbackErr := m.deleteProviderTorrent(db, rollbackID)
-			errs = append(errs, errors.Join(
-				fmt.Errorf("%s status check: %w", providerName, err),
-				rollbackErr,
-			))
-			continue
+			return torrent, nil
 		}
-		if torrent == nil {
-			statusErr := fmt.Errorf("%s returned nil after checking torrent %s status", providerName, dbt.Name)
-			rollbackErr := m.deleteProviderTorrent(db, dbt.Id)
-			errs = append(errs, errors.Join(statusErr, rollbackErr))
-			continue
-		}
-		if err := m.validateResolvedTorrentNames(torrent, importRequest.Action); err != nil {
-			rollbackErr := m.deleteProviderTorrent(db, torrent.Id)
-			errs = append(errs, errors.Join(
-				fmt.Errorf("%s returned an unsafe torrent name: %w", providerName, err),
-				rollbackErr,
-			))
-			continue
-		}
-		return torrent, nil
 	}
 	if len(errs) == 0 {
 		return nil, fmt.Errorf("failed to process torrent: no clients available")
 	}
 	joinedErrors := errors.Join(errs...)
 	return nil, fmt.Errorf("failed to process torrent: %w", joinedErrors)
+}
+
+func isTorrentNotCachedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var providerErr *customerror.Error
+	return errors.As(err, &providerErr) && providerErr.Code == "torrent_not_cached"
 }

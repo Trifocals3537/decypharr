@@ -313,6 +313,13 @@ func (q *Queue) DeleteWhere(category string, protocol config.Protocol, state sto
 func (q *Queue) DeleteStalled() error {
 	cutoff := time.Now().Add(-q.removeStalledAfter)
 	return q.deleteWhere(func(t *storage.Entry) bool {
+		// The uncached watchdog persists stalledDL as a durable handoff request.
+		// Keep it until the owning Arr acknowledges the blocklist/research action
+		// and deletes the exact queue item through the qBittorrent API. Removing it
+		// here would lose retry evidence during a transient Arr outage.
+		if t.DownloadUncached && t.State == storage.EntryStateStalledDL {
+			return false
+		}
 		if !t.AddedOn.Before(cutoff) {
 			return false
 		}

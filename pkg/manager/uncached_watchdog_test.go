@@ -152,3 +152,47 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 		t.Fatalf("Arr delete requests = %d, want 1", deletes.Load())
 	}
 }
+
+func TestLegacyStalledCleanupPreservesWatchdogHandoff(t *testing.T) {
+	store := newLifecycleTestStorage(t)
+	queue := newLifecycleTestQueue(store, newEntryLifecycle())
+	queue.removeStalledAfter = 10 * time.Minute
+	old := time.Now().Add(-time.Hour)
+
+	watchdog, _ := addLifecycleTestEntry(t, queue, "watchdog-stall")
+	watchdog.State = storage.EntryStateStalledDL
+	watchdog.Status = debridTypes.TorrentStatusError
+	watchdog.DownloadUncached = true
+	watchdog.AddedOn = old
+	if err := queue.Update(watchdog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := queue.DeleteStalled(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.GetTorrent(watchdog.InfoHash); err != nil {
+		t.Fatalf("watchdog handoff row was removed before Arr acknowledgement: %v", err)
+	}
+}
+
+func TestLegacyStalledCleanupStillRemovesOrdinaryErrors(t *testing.T) {
+	store := newLifecycleTestStorage(t)
+	queue := newLifecycleTestQueue(store, newEntryLifecycle())
+	queue.removeStalledAfter = 10 * time.Minute
+
+	entry, _ := addLifecycleTestEntry(t, queue, "ordinary-stall")
+	entry.State = storage.EntryStateError
+	entry.Status = debridTypes.TorrentStatusError
+	entry.AddedOn = time.Now().Add(-time.Hour)
+	if err := queue.Update(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := queue.DeleteStalled(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.GetTorrent(entry.InfoHash); !storage.IsQueuedEntryNotFound(err) {
+		t.Fatalf("ordinary stalled row was not cleaned up: %v", err)
+	}
+}

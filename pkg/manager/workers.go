@@ -299,10 +299,17 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 	} else {
 		// Schedule the job
 		if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
+			if err := m.handoffStalledUncached(ctx); err != nil && ctx.Err() == nil {
+				m.logger.Error().Err(err).Msg("Stalled uncached transfer handoff failed")
+			}
 			if err := m.arr.Monitor(ctx); err != nil && ctx.Err() == nil {
 				m.logger.Error().Err(err).Msg("Arr queue monitoring failed")
 			}
-		}), gocron.WithContext(ctx)); err != nil {
+		}),
+			gocron.WithContext(ctx),
+			gocron.WithName("arr-queue-monitor"),
+			gocron.WithSingletonMode(gocron.LimitModeReschedule),
+		); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to create arr monitoring job")
 		} else {
 			m.logger.Debug().Msgf("Arr monitoring job scheduled for every %s", "10s")

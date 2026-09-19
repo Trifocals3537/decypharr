@@ -172,6 +172,44 @@ func (a *Arr) GetQueueCtx(ctx context.Context) ([]QueueSchema, error) {
 	return results, nil
 }
 
+// BlocklistAndResearchDownloadCtx removes the exact tracked torrent from this
+// Arr, blocklists its release, and allows the Arr to search for a replacement.
+// A download ID must resolve to exactly one queue row; ambiguity fails closed so
+// one Decypharr instance cannot remove a same-hash item owned by another client.
+func (a *Arr) BlocklistAndResearchDownloadCtx(ctx context.Context, downloadID string) (bool, error) {
+	downloadID = strings.TrimSpace(downloadID)
+	if downloadID == "" {
+		return false, fmt.Errorf("download ID is required")
+	}
+	queue, err := a.GetQueueCtx(ctx)
+	if err != nil {
+		return false, err
+	}
+	matched := make(map[int]bool)
+	for _, item := range queue {
+		if item.Id <= 0 || !strings.EqualFold(strings.TrimSpace(item.Protocol), "torrent") {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(item.DownloadId), downloadID) {
+			matched[item.Id] = true
+		}
+	}
+	if len(matched) == 0 {
+		return false, nil
+	}
+	if len(matched) != 1 {
+		return false, fmt.Errorf(
+			"download ID %s matched %d Arr queue items; refusing ambiguous removal",
+			downloadID,
+			len(matched),
+		)
+	}
+	if err := a.removeQueueItemsCtx(ctx, matched, true, false); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // queueItemText returns the lowercased join of every statusMessages title and
 // message for a queue item — the haystack all message-based rules match against.
 func queueItemText(q QueueSchema) string {

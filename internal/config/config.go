@@ -246,16 +246,17 @@ type Config struct {
 	Mount       Mount       `json:"mount,omitzero"`
 	Strm        Strm        `json:"strm,omitzero"`
 
-	AllowedExt          []string `json:"allowed_file_types,omitempty"`
-	AllowSamples        bool     `json:"allow_samples,omitempty"`
-	MinFileSize         string   `json:"min_file_size,omitempty"`
-	MaxFileSize         string   `json:"max_file_size,omitempty"`
-	RemoveStalledAfter  string   `json:"remove_stalled_after,omitzero"`
-	EnableWebdavAuth    bool     `json:"enable_webdav_auth,omitempty"`
-	UseAuth             bool     `json:"use_auth,omitempty"`
-	SecureSessionCookie bool     `json:"secure_session_cookie,omitempty"`
-	NZBUserAgent        string   `json:"nzb_user_agent,omitempty"` // User agent for downloading NZBs
-	Auth                *Auth    `json:"-"`
+	AllowedExt           []string `json:"allowed_file_types,omitempty"`
+	AllowSamples         bool     `json:"allow_samples,omitempty"`
+	MinFileSize          string   `json:"min_file_size,omitempty"`
+	MaxFileSize          string   `json:"max_file_size,omitempty"`
+	RemoveStalledAfter   string   `json:"remove_stalled_after,omitzero"`
+	UncachedStallTimeout string   `json:"uncached_stall_timeout,omitempty"`
+	EnableWebdavAuth     bool     `json:"enable_webdav_auth,omitempty"`
+	UseAuth              bool     `json:"use_auth,omitempty"`
+	SecureSessionCookie  bool     `json:"secure_session_cookie,omitempty"`
+	NZBUserAgent         string   `json:"nzb_user_agent,omitempty"` // User agent for downloading NZBs
+	Auth                 *Auth    `json:"-"`
 
 	DisableWebDav bool `json:"disable_webdav,omitempty"`
 

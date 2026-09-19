@@ -93,6 +93,9 @@ an unprotected WebDAV endpoint.
 {
   "max_active_downloads": 5,
   "job_queue_capacity": 256,
+  "refresh_interval": "30s",
+  "remove_stalled_after": "10m",
+  "uncached_stall_timeout": "",
   "allowed_file_types": ["mkv", "mp4"],
   "allow_samples": false,
   "min_file_size": "10MB",
@@ -106,14 +109,31 @@ an unprotected WebDAV endpoint.
 imports. New qBittorrent and SABnzbd requests receive a retryable overload
 response when the bound is reached. Values above `4096` are clamped.
 
-| Field                  | Type   | Description                                      | Default       |
-|------------------------|--------|--------------------------------------------------|---------------|
-| `max_active_downloads` | int    | Shared active-processing limit                   | `5`           |
-| `job_queue_capacity`   | int    | Total admitted import limit (maximum `4096`)     | `256`         |
-| `allowed_file_types`   | array  | Extensions eligible for import                   | Media formats |
-| `allow_samples`        | bool   | Include files identified as samples              | `false`       |
-| `min_file_size`        | string | Minimum eligible file size                       | `""`          |
-| `max_file_size`        | string | Maximum eligible file size; empty is unlimited   | `""`          |
+| Field                    | Type   | Description                                                                        | Default       |
+|--------------------------|--------|------------------------------------------------------------------------------------|---------------|
+| `max_active_downloads`   | int    | Shared active-processing limit                                                     | `5`           |
+| `job_queue_capacity`     | int    | Total admitted import limit (maximum `4096`)                                       | `256`         |
+| `refresh_interval`       | string | Provider status polling interval                                                   | `30s`         |
+| `remove_stalled_after`   | string | Legacy cleanup interval for inactive zero-progress queue items                     | `10m`         |
+| `uncached_stall_timeout` | string | No-progress timeout for Arr blocklist and replacement handoff; empty disables it   | `""`          |
+| `allowed_file_types`     | array  | Extensions eligible for import                                                     | Media formats |
+| `allow_samples`          | bool   | Include files identified as samples                                                | `false`       |
+| `min_file_size`          | string | Minimum eligible file size                                                         | `""`          |
+| `max_file_size`          | string | Maximum eligible file size; empty is unlimited                                     | `""`          |
+
+`uncached_stall_timeout` applies only to transfers that Decypharr knowingly
+started through an uncached provider pass. A successful provider poll must
+first establish a progress baseline. Decypharr then requires both no progress
+for the configured duration and zero provider-reported transfer speed before it
+marks the item `stalledDL`. The minimum is `10m`; invalid or shorter values
+disable the watchdog instead of risking premature removal.
+
+For a configured Arr category, Decypharr resolves the exact torrent hash to one
+Sonarr/Radarr queue row, asks the Arr to remove and blocklist that release, and
+allows its normal failed-download handling to search for a replacement. An
+ambiguous hash or a category without an Arr owner is left untouched for manual
+review. Provider/API errors are never interpreted as stalls, and cached
+transfers are never eligible.
 
 ## Debrid Providers
 

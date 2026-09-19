@@ -51,8 +51,9 @@ type Manager struct {
 	providerTraffic *providertraffic.Controller
 
 	// Migration jobs tracking
-	migrationJobs   *xsync.Map[string, *storage.SwitcherJob]
-	refreshInterval time.Duration
+	migrationJobs        *xsync.Map[string, *storage.SwitcherJob]
+	refreshInterval      time.Duration
+	uncachedStallTimeout time.Duration
 
 	config *config.Config
 
@@ -411,6 +412,16 @@ func (m *Manager) init() {
 		refreshInterval = 15 * time.Minute
 	}
 	m.refreshInterval = refreshInterval
+
+	uncachedStallTimeout, err := parseUncachedStallTimeout(cfg.UncachedStallTimeout)
+	if err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str("configured_timeout", cfg.UncachedStallTimeout).
+			Msg("Uncached transfer watchdog disabled")
+		uncachedStallTimeout = 0
+	}
+	m.uncachedStallTimeout = uncachedStallTimeout
 
 	// initialize debrid clients
 	m.initDebridClients()

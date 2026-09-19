@@ -29,6 +29,7 @@ const (
 	EntryStatePausedDL    TorrentState = "pausedDL"
 	EntryStatePausedUP    TorrentState = "pausedUP"
 	EntryStateError       TorrentState = "error"
+	EntryStateStalledDL   TorrentState = "stalledDL"
 )
 
 // Common errors
@@ -469,6 +470,15 @@ func (e *Entry) MarkAsError(err error) {
 	now := time.Now()
 	e.LastErrorTime = &now
 	e.UpdatedAt = now
+}
+
+// MarkAsStalled records a terminal transfer stall while preserving the
+// qBittorrent stalledDL state that Servarr understands. Keeping this distinct
+// from a generic provider error lets the Arr handoff target only watchdog
+// decisions, not transient provider or network failures.
+func (e *Entry) MarkAsStalled(err error) {
+	e.MarkAsError(err)
+	e.State = EntryStateStalledDL
 }
 
 func (e *Entry) GetFile(filename string) (*File, error) {

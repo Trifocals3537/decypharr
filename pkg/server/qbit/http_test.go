@@ -175,3 +175,57 @@ func TestShouldDeleteTorrentFilesRequiresExplicitTrue(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleTorrentsDeleteWithFilesUsesDurableManagerCleanup(t *testing.T) {
+	previousConfigPath := config.GetMainPath()
+	configRoot := t.TempDir()
+	config.SetConfigPath(configRoot)
+	t.Cleanup(func() { config.SetConfigPath(previousConfigPath) })
+	downloadRoot := t.TempDir()
+	config.Get().DownloadFolder = downloadRoot
+
+	m := manager.New()
+	t.Cleanup(func() {
+		if err := m.Stop(); err != nil {
+			t.Errorf("stop manager: %v", err)
+		}
+	})
+	entry := &storage.Entry{
+		InfoHash:  "delete-with-files",
+		Name:      "release",
+		Protocol:  config.ProtocolTorrent,
+		State:     storage.EntryStateDownloading,
+		SavePath:  downloadRoot,
+		Files:     make(map[string]*storage.File),
+		Providers: make(map[string]*storage.ProviderEntry),
+	}
+	if err := m.Queue().Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	mainEntry := *entry
+	if err := m.AddOrUpdate(&mainEntry, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	q := &QBit{manager: m}
+	handler := hashesContext(http.HandlerFunc(q.handleTorrentsDelete))
+	form := url.Values{"hashes": {entry.InfoHash}, "deleteFiles": {"true"}}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v2/torrents/delete",
+		strings.NewReader(form.Encode()),
+	)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if _, err := m.Queue().GetTorrent(entry.InfoHash); !storage.IsQueuedEntryNotFound(err) {
+		t.Fatalf("queue entry remained after delete: %v", err)
+	}
+	if _, err := m.GetEntry(entry.InfoHash); !storage.IsEntryNotFound(err) {
+		t.Fatalf("main entry remained after delete: %v", err)
+	}
+}

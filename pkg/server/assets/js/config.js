@@ -267,7 +267,7 @@ class ConfigManager {
 
     populateDownloadSettings(config) {
         const fields = [
-            'remove_stalled_after', 'nzb_user_agent', 'download_folder',
+            'remove_stalled_after', 'uncached_stall_timeout', 'nzb_user_agent', 'download_folder',
             'refresh_interval', 'max_active_downloads', 'skip_pre_cache',
             'always_rm_tracker_urls', 'relative_symlinks', 'default_download_action'
         ];
@@ -1257,6 +1257,7 @@ class ConfigManager {
             max_file_size: document.querySelector('[name="max_file_size"]').value,
             allow_samples: document.querySelector('[name="allow_samples"]').checked,
             remove_stalled_after: document.querySelector('[name="remove_stalled_after"]').value || "10m",
+            uncached_stall_timeout: document.querySelector('[name="uncached_stall_timeout"]')?.value.trim() || "",
             nzb_user_agent: document.querySelector('[name="nzb_user_agent"]').value,
             download_folder: document.querySelector('[name="download_folder"]').value,
             refresh_interval: document.querySelector('[name="refresh_interval"]').value || "30s",

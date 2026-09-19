@@ -404,17 +404,40 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 
 	// Record observation before replacing Progress so unchanged successful polls
 	// cannot masquerade as forward transfer progress.
-	entry.ObserveTransfer(debridTorrent.Progress/100.0, time.Now())
+	observedAt := time.Now()
+	entry.ObserveTransfer(debridTorrent.Progress/100.0, observedAt)
 	// Update entry progress
 	entry.Progress = debridTorrent.Progress / 100.0
 	entry.Speed = debridTorrent.Speed
 	entry.Size = debridTorrent.GetSize()
 	entry.Seeders = debridTorrent.Seeders
-	entry.UpdatedAt = time.Now()
+	entry.UpdatedAt = observedAt
 
 	// Update placement progress
 	if placement := entry.GetActiveProvider(); placement != nil {
 		placement.Progress = entry.Progress
+	}
+
+	if uncachedTransferStalled(
+		entry,
+		debridTorrent.Status,
+		observedAt,
+		m.uncachedStallTimeout,
+	) {
+		stallErr := fmt.Errorf(
+			"uncached provider transfer made no progress for %s",
+			m.uncachedStallTimeout,
+		)
+		entry.MarkAsStalled(stallErr)
+		if placement := entry.GetActiveProvider(); placement != nil {
+			placement.Status = debridTypes.TorrentStatusError
+		}
+		m.logger.Warn().
+			Str("debrid", entry.ActiveProvider).
+			Str("name", entry.Name).
+			Dur("no_progress_for", observedAt.Sub(*entry.LastProgressAt)).
+			Msg("Uncached transfer stalled; waiting for Arr blocklist and replacement handoff")
+		return m.queue.Update(entry)
 	}
 
 	// Check if done or failed.

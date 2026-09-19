@@ -371,6 +371,46 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
+// CheckCacheAvailability preserves TorBox's distinction between a definite
+// miss and an unavailable or malformed cache probe. The single-hash endpoint
+// path is intentionally reused here because its response validation is strict;
+// a future bounded batch implementation can replace it without changing the
+// evidence contract.
+func (tb *Torbox) CheckCacheAvailability(ctx context.Context, hashes []string) map[string]common.CacheEvidence {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := make(map[string]common.CacheEvidence, len(hashes))
+	provider := tb.config.Name
+	if strings.TrimSpace(provider) == "" {
+		provider = "torbox"
+	}
+	for _, hash := range hashes {
+		normalized := strings.ToLower(strings.TrimSpace(hash))
+		if normalized == "" {
+			continue
+		}
+		state := common.CacheStateUnknown
+		cached, known := tb.isCachedContext(ctx, normalized)
+		if known && cached {
+			state = common.CacheStateCached
+		} else if known {
+			state = common.CacheStateUncached
+		}
+		result[normalized] = common.NewCacheEvidence(
+			provider,
+			normalized,
+			state,
+			"torbox.checkcached",
+			time.Now(),
+		)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return result
+}
+
 // isCached checks one hash without conflating a failed probe with a definite
 // cache miss. The public IsAvailable method intentionally returns only positive
 // results, which is useful for bulk lookup but cannot tell callers whether an

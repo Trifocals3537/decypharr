@@ -2,16 +2,19 @@ package torbox
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
@@ -206,6 +209,38 @@ func TestIsCachedSeparatesUnknownFromDefiniteMiss(t *testing.T) {
 					test.wantCached,
 					test.wantKnown,
 				)
+			}
+		})
+	}
+}
+
+func TestCheckCacheAvailabilityPreservesUnknown(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		response string
+		want     common.CacheState
+	}{
+		{name: "cached", response: `{"success":true,"data":{"` + cachedCheckTestHash + `":{"size":123}}}`, want: common.CacheStateCached},
+		{name: "uncached", response: `{"success":true,"data":{}}`, want: common.CacheStateUncached},
+		{name: "provider failure", status: http.StatusServiceUnavailable, want: common.CacheStateUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newCachedCheckTorbox(t, func(w http.ResponseWriter, _ *http.Request) {
+				if test.status != 0 {
+					w.WriteHeader(test.status)
+					return
+				}
+				_, _ = w.Write([]byte(test.response))
+			})
+			evidence := client.CheckCacheAvailability(context.Background(), []string{cachedCheckTestHash})
+			got := evidence[strings.ToLower(cachedCheckTestHash)]
+			if got.State != test.want {
+				t.Fatalf("state = %q, want %q", got.State, test.want)
+			}
+			if got.Provider != "torbox" || got.Source != "torbox.checkcached" || got.ObservedAt.IsZero() {
+				t.Fatalf("incomplete evidence = %#v", got)
 			}
 		})
 	}

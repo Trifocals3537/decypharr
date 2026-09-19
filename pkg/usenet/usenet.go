@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
@@ -606,35 +606,82 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 	return updatedNZB, nil
 }
 
-// flattenLogicalNZBFileName intentionally discards archive/yEnc directory
-// components. Decypharr exposes every logical media file directly inside one
-// release directory, so nested source paths are not part of the storage model.
+// flattenLogicalNZBFileName retains its historical name, but logical NZB files
+// must already be single path components. Separators and traversal are rejected
+// before non-portable filename punctuation is sanitized.
 func flattenLogicalNZBFileName(name string) (string, error) {
-	normalized := strings.ReplaceAll(name, "\\", "/")
-	flattened := path.Base(normalized)
-	if err := safepath.ValidateIdentifier(flattened); err != nil {
+	if err := validateLogicalNZBFileNameSource(name); err != nil {
 		return "", err
 	}
-	return flattened, nil
+
+	sanitized := strings.Map(func(r rune) rune {
+		switch r {
+		case '?', ':', '"', '<', '>', '|', '*':
+			return '_'
+		default:
+			return r
+		}
+	}, name)
+	if err := safepath.ValidateIdentifier(sanitized); err != nil {
+		return "", err
+	}
+	return sanitized, nil
+}
+
+func validateLogicalNZBFileNameSource(name string) error {
+	if name == "" {
+		return fmt.Errorf("path identifier is empty")
+	}
+	if strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("path identifier contains a NUL byte")
+	}
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return fmt.Errorf("path identifier %q contains a control character", name)
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("path identifier %q is traversal", name)
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || looksLikeWindowsDrivePrefix(name) {
+		return fmt.Errorf("path identifier %q is absolute", name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("path identifier %q contains a path separator", name)
+	}
+	return nil
+}
+
+func looksLikeWindowsDrivePrefix(name string) bool {
+	return len(name) >= 2 &&
+		((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) &&
+		name[1] == ':'
 }
 
 func normalizeLogicalNZBFileNames(files []storage.NZBFile) error {
-	seenNames := make(map[string]struct{}, len(files))
+	normalizedNames := make([]string, len(files))
+	seenNames := make(map[string]string, len(files))
 	for i := range files {
 		originalName := files[i].Name
-		flattenedName, err := flattenLogicalNZBFileName(originalName)
+		normalizedName, err := flattenLogicalNZBFileName(originalName)
 		if err != nil {
 			return fmt.Errorf("unsafe NZB file name %q: %w", originalName, err)
 		}
-		collisionKey, err := safepath.PortableNameKey(flattenedName)
+		collisionKey, err := safepath.PortableNameKey(normalizedName)
 		if err != nil {
 			return fmt.Errorf("unsafe NZB file name %q: %w", originalName, err)
 		}
-		if _, exists := seenNames[collisionKey]; exists {
-			return fmt.Errorf("duplicate NZB file name after flattening: %q", flattenedName)
+		if conflictingName, exists := seenNames[collisionKey]; exists {
+			return fmt.Errorf(
+				"duplicate NZB file name after sanitization: %q and %q both resolve to %q",
+				conflictingName,
+				originalName,
+				normalizedName,
+			)
 		}
-		seenNames[collisionKey] = struct{}{}
-		files[i].Name = flattenedName
+		seenNames[collisionKey] = originalName
+		normalizedNames[i] = normalizedName
+	}
+	for i := range files {
+		files[i].Name = normalizedNames[i]
 	}
 	return nil
 }

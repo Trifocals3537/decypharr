@@ -391,7 +391,11 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 	for _, hash := range hashes {
 		var err error
 		if deleteFiles {
-			err = q.manager.Queue().Delete(hash, nil)
+			// Servarr uses deleteFiles=true when it blocklists and re-searches a
+			// failed download. Route that request through the durable manager
+			// cleanup path so the provider placement is stopped before local
+			// queue state and files are retired.
+			err = q.manager.DeleteQueueEntry(hash, true)
 		} else {
 			err = q.manager.Queue().DeleteEntryOnly(hash)
 		}

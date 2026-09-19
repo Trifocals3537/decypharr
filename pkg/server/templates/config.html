@@ -298,6 +298,14 @@
                                 <span class="text-sm opacity-70">Duration before stalled active downloads are removed</span>
                             </div>
                             <div>
+                                <label class="label" for="uncachedStallTimeout">
+                                    <span class="font-medium">Uncached Stall Timeout</span>
+                                </label>
+                                <input type="text" class="input w-full" id="uncachedStallTimeout"
+                                       name="uncached_stall_timeout" placeholder="2h">
+                                <span class="text-sm opacity-70">Optional. After no progress for this long, blocklist the uncached release and let its Arr find a replacement (minimum 10m).</span>
+                            </div>
+                            <div>
                                 <label class="label" for="nzbUserAgent">
                                     <span class="font-medium">NZB User Agent</span>
                                 </label>

@@ -412,6 +412,20 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, providerSnapshots ...uint
 		return nil, nil
 	}
 
+	// Entries deleted locally but still returned by the provider are rejected
+	// by the rediscovery guard until an authoritative post-delete provider
+	// absence authorizes rediscovery. Re-processing them on every sync cycle
+	// wasted provider API calls and RAR work only to fail at the guard, and
+	// re-logged the same rejection thousands of times per day. Skip the
+	// expensive work up front; the guard itself remains the authority when the
+	// check fails open.
+	if m.storage != nil {
+		if awaiting, err := m.storage.RediscoveryAwaitingAbsence(t.InfoHash, t.Debrid, providerSnapshot); err == nil && awaiting {
+			m.noteRediscoveryPending(t.Debrid, t.InfoHash)
+			return nil, nil
+		}
+	}
+
 	// Check if files are complete - only make API call if needed
 	needsUpdate := len(t.Files) == 0 || !isComplete(t.Files)
 	if needsUpdate {

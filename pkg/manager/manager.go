@@ -73,6 +73,14 @@ type Manager struct {
 	migrationLocksMu    sync.Mutex
 	migrationLocks      map[string]*migrationEntryLock
 
+	// Coalesced logging for provider-rediscovery skips: entries deleted on the
+	// provider side but still present in provider lists are skipped on every
+	// sync cycle, and would otherwise re-log the same guard notice per cycle.
+	// The map is bounded by the number of tombstoned entries.
+	rediscoveryPendingMu      sync.Mutex
+	rediscoveryPendingLast    map[string]time.Time
+	rediscoveryPendingNowFunc func() time.Time
+
 	// repair
 	fixer  *Fixer
 	ctx    context.Context

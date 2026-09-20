@@ -278,6 +278,42 @@ func (s *Storage) PrepareProviderEntry(entry *Entry, provider string, snapshot u
 	return nil
 }
 
+// RediscoveryAwaitingAbsence reports whether a provider appearance for the
+// entry would still be rejected by PrepareProviderEntry as an unauthorized
+// rediscovery. It mirrors the guard's authorization condition without
+// mutating any state, so provider sync can cheaply skip expensive per-torrent
+// work (status refreshes, RAR unpacking, batch writes) for entries that are
+// already known to be awaiting a post-delete provider absence. The guard
+// itself remains the authority: when this check fails open, PrepareProviderEntry
+// still rejects the candidate exactly as before.
+func (s *Storage) RediscoveryAwaitingAbsence(infoHash, provider string, snapshot uint64) (bool, error) {
+	if s == nil || s.mainEntries == nil {
+		return false, nil
+	}
+	normalized := normalizeMainEntryKey(infoHash)
+	ref, err := s.acquireMainEntryState(normalized)
+	if err != nil {
+		return false, err
+	}
+	defer ref.release()
+
+	state := ref.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if !state.retired {
+		return false, nil
+	}
+	provider = normalizeMainEntryProvider(provider)
+	absentAt := state.absentAt[provider]
+	_, durableAbsence := state.durableAbsent[provider]
+	authorized := provider != "" &&
+		snapshot != 0 &&
+		durableAbsence &&
+		(absentAt == 0 || snapshot > absentAt)
+	return !authorized, nil
+}
+
 // PrepareQueuedReplacement binds an explicit queue re-import to the current
 // main-entry generation. A retired key is authorized only when the candidate
 // carries the exact durable incarnation of the queue row created after that

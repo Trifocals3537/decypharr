@@ -64,9 +64,9 @@ type Arr struct {
 
 	Type             Type   `json:"type"`
 	SkipRepair       bool   `json:"skip_repair"`
-	DownloadUncached *bool  `json:"download_uncached"`
-	SelectedDebrid   string `json:"selected_debrid,omitempty"` // The debrid service selected for this arr
-	Source           Source `json:"source,omitempty"`          // The source of the arr, e.g. "auto", "manual". Auto means it was automatically detected from the arr
+	DownloadUncached *bool  `json:"download_uncached,omitempty"` // Tri-state: nil = inherit provider policy, true = allow uncached, false = cached-only
+	SelectedDebrid   string `json:"selected_debrid,omitempty"`    // The debrid service selected for this arr
+	Source           Source `json:"source,omitempty"`              // The source of the arr, e.g. "auto", "manual". Auto means it was automatically detected from the arr
 }
 
 func New(name, host, token string, skipRepair bool, downloadUncached *bool, selectedDebrid, source string) *Arr {

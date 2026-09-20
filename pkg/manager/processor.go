@@ -677,12 +677,23 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 				Files:            make(map[string]debridTypes.File),
 				DownloadUncached: overrideDownloadUncached,
 			}
+			passLabel := "cached"
+			if pass == 1 {
+				passLabel = "uncached"
+			}
+			policySource := "provider"
+			if importRequest.DownloadUncached != nil {
+				policySource = "arr"
+			}
 			_logger.Info().
 				Str("Provider", providerName).
 				Str("Arr", importRequest.Arr.Name).
 				Str("Hash", debridTorrent.InfoHash).
 				Str("Name", debridTorrent.Name).
 				Str("Action", string(importRequest.Action)).
+				Str("pass", passLabel).
+				Str("policy_source", policySource).
+				Bool("uncached_allowed", downloadUncachedAllowed).
 				Msg("Processing torrent")
 
 			dbt, err := submitProviderMagnet(ctx, db, debridTorrent)

@@ -1037,6 +1037,9 @@ class ConfigManager {
             if (input) {
                 if (input.type === 'checkbox') {
                     input.checked = value;
+                } else if (key === 'download_uncached') {
+                    // Tri-state select: absent/null = inherit, explicit boolean = override.
+                    input.value = (value === true || value === false) ? String(value) : 'inherit';
                 } else if (key === 'token') {
                     this.populateSecretInput(input, value);
                 } else {
@@ -1128,11 +1131,16 @@ class ConfigManager {
                         </div>
 
                         <div class="rounded-box bg-base-200/50 px-3 py-2">
-                            <label class="label cursor-pointer justify-start gap-2 p-0">
-                                <input type="checkbox" class="checkbox checkbox-sm checkbox-primary"
-                                       name="arr[${index}].download_uncached" id="arr[${index}].download_uncached">
-                                <span class="text-sm leading-tight">Download Uncached</span>
+                            <label class="label" for="arr[${index}].download_uncached">
+                                <span class="text-sm font-medium">Uncached Downloads</span>
                             </label>
+                            <select class="select w-full select-sm"
+                                    name="arr[${index}].download_uncached" id="arr[${index}].download_uncached">
+                                <option value="inherit">Inherit provider policy (recommended)</option>
+                                <option value="true">Allow uncached</option>
+                                <option value="false">Cached only</option>
+                            </select>
+                            <span class="text-sm opacity-70">When set, this overrides every provider's own uncached setting for this Arr</span>
                         </div>
                     </div>
                 </div>
@@ -1463,10 +1471,14 @@ class ConfigManager {
                 host: hostInput.value,
                 token: this.collectSecretValue(tokenInput),
                 skip_repair: skipRepairInput.checked,
-                download_uncached: downloadUncachedInput.checked,
                 selected_debrid: selectedDebridInput.value,
                 source: sourceInput.value
             };
+
+            // Tri-state: omit the key entirely to inherit provider policy.
+            if (downloadUncachedInput.value === 'true' || downloadUncachedInput.value === 'false') {
+                arr.download_uncached = downloadUncachedInput.value === 'true';
+            }
 
             if (arr.name && arr.host) {
                 arrs.push(arr);

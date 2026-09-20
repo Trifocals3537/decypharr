@@ -237,7 +237,16 @@ services:
 
 ### Uncached Torrents
 
-Enable `download_uncached` per-Arr:
+Uncached policy is resolved per grab in three levels:
+
+1. **Provider policy** — each debrid's own `download_uncached` setting (`realdebrid: false`, `torbox: true` is a common split).
+2. **Per-Arr override (tri-state)** — an Arr's `download_uncached` wins over provider policy when set:
+   - omitted or `null` → inherit provider policy (recommended)
+   - `true` → allow an uncached pass on every provider, after all cached attempts miss
+   - `false` → strictly cached-only for this Arr
+3. **Runtime request flag** — the qBittorrent/API `downloadUncached` parameter, when explicitly `true`, allows uncached for that single grab.
+
+To force an Arr to allow uncached downloads:
 
 ```json
 {
@@ -252,4 +261,8 @@ Enable `download_uncached` per-Arr:
 
 :::caution
 Uncached downloads use Debrid provider's cache slots and may take time to download.
+
+Do not set `download_uncached: false` on an Arr merely to "keep the default" —
+an explicit `false` overrides every provider's own uncached setting, including
+providers configured with `download_uncached: true`. Omit the key to inherit.
 :::

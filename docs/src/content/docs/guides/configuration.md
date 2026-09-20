@@ -432,7 +432,6 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
       "host": "http://sonarr:8989",
       "token": "API_TOKEN",
       "skip_repair": false,
-      "download_uncached": false,
       "selected_debrid": ""
     }
   ]
@@ -445,9 +444,17 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
 | `host`              | Arr URL                          | Required    |
 | `token`             | Arr API key                      | Required    |
 | `skip_repair`       | Skip repair for this Arr         | `false`     |
-| `download_uncached` | Override provider policy; permit an uncached pass only after every eligible provider misses | `false` |
+| `download_uncached` | Tri-state per-Arr override of provider uncached policy. Omitted/null = inherit each provider's own `download_uncached` setting; `true` = allow an uncached pass for every provider after all cached attempts miss; `false` = strictly cached-only for this Arr | omitted (inherit) |
 | `selected_debrid`   | Exact `name` of a Debrid instance | `""` (auto) |
 | `source`            | Config source (`auto`, `config`) | `config`    |
+
+:::tip
+Leave `download_uncached` unset on the Arr unless you deliberately want to
+override provider policy. The most common misconfiguration is setting it to
+`false` on an Arr whose TorBox provider allows uncached fallback — an explicit
+`false` wins over the provider setting and silently disables the fallback for
+every grab from that Arr.
+:::
 
 ## Queue Cleanup
 

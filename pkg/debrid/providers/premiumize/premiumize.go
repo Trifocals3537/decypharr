@@ -646,7 +646,11 @@ func (pm *Premiumize) fetchDownloadLinkContext(ctx context.Context, acc *account
 	link := file.Link
 	size := file.Size
 	filename := file.Name
-	if link == "" && file.Id != "" {
+	// Premiumize's stored CDN URL expires. Treat it as the stable cache
+	// identity and re-mint the usable URL through item/details whenever the
+	// provider supplied an item ID. The account cache keeps this to one API
+	// request per file until the link is expired or explicitly invalidated.
+	if file.Id != "" {
 		item, err := pm.itemDetailsContext(ctx, file.Id)
 		if err != nil {
 			return types.DownloadLink{}, err
@@ -658,13 +662,20 @@ func (pm *Premiumize) fetchDownloadLinkContext(ctx context.Context, acc *account
 	if link == "" {
 		return types.DownloadLink{}, customerror.HosterUnavailableError
 	}
+	// Account.GetDownloadLinkContext looks up by file.Link and storeLink writes
+	// by DownloadLink.Link. Keep that cache identity stable while returning the
+	// freshly minted provider URL in DownloadLink.
+	cacheKey := file.Link
+	if cacheKey == "" {
+		cacheKey = link
+	}
 	now := time.Now()
 	return types.DownloadLink{
 		Debrid:       pm.config.Name,
 		Token:        acc.Token,
 		Filename:     filename,
 		Size:         size,
-		Link:         link,
+		Link:         cacheKey,
 		DownloadLink: link,
 		Generated:    now,
 		ExpiresAt:    now.Add(pm.autoExpiresLinksAfter),

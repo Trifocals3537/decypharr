@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/pkg/debrid/account"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
@@ -136,6 +138,86 @@ func TestFinishedTransferWithPendingLinksIsNotRejectedAsUncached(t *testing.T) {
 	}
 	if len(got.Files) != 0 {
 		t.Fatalf("torrent files = %#v, want no usable files before Premiumize supplies a link", got.Files)
+	}
+}
+
+func TestFetchDownloadLinkReMintsStoredLink(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+
+	const (
+		staleLink = "https://cdn.example.com/dl/1757900000/aaa/Show.S01E01.mkv"
+		freshLink = "https://cdn.example.com/dl/1758600000/bbb/Show.S01E01.mkv"
+	)
+
+	var detailCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/item/details", func(w http.ResponseWriter, r *http.Request) {
+		detailCalls++
+		if got := r.URL.Query().Get("id"); got != "file-1" {
+			t.Errorf("item/details id = %q, want file-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"success","id":"file-1","name":"Show.S01E01.mkv","size":2048,"link":%q}`, freshLink)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	pm := &Premiumize{
+		Host:   server.URL,
+		client: request.New(request.WithMaxRetries(0)),
+		config: config.Debrid{Name: "premiumize-primary"},
+	}
+
+	file := &types.File{Id: "file-1", Name: "Show.S01E01.mkv", Size: 1024, Link: staleLink}
+	dl, err := pm.fetchDownloadLinkContext(
+		context.Background(),
+		&account.Account{Token: "tok"},
+		"torrent-1",
+		file,
+	)
+	if err != nil {
+		t.Fatalf("fetchDownloadLinkContext() error = %v", err)
+	}
+	if detailCalls != 1 {
+		t.Errorf("item/details called %d times, want 1", detailCalls)
+	}
+	if dl.DownloadLink != freshLink {
+		t.Errorf("DownloadLink = %q, want re-minted %q", dl.DownloadLink, freshLink)
+	}
+	if dl.Link != staleLink {
+		t.Errorf("Link = %q, want stable cache key %q", dl.Link, staleLink)
+	}
+	if dl.Size != 2048 {
+		t.Errorf("Size = %d, want 2048 from item/details", dl.Size)
+	}
+}
+
+func TestFetchDownloadLinkWithoutIDUsesStoredLink(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+
+	const staleLink = "https://cdn.example.com/dl/1757900000/aaa/Show.S01E02.mkv"
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to %s", r.URL.Path)
+	}))
+	t.Cleanup(server.Close)
+
+	pm := &Premiumize{
+		Host:   server.URL,
+		client: request.New(request.WithMaxRetries(0)),
+		config: config.Debrid{Name: "premiumize-primary"},
+	}
+	file := &types.File{Name: "Show.S01E02.mkv", Size: 1024, Link: staleLink}
+	dl, err := pm.fetchDownloadLinkContext(
+		context.Background(),
+		&account.Account{Token: "tok"},
+		"torrent-1",
+		file,
+	)
+	if err != nil {
+		t.Fatalf("fetchDownloadLinkContext() error = %v", err)
+	}
+	if dl.DownloadLink != staleLink || dl.Link != staleLink {
+		t.Errorf("got Link=%q DownloadLink=%q, want both %q", dl.Link, dl.DownloadLink, staleLink)
 	}
 }
 

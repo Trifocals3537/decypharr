@@ -209,6 +209,7 @@ func (r *contextSectionReader) Read(p []byte) (int, error) {
 }
 
 type Usenet struct {
+	bufferPools              *reader.Pools
 	nntp                     *nntp.Client
 	logger                   zerolog.Logger
 	metadataDir              string
@@ -290,6 +291,7 @@ func New() (*Usenet, error) {
 	}
 
 	u := &Usenet{
+		bufferPools:              reader.NewPools(usenetConfig.BufferMemoryBytes()),
 		nzbStorage:               nzbStorage,
 		nntp:                     client,
 		logger:                   _logger,
@@ -360,7 +362,15 @@ func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent 
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
-	usenetFS, err := fs.NewFS(u.ctx, u.nntp, maxConcurrent, prefetchSize, volumes, u.logger)
+	usenetFS, err := fs.NewFS(
+		u.ctx,
+		u.nntp,
+		maxConcurrent,
+		prefetchSize,
+		volumes,
+		u.logger,
+		fs.WithPools(u.bufferPools),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -827,6 +837,7 @@ func (u *Usenet) Close() error {
 
 func (u *Usenet) close() error {
 	u.logger.Info().Msg("Closing Usenet NNTP client")
+	var closeErr error
 
 	u.watcherMu.Lock()
 	claimScanner := u.claimScanner
@@ -854,6 +865,7 @@ func (u *Usenet) close() error {
 	// allowing SegmentFetcher.Close() (prefetchWg.Wait()) to complete without hanging.
 	if u.nntp != nil {
 		if err := u.nntp.Close(); err != nil {
+			closeErr = errors.Join(closeErr, err)
 			u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
 		}
 	}
@@ -868,9 +880,12 @@ func (u *Usenet) close() error {
 		})
 		u.fs.Clear()
 	}
+	if u.bufferPools != nil {
+		closeErr = errors.Join(closeErr, u.bufferPools.Close())
+	}
 
 	u.logger.Info().Msg("Usenet closed")
-	return nil
+	return closeErr
 }
 
 func (u *Usenet) getFile(nzoID, filename string) (*storage.NZBFile, error) {
@@ -1151,6 +1166,9 @@ func (u *Usenet) Stats() map[string]any {
 	stats := u.nntp.Stats()
 	stats["readers"] = u.fs.Size()
 	stats["nzb_storage"] = u.nzbStorage.Stats()
+	if u.bufferPools != nil {
+		stats["buffers"] = u.bufferPools.Stats()
+	}
 	return stats
 }
 

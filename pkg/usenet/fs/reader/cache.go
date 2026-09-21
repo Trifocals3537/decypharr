@@ -42,6 +42,9 @@ import (
 // All the actual byte movement (write, read, hole-punch) goes through the
 // buffer. That's the entire integration boundary.
 type SegmentCache struct {
+	pools     *Pools
+	ownsPools bool
+
 	// Segment metadata
 	segments   []SegmentMeta
 	segCount   int
@@ -802,7 +805,21 @@ func NewSegmentCache(
 	// before any read/write can trigger a pool-driven punch.
 	var sc *SegmentCache
 
-	buf, err := usenetBufferPool().NewBuffer(buffer.Config{
+	pools := config.Pools
+	ownsPools := pools == nil
+	if ownsPools {
+		pools = defaultPools()
+	}
+	pools.mu.Lock()
+	if pools.closed {
+		pools.mu.Unlock()
+		cancel()
+		cleanupErr := retryCacheCleanup(func() error {
+			return removeCacheInstance(cacheRoot, diskPath, cacheToken)
+		})
+		return nil, errors.Join(buffer.ErrClosed, cleanupErr)
+	}
+	buf, err := pools.buffers.NewBuffer(buffer.Config{
 		MemorySize: bufferMemorySize,
 		DiskPath:   filepath.Join(diskPath, "segments.bin"),
 		TotalSize:  totalSize,
@@ -817,7 +834,11 @@ func NewSegmentCache(
 		},
 	})
 	if err != nil {
+		pools.mu.Unlock()
 		cancel()
+		if ownsPools {
+			_ = pools.Close()
+		}
 		if cleanupErr := retryCacheCleanup(func() error {
 			return removeCacheInstance(cacheRoot, diskPath, cacheToken)
 		}); cleanupErr != nil {
@@ -827,6 +848,8 @@ func NewSegmentCache(
 	}
 
 	sc = &SegmentCache{
+		pools:       pools,
+		ownsPools:   ownsPools,
 		segments:    segments,
 		segCount:    segCount,
 		segOffsets:  offsets,
@@ -861,6 +884,8 @@ func NewSegmentCache(
 	// to actual playback instead of growing to the file size.
 	sc.sweepWg.Add(1)
 	go sc.sweepLoop()
+	pools.caches[sc] = struct{}{}
+	pools.mu.Unlock()
 
 	return sc, nil
 }
@@ -1769,6 +1794,14 @@ func (sc *SegmentCache) closeAttempt() (shutdownErr, cleanupErr error) {
 				shutdownErr = fmt.Errorf("close segment buffer: %w", err)
 			}
 			sc.buf = nil
+		}
+		if sc.pools != nil {
+			sc.pools.unregister(sc)
+		}
+		if sc.ownsPools {
+			if err := sc.pools.Close(); err != nil {
+				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("close segment buffer pool: %w", err))
+			}
 		}
 	}
 	if sc.diskPath != "" {

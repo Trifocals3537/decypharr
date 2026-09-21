@@ -101,6 +101,10 @@ func (s SegmentState) String() string {
 
 // Config holds configuration for StreamingReader.
 type Config struct {
+	// Pools shares the memory budget across readers in one service run. A nil
+	// value gives a standalone reader its own lifecycle-scoped pool.
+	Pools *Pools
+
 	// MaxDisk is the maximum disk space to use for segment caching (default: 256MB).
 	MaxDisk int64
 
@@ -176,6 +180,11 @@ func WithDiskPath(path string) Option {
 	return func(c *Config) {
 		c.DiskPath = path
 	}
+}
+
+// WithPools sets the lifecycle-scoped cache pools for this reader.
+func WithPools(pools *Pools) Option {
+	return func(c *Config) { c.Pools = pools }
 }
 
 // WithMaxConnections sets the maximum concurrent NNTP downloads.

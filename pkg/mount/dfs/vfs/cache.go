@@ -972,6 +972,13 @@ func (c *Cache) GetStats() map[string]any {
 		"quota_denials":     c.quotaDenials.Load(),
 		"quota_reclaimed":   c.quotaReclaimed.Load(),
 	}
+	if c.pool != nil {
+		memory := c.pool.Stats()
+		stats["buffer_memory_in_use"] = memory.MemoryInUse
+		stats["buffer_memory_allocated"] = memory.MemoryAllocated
+		stats["buffer_memory_budget"] = memory.MemoryBudget
+		stats["buffer_count"] = memory.Buffers
+	}
 
 	return stats
 }

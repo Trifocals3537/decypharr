@@ -301,6 +301,7 @@ func newBuffer(p *Pool, cfg Config) (*Buffer, error) {
 	if b.alloc.maxFree < 1 {
 		b.alloc.maxFree = 1
 	}
+	b.alloc.pool = p
 	for _, r := range cfg.InitialRanges {
 		if r.Size > 0 {
 			// Seeded ranges are already on disk from a prior run: count them
@@ -868,7 +869,7 @@ func (b *Buffer) Close() error {
 				closeErrs = append(closeErrs, err)
 			}
 		}
-		munmapBlock(blk.bufPtr)
+		blockRelease{data: blk.bufPtr, pool: b.pool}.release()
 		delete(b.blocks, off)
 	}
 	b.pool.dropBytes(b.bytesInRAM) // release this Buffer's share of the pool RAM budget
@@ -1004,7 +1005,11 @@ func (b *Buffer) acquireBlockLocked(blockOff int64) (*block, error) {
 		return nil, errPoolMemoryBudget
 	}
 
-	bufPtr := b.alloc.get()
+	bufPtr, allocated := b.alloc.get()
+	if !allocated {
+		b.pool.dropBytes(int64(blockSize))
+		return nil, errPoolMemoryBudget
+	}
 	buf := (*bufPtr)[:blockSize]
 
 	// Load from disk if any part of this block is known to be present.

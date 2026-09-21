@@ -12,10 +12,12 @@ import (
 // two have independent budgets and can't starve each other.
 //
 // Memory: per-Buffer Config.MemorySize is a ceiling on one stream's hot
-// working set; the Pool's MemoryBudget caps the *sum* of resident block RAM
-// across all its Buffers. When the budget is exhausted a Buffer evicts its own
-// trailing (LRU) blocks before caching new ones, and writes fall through to
-// disk rather than growing RAM (self-eviction; no cross-Buffer LRU).
+// working set; the Pool's MemoryBudget caps every owned block allocation
+// across all its Buffers, including allocator reuse and blocks awaiting an
+// asynchronous release. When the budget is exhausted, reusable blocks are
+// released first. A Buffer then evicts its own trailing (LRU) blocks before
+// caching new ones, and writes fall through to disk rather than growing RAM
+// (self-eviction; no cross-Buffer LRU).
 //
 // Disk: the Pool tracks the total on-disk present bytes across its Buffers.
 // When that exceeds DiskLimit a background worker punches holes behind each
@@ -30,11 +32,16 @@ type Pool struct {
 	diskLimit  atomic.Int64 // on-disk present bytes ceiling; 0 = unlimited
 	backWindow int64        // bytes retained behind a read head before punching
 
-	memInUse  atomic.Int64 // sum of resident block RAM across Buffers
-	diskInUse atomic.Int64 // sum of on-disk present bytes across Buffers
+	memInUse     atomic.Int64 // active block bytes across Buffers
+	memAllocated atomic.Int64 // all owned blocks, including reuse and pending release
+	memReusable  atomic.Int64 // allocated bytes held on allocator free lists
+	diskInUse    atomic.Int64 // sum of on-disk present bytes across Buffers
 
 	mu      sync.RWMutex
 	buffers map[*Buffer]struct{}
+	// releaseWG lets Close wait for blocks already queued on the shared unmap
+	// worker, so a replacement service cannot overlap the old pool's ownership.
+	releaseWG sync.WaitGroup
 	// reclaimMu serializes background backstop work with synchronous cache
 	// pressure reclamation so two scans cannot punch the same ranges at once.
 	reclaimMu sync.Mutex
@@ -53,8 +60,8 @@ type PoolConfig struct {
 	// Name labels the pool for logging/metrics ("dfs", "usenet").
 	Name string
 
-	// MemoryBudget caps the sum of resident block RAM across all Buffers in
-	// this pool. 0 = unlimited.
+	// MemoryBudget caps allocated block bytes, including reusable and pending
+	// release blocks. 0 = unlimited.
 	MemoryBudget int64
 
 	// DiskLimit caps the sum of on-disk present bytes across all Buffers. When
@@ -70,13 +77,16 @@ type PoolConfig struct {
 
 // PoolStats reports pool-wide counters.
 type PoolStats struct {
-	MemoryInUse    int64
-	MemoryBudget   int64
-	DiskInUse      int64
-	DiskLimit      int64
-	Buffers        int
-	DiskPunches    int64
-	BytesReclaimed int64
+	MemoryInUse int64
+	// MemoryAllocated includes active blocks, allocator reuse, and releases
+	// still queued for munmap. It is allocation size, not process RSS.
+	MemoryAllocated int64
+	MemoryBudget    int64
+	DiskInUse       int64
+	DiskLimit       int64
+	Buffers         int
+	DiskPunches     int64
+	BytesReclaimed  int64
 }
 
 // NewPool creates a Pool. If DiskLimit > 0 it starts a background worker that
@@ -141,13 +151,14 @@ func (p *Pool) Stats() PoolStats {
 	n := len(p.buffers)
 	p.mu.RUnlock()
 	return PoolStats{
-		MemoryInUse:    p.memInUse.Load(),
-		MemoryBudget:   p.memBudget.Load(),
-		DiskInUse:      p.diskInUse.Load(),
-		DiskLimit:      p.diskLimit.Load(),
-		Buffers:        n,
-		DiskPunches:    p.statsPunches.Load(),
-		BytesReclaimed: p.statsReclaimed.Load(),
+		MemoryInUse:     p.memInUse.Load(),
+		MemoryAllocated: p.memAllocated.Load(),
+		MemoryBudget:    p.memBudget.Load(),
+		DiskInUse:       p.diskInUse.Load(),
+		DiskLimit:       p.diskLimit.Load(),
+		Buffers:         n,
+		DiskPunches:     p.statsPunches.Load(),
+		BytesReclaimed:  p.statsReclaimed.Load(),
 	}
 }
 
@@ -176,13 +187,14 @@ func (p *Pool) Close() error {
 			firstErr = err
 		}
 	}
+	p.releaseWG.Wait()
 	return firstErr
 }
 
 // --- RAM admission ----------------------------------------------------------
 
-// wouldExceedMemory reports whether caching one more block would push the
-// pool's resident total past the budget.
+// wouldExceedMemory is an optimistic active-working-set check. Final admission
+// also reserves the underlying allocation atomically in tryReserveAllocation.
 func (p *Pool) wouldExceedMemory() bool {
 	if p.closed.Load() {
 		return true
@@ -210,6 +222,46 @@ func (p *Pool) tryReserveBlock() bool {
 		if p.closed.Load() {
 			return false
 		}
+	}
+}
+
+// tryReserveAllocation atomically charges one newly allocated block. Reusing
+// an existing block does not call this method and therefore cannot double
+// charge the allocation.
+func (p *Pool) tryReserveAllocation() bool {
+	if p.closed.Load() {
+		return false
+	}
+	for {
+		current := p.memAllocated.Load()
+		budget := p.memBudget.Load()
+		if budget > 0 && current > budget-int64(blockSize) {
+			return false
+		}
+		if p.memAllocated.CompareAndSwap(current, current+int64(blockSize)) {
+			return true
+		}
+		if p.closed.Load() {
+			return false
+		}
+	}
+}
+
+// releaseReusable returns inactive allocator blocks to the OS before active
+// data is denied. It snapshots the Buffer set so no pool lock is held while an
+// allocator is drained.
+func (p *Pool) releaseReusable() {
+	if p.memReusable.Load() == 0 {
+		return
+	}
+	p.mu.RLock()
+	bufs := make([]*Buffer, 0, len(p.buffers))
+	for b := range p.buffers {
+		bufs = append(bufs, b)
+	}
+	p.mu.RUnlock()
+	for _, b := range bufs {
+		b.alloc.drain()
 	}
 }
 

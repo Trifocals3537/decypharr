@@ -15,6 +15,20 @@ import (
 
 const minimumUncachedStallTimeout = 10 * time.Minute
 
+func stallableProviderState(state string) bool {
+	state = strings.ToLower(strings.TrimSpace(strings.SplitN(state, "(", 2)[0]))
+	switch state {
+	case "":
+		// Older providers do not expose a raw state. Preserve their watchdog
+		// behavior, with the additional confirming status request.
+		return true
+	case "downloading", "stalled", "stalleddl":
+		return true
+	default:
+		return false
+	}
+}
+
 func parseUncachedStallTimeout(raw string) (time.Duration, error) {
 	if strings.TrimSpace(raw) == "" {
 		return 0, nil
@@ -56,13 +70,13 @@ func uncachedTransferStalled(
 	return !now.Before(entry.LastProgressAt.Add(timeout))
 }
 
-// handoffStalledUncached asks the owning Arr to remove exactly one stalled
-// download, blocklist that release, and re-search. It runs outside the per-entry
+// handoffUncachedFailures asks the owning Arr to remove exactly one confirmed
+// failed download, blocklist that release, and re-search. It runs outside the per-entry
 // worker lease: the Arr synchronously calls Decypharr's qBittorrent delete API,
 // which can then drain the old worker and durably clean the provider placement.
 // A persisted stalledDL row makes the handoff restart-safe and naturally
 // retryable until the Arr acknowledges it.
-func (m *Manager) handoffStalledUncached(ctx context.Context) error {
+func (m *Manager) handoffUncachedFailures(ctx context.Context) error {
 	if m == nil || m.queue == nil || m.arr == nil {
 		return nil
 	}
@@ -87,14 +101,21 @@ func (m *Manager) handoffStalledUncached(ctx context.Context) error {
 			m.logger.Debug().
 				Str("entry", entry.InfoHash).
 				Str("category", entry.Category).
-				Msg("Stalled uncached transfer has no configured Arr owner; leaving it for manual review")
+				Msg("Failed uncached transfer has no configured Arr owner; leaving it for manual review")
 			continue
 		}
-		handedOff, err := owner.BlocklistAndResearchDownloadCtx(ctx, entry.InfoHash)
+		var handedOff bool
+		var err error
+		if entry.ClientEndpoint == "" {
+			m.logger.Warn().Str("entry", entry.InfoHash).Msg("Uncached transfer lacks submitting client evidence; manual Arr review required")
+			continue
+		}
+		handedOff, err = owner.BlocklistAndResearchDownloadForEndpointCtx(ctx, entry.InfoHash, entry.ClientEndpoint)
 		if err != nil {
+			m.uncachedHandoffErrors.Add(1)
 			handoffErr = errors.Join(
 				handoffErr,
-				fmt.Errorf("handoff stalled transfer %s to %s: %w", entry.InfoHash, owner.Name, err),
+				fmt.Errorf("handoff failed transfer %s to %s: %w", entry.InfoHash, owner.Name, err),
 			)
 			continue
 		}
@@ -102,13 +123,15 @@ func (m *Manager) handoffStalledUncached(ctx context.Context) error {
 			m.logger.Debug().
 				Str("entry", entry.InfoHash).
 				Str("arr", owner.Name).
-				Msg("Stalled uncached transfer is not yet present in the Arr queue")
+				Msg("Failed uncached transfer is not yet present in the Arr queue")
 			continue
 		}
+		m.uncachedHandoffAccepted.Add(1)
 		m.logger.Info().
 			Str("entry", entry.InfoHash).
 			Str("arr", owner.Name).
-			Msg("Arr accepted stalled uncached transfer for blocklist and replacement search")
+			Str("reason", entry.HandoffReason).
+			Msg("Arr accepted failed uncached transfer for blocklist and replacement search")
 	}
 	return handoffErr
 }

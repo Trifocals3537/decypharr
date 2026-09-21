@@ -2,6 +2,7 @@ package arr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -174,9 +175,82 @@ func (a *Arr) GetQueueCtx(ctx context.Context) ([]QueueSchema, error) {
 
 // BlocklistAndResearchDownloadCtx removes the exact tracked torrent from this
 // Arr, blocklists its release, and allows the Arr to search for a replacement.
-// A download ID must resolve to exactly one queue row; ambiguity fails closed so
-// one Decypharr instance cannot remove a same-hash item owned by another client.
+// A download ID must resolve to exactly one queue row. This legacy method does
+// not prove download-client ownership; automated uncached handoff uses the
+// endpoint-checked variant below.
 func (a *Arr) BlocklistAndResearchDownloadCtx(ctx context.Context, downloadID string) (bool, error) {
+	return a.blocklistAndResearchDownloadCtx(ctx, downloadID, "")
+}
+
+// BlocklistAndResearchDownloadForEndpointCtx additionally requires the queue
+// item to belong to the qBittorrent client that submitted the download. The
+// endpoint is the Host authority seen on the authenticated add request.
+func (a *Arr) BlocklistAndResearchDownloadForEndpointCtx(ctx context.Context, downloadID, endpoint string) (bool, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return false, fmt.Errorf("submitting qBittorrent endpoint is required")
+	}
+	clientName, err := a.downloadClientForEndpointCtx(ctx, endpoint)
+	if err != nil {
+		return false, err
+	}
+	return a.blocklistAndResearchDownloadCtx(ctx, downloadID, clientName)
+}
+
+type arrDownloadClient struct {
+	Name           string `json:"name"`
+	Implementation string `json:"implementation"`
+	Fields         []struct {
+		Name  string          `json:"name"`
+		Value json.RawMessage `json:"value"`
+	} `json:"fields"`
+}
+
+func (a *Arr) downloadClientForEndpointCtx(ctx context.Context, endpoint string) (string, error) {
+	parsed, err := gourl.Parse("http://" + endpoint)
+	if err != nil || parsed.Hostname() == "" || parsed.Port() == "" || parsed.User != nil || parsed.Path != "" {
+		return "", fmt.Errorf("invalid submitting qBittorrent endpoint")
+	}
+	var clients []arrDownloadClient
+	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/downloadclient", nil, &clients)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("get Arr download clients: %s", resp.Status)
+	}
+	var matched string
+	for _, client := range clients {
+		if !strings.EqualFold(client.Implementation, "QBittorrent") {
+			continue
+		}
+		var host, port string
+		for _, field := range client.Fields {
+			var value string
+			if err := json.Unmarshal(field.Value, &value); err != nil {
+				value = strings.TrimSpace(string(field.Value))
+			}
+			switch strings.ToLower(field.Name) {
+			case "host":
+				host = value
+			case "port":
+				port = value
+			}
+		}
+		if !strings.EqualFold(host, parsed.Hostname()) || port != parsed.Port() {
+			continue
+		}
+		if matched != "" || strings.TrimSpace(client.Name) == "" {
+			return "", fmt.Errorf("ambiguous Arr qBittorrent endpoint ownership")
+		}
+		matched = client.Name
+	}
+	if matched == "" {
+		return "", fmt.Errorf("submitting qBittorrent endpoint is not configured in Arr")
+	}
+	return matched, nil
+}
+
+func (a *Arr) blocklistAndResearchDownloadCtx(ctx context.Context, downloadID, clientName string) (bool, error) {
 	downloadID = strings.TrimSpace(downloadID)
 	if downloadID == "" {
 		return false, fmt.Errorf("download ID is required")
@@ -203,6 +277,13 @@ func (a *Arr) BlocklistAndResearchDownloadCtx(ctx context.Context, downloadID st
 			downloadID,
 			len(matched),
 		)
+	}
+	if clientName != "" {
+		for _, item := range queue {
+			if matched[item.Id] && !strings.EqualFold(strings.TrimSpace(item.DownloadClient), clientName) {
+				return false, fmt.Errorf("Arr queue item is not owned by the submitting qBittorrent client")
+			}
+		}
 	}
 	if err := a.removeQueueItemsCtx(ctx, matched, true, false); err != nil {
 		return false, err

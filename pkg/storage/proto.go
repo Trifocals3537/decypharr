@@ -161,6 +161,9 @@ func EntryToProto(e *Entry) *EntryProto {
 		ErrorCount:       int32(e.ErrorCount),
 		QueueIncarnation: e.QueueIncarnation,
 		OutputName:       e.OutputName,
+		ClientEndpoint:   e.ClientEndpoint,
+		TerminalChecks:   int32(e.TerminalChecks),
+		HandoffReason:    e.HandoffReason,
 	}
 
 	// Timestamps
@@ -239,6 +242,9 @@ func ProtoToEntry(pb *EntryProto) *Entry {
 		ErrorCount:       int(pb.ErrorCount),
 		QueueIncarnation: pb.QueueIncarnation,
 		OutputName:       pb.OutputName,
+		ClientEndpoint:   pb.ClientEndpoint,
+		TerminalChecks:   int(pb.TerminalChecks),
+		HandoffReason:    pb.HandoffReason,
 	}
 
 	// Timestamps

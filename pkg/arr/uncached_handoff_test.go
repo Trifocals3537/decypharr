@@ -57,3 +57,28 @@ func TestBlocklistAndResearchDownloadRejectsAmbiguousHash(t *testing.T) {
 		t.Fatalf("ambiguous handoff = %t, %v; want refusal", handedOff, err)
 	}
 }
+
+func TestEndpointHandoffRejectsWrongDownloadClient(t *testing.T) {
+	var deletes int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v3/downloadclient":
+			_, _ = w.Write([]byte(`[{"name":"Our Decypharr","implementation":"QBittorrent","fields":[{"name":"host","value":"decypharr.example"},{"name":"port","value":8282}]}]`))
+		case "/api/v3/queue":
+			_, _ = w.Write([]byte(`{"page":1,"pageSize":200,"totalRecords":1,"records":[{"id":17,"downloadId":"abc123","protocol":"torrent","downloadClient":"Other qBittorrent"}]}`))
+		case "/api/v3/queue/bulk":
+			deletes++
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	a := New("sonarr", server.URL, "token", false, nil, "", "manual")
+	if done, err := a.BlocklistAndResearchDownloadForEndpointCtx(context.Background(), "abc123", "decypharr.example:8282"); err == nil || done {
+		t.Fatalf("wrong-client handoff = %t, %v", done, err)
+	}
+	if deletes != 0 {
+		t.Fatalf("deleted %d wrong-client jobs", deletes)
+	}
+}

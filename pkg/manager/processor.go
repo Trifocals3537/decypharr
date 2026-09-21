@@ -190,6 +190,7 @@ func newTorrentQueueEntry(importReq *ImportRequest, status debridTypes.TorrentSt
 		Magnet:           importReq.Magnet.Link,
 		Category:         importReq.Arr.Name,
 		SavePath:         filepath.Join(importReq.DownloadFolder, importReq.Arr.Name),
+		ClientEndpoint:   importReq.ClientEndpoint,
 		Status:           status,
 		State:            storage.EntryStateDownloading,
 		Progress:         0,
@@ -365,7 +366,40 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		return ctxErr
 	}
 	if err != nil {
-		if dbT != nil && dbT.Id != "" {
+		if entry.DownloadUncached && errors.Is(err, debridTypes.ErrTerminalProviderTorrent) {
+			m.uncachedFreshChecks.Add(1)
+			fresh, freshErr := checkFreshProviderStatus(ctx, client, debridTorrent)
+			if errors.Is(freshErr, debridTypes.ErrTerminalProviderTorrent) && fresh != nil && fresh.Status == debridTypes.TorrentStatusError {
+				entry.TerminalChecks++
+				if entry.TerminalChecks >= 2 {
+					entry.MarkAsStalled(fmt.Errorf("provider confirmed terminal uncached transfer"))
+					entry.GetActiveProvider().Status = debridTypes.TorrentStatusError
+					entry.HandoffReason = "terminal"
+					m.uncachedTerminalConfirmed.Add(1)
+					m.logger.Warn().Str("name", entry.Name).Str("provider", entry.ActiveProvider).Msg("Confirmed terminal uncached transfer; waiting for Arr replacement handoff")
+				} else {
+					m.logger.Warn().Str("name", entry.Name).Msg("Provider reported terminal transfer state; awaiting second fresh confirmation")
+				}
+				return m.queue.Update(entry)
+			}
+			if freshErr != nil {
+				m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm provider transfer failure; retaining queued job")
+				entry.TerminalChecks = 0
+				return m.queue.Update(entry)
+			}
+			entry.TerminalChecks = 0
+			dbT = fresh
+		} else if dbT == nil || dbT.Status != debridTypes.TorrentStatusError {
+			m.logger.Warn().Err(err).Str("name", entry.Name).Msg("Provider status unavailable; retaining queued job for retry")
+			if entry.TerminalChecks != 0 {
+				entry.TerminalChecks = 0
+				return m.queue.Update(entry)
+			}
+			return nil
+		}
+	}
+	if err != nil && dbT != nil && dbT.Status == debridTypes.TorrentStatusError {
+		if dbT.Id != "" {
 			err = errors.Join(err, m.deleteProviderTorrent(client, dbT.Id))
 		}
 		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error checking status")
@@ -382,6 +416,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		_ = m.queue.Update(entry)
 		return nil
 	}
+	entry.TerminalChecks = 0
 
 	if err := m.validateResolvedTorrentNames(debridTorrent, entry.Action); err != nil {
 		err = errors.Join(err, m.deleteProviderTorrent(client, debridTorrent.Id))
@@ -424,11 +459,29 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		observedAt,
 		m.uncachedStallTimeout,
 	) {
+		if !stallableProviderState(debridTorrent.ProviderState) {
+			return m.queue.Update(entry)
+		}
+		m.uncachedFreshChecks.Add(1)
+		fresh, freshErr := checkFreshProviderStatus(ctx, client, debridTorrent)
+		if freshErr != nil || fresh == nil {
+			m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm uncached stall; retaining queued job")
+			return m.queue.Update(entry)
+		}
+		if fresh.Status != debridTypes.TorrentStatusDownloading || !stallableProviderState(fresh.ProviderState) || fresh.Speed > 0 || fresh.Progress/100.0 > entry.Progress {
+			entry.ObserveTransfer(fresh.Progress/100.0, time.Now())
+			entry.Progress = fresh.Progress / 100.0
+			entry.Speed = fresh.Speed
+			entry.TerminalChecks = 0
+			return m.queue.Update(entry)
+		}
 		stallErr := fmt.Errorf(
 			"uncached provider transfer made no progress for %s",
 			m.uncachedStallTimeout,
 		)
 		entry.MarkAsStalled(stallErr)
+		entry.HandoffReason = "stalled"
+		m.uncachedStallConfirmed.Add(1)
 		if placement := entry.GetActiveProvider(); placement != nil {
 			placement.Status = debridTypes.TorrentStatusError
 		}

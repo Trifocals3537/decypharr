@@ -106,6 +106,11 @@ message EntryProto {
   // progress must not refresh this timestamp.
   int64 last_progress_at_unix = 44;
   bool has_last_progress_at = 45;
+  // Originating qBittorrent endpoint and durable failure evidence. Field
+  // numbers are append-only so existing queue records remain readable.
+  string client_endpoint = 46;
+  int32 terminal_checks = 47;
+  string handoff_reason = 48;
 }
 
 // ============================================================================

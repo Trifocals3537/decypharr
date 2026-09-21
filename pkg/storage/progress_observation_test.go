@@ -46,3 +46,11 @@ func TestProgressObservationProtoRoundTrip(t *testing.T) {
 		t.Fatalf("LastProgressAt = %v, want %v", roundTrip.LastProgressAt, progress)
 	}
 }
+
+func TestUncachedHandoffEvidenceProtoRoundTrip(t *testing.T) {
+	entry := &Entry{InfoHash: "hash", ClientEndpoint: "decypharr.example:8282", TerminalChecks: 2, HandoffReason: "terminal"}
+	roundTrip := ProtoToEntry(EntryToProto(entry))
+	if roundTrip.ClientEndpoint != entry.ClientEndpoint || roundTrip.TerminalChecks != 2 || roundTrip.HandoffReason != "terminal" {
+		t.Fatalf("handoff evidence lost: %+v", roundTrip)
+	}
+}

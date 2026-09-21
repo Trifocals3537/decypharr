@@ -11,10 +11,41 @@ import (
 )
 
 const (
-	entryItemStateKey   = "entry_items"
-	entryItemStateClean = "clean-v1"
-	entryItemStateDirty = "dirty-v1"
+	entryItemStateKey            = "entry_items"
+	entryItemStateClean          = "clean-v1"
+	entryItemStateDirty          = "dirty-v1"
+	entryItemIntegrityStateKey   = "entry_items_integrity"
+	entryItemSharedFolderVersion = "shared-folder-v1"
 )
+
+func (s *Storage) needsEntryItemSharedFolderUpgrade() (bool, error) {
+	if s.storageState == nil {
+		return false, fmt.Errorf("storage state store is not initialized")
+	}
+	state, err := s.storageState.Get(entryItemIntegrityStateKey)
+	switch {
+	case err == nil:
+		return string(state) != entryItemSharedFolderVersion, nil
+	case hybrid.IsNotFound(err):
+		return true, nil
+	default:
+		return false, fmt.Errorf("read entry-item integrity version: %w", err)
+	}
+}
+
+func (s *Storage) markEntryItemSharedFolderUpgrade() error {
+	if err := s.storageState.Put(
+		entryItemIntegrityStateKey,
+		[]byte(entryItemSharedFolderVersion),
+		nil,
+	); err != nil {
+		return fmt.Errorf("write entry-item integrity version: %w", err)
+	}
+	if err := s.storageState.Sync(); err != nil {
+		return fmt.Errorf("sync entry-item integrity version: %w", err)
+	}
+	return nil
+}
 
 // beginEntryItemSession leaves a durable dirty marker before startup can
 // mutate either the authoritative main-entry store or its name index. A clean

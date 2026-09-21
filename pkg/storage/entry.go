@@ -1131,6 +1131,9 @@ func (s *Storage) removeFromEntryItem(entry *Entry) error {
 			delete(item.Files, fileName)
 		}
 	}
+	if err := s.mergeRemainingFolderEntries(item, name, entry.InfoHash); err != nil {
+		return err
+	}
 
 	if len(item.Files) == 0 {
 		if err := s.entryItems.Delete(name); err != nil && !hybrid.IsNotFound(err) {
@@ -1147,6 +1150,63 @@ func (s *Storage) removeFromEntryItem(entry *Entry) error {
 	}
 	if err := s.entryItems.Put(name, updatedData, nil); err != nil {
 		return fmt.Errorf("write entry item %s: %w", name, err)
+	}
+	return nil
+}
+
+// mergeRemainingFolderEntries restores files supplied by other authoritative
+// entries that render the same folder. A provider can expose one cloud
+// transfer under more than one stable identity, and independent providers can
+// also produce the same release folder. Deleting one identity must not remove
+// the shared folder's only indexed copy of a file that another live entry still
+// serves.
+//
+// The caller holds entryItemsMu. Main-entry mutations take that mutex before
+// writing the authoritative store, so the metadata scan and reads below see a
+// stable cross-entry snapshot. Sorting keys keeps equal-timestamp tie-breaking
+// deterministic even though the in-memory metadata index is lock-free.
+func (s *Storage) mergeRemainingFolderEntries(
+	item *EntryItem,
+	folder string,
+	skipInfoHash string,
+) error {
+	if item == nil || folder == "" {
+		return nil
+	}
+	skipInfoHash = normalizeMainEntryKey(skipInfoHash)
+	keys := make([]string, 0)
+	if err := s.entries.ForEachMeta(func(key string, meta *hybrid.IndexEntry) error {
+		if strings.HasPrefix(key, "__") ||
+			normalizeMainEntryKey(key) == skipInfoHash ||
+			meta.Name != folder {
+			return nil
+		}
+		keys = append(keys, key)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("scan entries for shared folder %q: %w", folder, err)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		data, err := s.entries.Get(key)
+		if err != nil {
+			return fmt.Errorf("read entry %q for shared folder %q: %w", key, folder, err)
+		}
+		remaining, err := decodeMainEntry(key, data)
+		if err != nil {
+			return fmt.Errorf("decode entry %q for shared folder %q: %w", key, folder, err)
+		}
+		// Metadata is an optimization, not authority. Fail closed if it is
+		// stale rather than merging an unrelated entry into this folder.
+		if remaining.GetFolder() != folder {
+			return fmt.Errorf(
+				"entry %q metadata names shared folder %q but payload renders %q",
+				key,
+				folder,
+				remaining.GetFolder(),
+			)
+		}
+		mergeEntryItemFiles(item, remaining)
 	}
 	return nil
 }

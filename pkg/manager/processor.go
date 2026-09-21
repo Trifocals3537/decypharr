@@ -681,10 +681,7 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			if pass == 1 {
 				passLabel = "uncached"
 			}
-			policySource := "provider"
-			if importRequest.DownloadUncached != nil {
-				policySource = "arr"
-			}
+			policySource := uncachedPolicySource(importRequest)
 			_logger.Info().
 				Str("Provider", providerName).
 				Str("Arr", importRequest.Arr.Name).
@@ -774,6 +771,20 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 	}
 	joinedErrors := errors.Join(errs...)
 	return nil, fmt.Errorf("failed to process torrent: %w", joinedErrors)
+}
+
+// uncachedPolicySource returns the origin of the effective uncached policy for
+// operational logs. API imports carry an explicit request-time override;
+// qBittorrent imports carry the selected Arr's tri-state policy; nil inherits
+// the provider configuration.
+func uncachedPolicySource(importRequest *ImportRequest) string {
+	if importRequest == nil || importRequest.DownloadUncached == nil {
+		return "provider"
+	}
+	if importRequest.Type == ImportTypeAPI {
+		return "request"
+	}
+	return "arr"
 }
 
 func isTorrentNotCachedError(err error) bool {

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,7 +25,7 @@ type rediscoveryTestClient struct {
 	updateCalls *atomic.Int64
 }
 
-func (c *rediscoveryTestClient) Config() config.Debrid   { return c.cfg }
+func (c *rediscoveryTestClient) Config() config.Debrid  { return c.cfg }
 func (c *rediscoveryTestClient) Logger() zerolog.Logger { return zerolog.Nop() }
 
 func (c *rediscoveryTestClient) UpdateTorrent(*debridTypes.Torrent) error {
@@ -123,12 +124,18 @@ func TestProcessSyncTorrentStillProcessesAuthorizedRediscovery(t *testing.T) {
 	reappearance := store.BeginProviderSnapshot()
 
 	m, updateCalls := newRediscoveryManager(t, store)
+	if !m.shouldLogRediscoveryPending("torbox/authorized-key", time.Now()) {
+		t.Fatal("failed to seed pending notice state")
+	}
 	_, err := m.processSyncTorrent(rediscoveryCandidate("authorized-key"), reappearance)
 	if err == nil {
 		t.Fatal("expected the mock client's stop error after the expensive call")
 	}
 	if got := updateCalls.Load(); got != 1 {
 		t.Fatalf("UpdateTorrent calls = %d, want 1 for authorized rediscovery", got)
+	}
+	if _, retained := m.rediscoveryPendingLast["torbox/authorized-key"]; retained {
+		t.Fatal("authorized rediscovery retained stale coalescer state")
 	}
 }
 
@@ -138,8 +145,8 @@ func TestProcessSyncTorrentStillProcessesLiveEntries(t *testing.T) {
 	store := openStorage(t, t.TempDir())
 	entry := &storage.Entry{
 		Protocol:       config.ProtocolTorrent,
-		InfoHash:      "live-key",
-		Name:          "live",
+		InfoHash:       "live-key",
+		Name:           "live",
 		ActiveProvider: "torbox",
 		Providers:      map[string]*storage.ProviderEntry{"torbox": {Provider: "torbox", ID: "id"}},
 		Files:          map[string]*storage.File{},
@@ -231,5 +238,38 @@ func TestRediscoveryPendingLogRefiresAfterRestart(t *testing.T) {
 	restarted := &Manager{logger: zerolog.Nop()}
 	if !restarted.shouldLogRediscoveryPending("torbox/key", time.Now()) {
 		t.Fatal("restarted process must log its own first occurrence")
+	}
+}
+
+func TestRediscoveryPendingLogStateIsStrictlyBounded(t *testing.T) {
+	m := &Manager{logger: zerolog.Nop()}
+	base := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	for i := range rediscoveryPendingMaxEntries + 32 {
+		key := fmt.Sprintf("torbox/key-%d", i)
+		if !m.shouldLogRediscoveryPending(key, base.Add(time.Duration(i)*time.Nanosecond)) {
+			t.Fatalf("first notice for %q was suppressed", key)
+		}
+	}
+	if got := len(m.rediscoveryPendingLast); got != rediscoveryPendingMaxEntries {
+		t.Fatalf("coalescer entries = %d, want hard cap %d", got, rediscoveryPendingMaxEntries)
+	}
+	if _, retained := m.rediscoveryPendingLast["torbox/key-0"]; retained {
+		t.Fatal("oldest coalescer entry was not evicted at the hard cap")
+	}
+}
+
+func TestClearRediscoveryPendingReleasesEntry(t *testing.T) {
+	m := &Manager{logger: zerolog.Nop()}
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	if !m.shouldLogRediscoveryPending("torbox/key", now) {
+		t.Fatal("first notice must fire")
+	}
+
+	m.clearRediscoveryPending("torbox", "key")
+	if got := len(m.rediscoveryPendingLast); got != 0 {
+		t.Fatalf("coalescer entries after clear = %d, want 0", got)
+	}
+	if !m.shouldLogRediscoveryPending("torbox/key", now.Add(time.Minute)) {
+		t.Fatal("cleared entry must be treated as new if it becomes blocked again")
 	}
 }

@@ -166,9 +166,10 @@
                             <div class="stat-figure text-info">
                                 <i class="bi bi-memory text-2xl"></i>
                             </div>
-                            <div class="stat-title">Memory Used</div>
+                            <div class="stat-title" id="memory-label">Memory Used</div>
                             <div class="stat-value text-info" id="memory-used">-</div>
                             <div class="stat-desc" id="heap-alloc">Heap: -</div>
+                            <div class="stat-desc" id="runtime-memory">Go runtime: -</div>
                         </div>
                         <div class="stat">
                             <div class="stat-figure text-success">
@@ -1092,6 +1093,7 @@
             // Render usenet provider
             if (hasUsenet) {
                 const pool = usenetData.pool || {};
+                const buffers = usenetData.buffers || {};
                 const nntpProviders = usenetData.providers || [];
 
                 const maxConns = pool.max_connections || 0;
@@ -1118,6 +1120,8 @@
                                     <div class="text-sm text-base-content/70">${formatNumber(totalCreated)} / ${formatNumber(maxConns)} connections</div>
                                 </div>
                             </div>
+
+                            <p class="mt-3 text-sm text-base-content/70">Stream buffer allocations: ${window.decypharrUtils.formatBytes(buffers.memory_allocated || 0)} · In use: ${window.decypharrUtils.formatBytes(buffers.memory_in_use || 0)}</p>
 
                             <!-- Connection Pool Bar -->
                             <div class="mt-4">
@@ -1231,8 +1235,10 @@
             const sys = stats.system || {};
             document.getElementById('uptime').textContent = formatUptime(sys.uptime_seconds);
             document.getElementById('start-time').textContent = `Started: ${sys.start_time || '-'}`;
-            document.getElementById('memory-used').textContent = sys.memory_used || '-';
+            document.getElementById('memory-label').textContent = sys.process_rss_mb ? 'Process Memory (RSS)' : 'Go Runtime Memory';
+            document.getElementById('memory-used').textContent = sys.process_rss_mb || sys.memory_used || '-';
             document.getElementById('heap-alloc').textContent = `Heap: ${sys.heap_alloc_mb || '-'} · Released: ${sys.heap_released_mb || '-'}`;
+            document.getElementById('runtime-memory').textContent = `Go runtime: ${sys.memory_used || '-'}`;
             document.getElementById('goroutines').textContent = formatNumber(sys.goroutines || 0);
             document.getElementById('gc-cycles').textContent = `GC: ${formatNumber(sys.gc_cycles || 0)} cycles`;
             document.getElementById('num-cpu').textContent = sys.num_cpu || '-';

@@ -182,8 +182,8 @@ func TestPoolMemoryBudgetIsAtomicAcrossBuffers(t *testing.T) {
 	}
 
 	stats := pool.Stats()
-	if stats.MemoryInUse > stats.MemoryBudget {
-		t.Fatalf("MemoryInUse = %d, exceeds budget %d", stats.MemoryInUse, stats.MemoryBudget)
+	if stats.MemoryInUse > stats.MemoryBudget || stats.MemoryAllocated > stats.MemoryBudget {
+		t.Fatalf("memory exceeds budget: %+v", stats)
 	}
 }
 

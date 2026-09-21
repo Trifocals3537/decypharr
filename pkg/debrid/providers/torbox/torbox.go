@@ -556,6 +556,16 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 	}
 }
 
+func terminalTorboxState(state string) bool {
+	state = strings.ToLower(strings.TrimSpace(torboxStatusDetails.ReplaceAllString(state, "")))
+	switch state {
+	case "error", "failed", "expired", "incomplete", "missing", "missingfiles", "reported missing":
+		return true
+	default:
+		return false
+	}
+}
+
 func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	var res InfoResponse
 
@@ -577,6 +587,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Bytes:            data.Size,
 		Progress:         data.Progress * 100,
 		Status:           tb.getTorboxStatus(data.DownloadState, data.DownloadFinished),
+		ProviderState:    data.DownloadState,
 		Speed:            data.DownloadSpeed,
 		Seeders:          data.Seeds,
 		Filename:         data.Name,
@@ -703,12 +714,20 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 }
 
 func (tb *Torbox) updateTorrentContext(ctx context.Context, t *types.Torrent) error {
+	return tb.updateTorrentWithCacheContext(ctx, t, false)
+}
+
+func (tb *Torbox) updateTorrentWithCacheContext(ctx context.Context, t *types.Torrent, bypassCache bool) error {
 	if t == nil {
 		return fmt.Errorf("torrent is nil")
 	}
 	var res InfoResponse
 
-	resp, err := tb.doGetContext(ctx, "/api/torrents/mylist", map[string]string{"id": t.Id}, &res)
+	query := map[string]string{"id": t.Id}
+	if bypassCache {
+		query["bypass_cache"] = "true"
+	}
+	resp, err := tb.doGetContext(ctx, "/api/torrents/mylist", query, &res)
 	if err != nil {
 		return err
 	}
@@ -726,6 +745,7 @@ func (tb *Torbox) updateTorrentContext(ctx context.Context, t *types.Torrent) er
 	t.Bytes = data.Size
 	t.Progress = data.Progress * 100
 	t.Status = tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
+	t.ProviderState = data.DownloadState
 	t.Speed = data.DownloadSpeed
 	t.Seeders = data.Seeds
 	t.Filename = name
@@ -778,6 +798,15 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 }
 
 func (tb *Torbox) CheckStatusContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	return tb.checkStatusContext(ctx, torrent, false)
+}
+
+// CheckStatusFreshContext is used only for an imminent failure handoff.
+func (tb *Torbox) CheckStatusFreshContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	return tb.checkStatusContext(ctx, torrent, true)
+}
+
+func (tb *Torbox) checkStatusContext(ctx context.Context, torrent *types.Torrent, bypassCache bool) (*types.Torrent, error) {
 	if err := ctx.Err(); err != nil {
 		return torrent, err
 	}
@@ -785,7 +814,7 @@ func (tb *Torbox) CheckStatusContext(ctx context.Context, torrent *types.Torrent
 		return nil, fmt.Errorf("torrent is nil")
 	}
 	for {
-		err := tb.updateTorrentContext(ctx, torrent)
+		err := tb.updateTorrentWithCacheContext(ctx, torrent, bypassCache)
 
 		if err != nil || torrent == nil {
 			return torrent, err
@@ -805,6 +834,9 @@ func (tb *Torbox) CheckStatusContext(ctx context.Context, torrent *types.Torrent
 			}
 			return torrent, nil
 		default:
+			if terminalTorboxState(torrent.ProviderState) {
+				return torrent, fmt.Errorf("%w: %s", types.ErrTerminalProviderTorrent, torrent.ProviderState)
+			}
 			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
 		}
 	}

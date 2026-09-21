@@ -51,9 +51,14 @@ type Manager struct {
 	providerTraffic *providertraffic.Controller
 
 	// Migration jobs tracking
-	migrationJobs        *xsync.Map[string, *storage.SwitcherJob]
-	refreshInterval      time.Duration
-	uncachedStallTimeout time.Duration
+	migrationJobs             *xsync.Map[string, *storage.SwitcherJob]
+	refreshInterval           time.Duration
+	uncachedStallTimeout      time.Duration
+	uncachedFreshChecks       atomic.Uint64
+	uncachedTerminalConfirmed atomic.Uint64
+	uncachedStallConfirmed    atomic.Uint64
+	uncachedHandoffAccepted   atomic.Uint64
+	uncachedHandoffErrors     atomic.Uint64
 
 	config *config.Config
 
@@ -898,6 +903,13 @@ func (m *Manager) GetStats() (map[string]any, error) {
 		"completed_jobs":             completedJobs,
 		"failed_jobs":                failedJobs,
 		"pending_migration_cleanups": m.storage.MigrationCleanupCount(),
+		"uncached_handoff": map[string]uint64{
+			"fresh_checks":       m.uncachedFreshChecks.Load(),
+			"terminal_confirmed": m.uncachedTerminalConfirmed.Load(),
+			"stall_confirmed":    m.uncachedStallConfirmed.Load(),
+			"arr_accepted":       m.uncachedHandoffAccepted.Load(),
+			"handoff_errors":     m.uncachedHandoffErrors.Load(),
+		},
 	}, nil
 }
 

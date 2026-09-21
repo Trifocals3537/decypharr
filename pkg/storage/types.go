@@ -102,11 +102,14 @@ type Entry struct {
 	Bad        bool `msgpack:"bad" json:"bad"`                 // Marked as bad/corrupted
 
 	// Metadata
-	Category    string   `msgpack:"category,omitempty" json:"category,omitempty"`         // Category (e.g., sonarr, radarr)
-	Tags        []string `msgpack:"tags,omitempty" json:"tags,omitempty"`                 // User-defined tags
-	MountPath   string   `msgpack:"mount_path" json:"mount_path"`                         // Mount path for this torrent
-	SavePath    string   `msgpack:"save_path,omitempty" json:"save_path,omitempty"`       // Download/symlink folder
-	ContentPath string   `msgpack:"content_path,omitempty" json:"content_path,omitempty"` // Final content path
+	Category       string   `msgpack:"category,omitempty" json:"category,omitempty"`               // Category (e.g., sonarr, radarr)
+	Tags           []string `msgpack:"tags,omitempty" json:"tags,omitempty"`                       // User-defined tags
+	MountPath      string   `msgpack:"mount_path" json:"mount_path"`                               // Mount path for this torrent
+	SavePath       string   `msgpack:"save_path,omitempty" json:"save_path,omitempty"`             // Download/symlink folder
+	ContentPath    string   `msgpack:"content_path,omitempty" json:"content_path,omitempty"`       // Final content path
+	ClientEndpoint string   `msgpack:"client_endpoint,omitempty" json:"client_endpoint,omitempty"` // qBittorrent Host used by the submitting Arr
+	TerminalChecks int      `msgpack:"terminal_checks,omitempty" json:"terminal_checks,omitempty"`
+	HandoffReason  string   `msgpack:"handoff_reason,omitempty" json:"handoff_reason,omitempty"`
 
 	// Timestamps
 	AddedOn     time.Time  `msgpack:"added_on" json:"added_on"`                             // When first added (from debrid)

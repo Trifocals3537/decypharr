@@ -1,7 +1,9 @@
 package torbox
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +14,25 @@ import (
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
+
+func TestFreshTerminalStatusBypassesTorBoxCache(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("bypass_cache") != "true" || r.URL.Query().Get("id") != "42" {
+			t.Errorf("fresh query = %s", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+			"id": 42, "name": "release", "download_state": "failed (processing)",
+			"download_finished": false, "files": []any{},
+		}})
+	}))
+	defer server.Close()
+	client := &Torbox{Host: server.URL, client: request.New(request.WithMaxRetries(0), request.WithTimeout(2*time.Second)), logger: zerolog.Nop(), config: config.Debrid{Name: "torbox"}}
+	torrent, err := client.CheckStatusFreshContext(context.Background(), &types.Torrent{Id: "42", DownloadUncached: true})
+	if !errors.Is(err, types.ErrTerminalProviderTorrent) || torrent.ProviderState != "failed (processing)" {
+		t.Fatalf("fresh terminal status = %+v, %v", torrent, err)
+	}
+}
 
 func TestGetTorboxStatusClassifiesTransientStates(t *testing.T) {
 	client := &Torbox{}

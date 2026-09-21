@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -92,6 +93,7 @@ func TestQueuedProviderPollPersistsStalledHandoffState(t *testing.T) {
 			torrent.Debrid = "torbox"
 			torrent.Name = "release.mkv"
 			torrent.Status = debridTypes.TorrentStatusDownloading
+			torrent.ProviderState = "downloading"
 			torrent.Progress = 25
 			torrent.Speed = 0
 			return torrent, nil
@@ -113,13 +115,108 @@ func TestQueuedProviderPollPersistsStalledHandoffState(t *testing.T) {
 	}
 }
 
+func TestTerminalUncachedFailureRequiresTwoFreshConfirmations(t *testing.T) {
+	m := newQueueRecoveryTestManager(t)
+	entry := interruptedQueueTestEntry("terminal-provider-transfer")
+	entry.Status = debridTypes.TorrentStatusDownloading
+	entry.IsDownloading = false
+	if err := m.queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	var freshCalls atomic.Int32
+	m.clients.Store("torbox", &routingTestClient{
+		cfg: config.Debrid{Name: "torbox"},
+		check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "failed (processing)"
+			return torrent, debridTypes.ErrTerminalProviderTorrent
+		},
+		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			freshCalls.Add(1)
+			return torrent, debridTypes.ErrTerminalProviderTorrent
+		},
+	})
+	for n := 1; n <= 2; n++ {
+		if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+		current, err := m.queue.GetTorrent(entry.InfoHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.TerminalChecks != n {
+			t.Fatalf("checks = %d, want %d", current.TerminalChecks, n)
+		}
+		if n == 1 && current.State != storage.EntryStateDownloading {
+			t.Fatalf("first failure state = %s", current.State)
+		}
+		if n == 2 && (current.State != storage.EntryStateStalledDL || current.HandoffReason != "terminal") {
+			t.Fatalf("confirmed failure = %s/%s", current.State, current.HandoffReason)
+		}
+		entry = current
+	}
+	if freshCalls.Load() != 2 {
+		t.Fatalf("fresh calls = %d", freshCalls.Load())
+	}
+}
+
+func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
+	m := newQueueRecoveryTestManager(t)
+	entry := interruptedQueueTestEntry("transient-provider-error")
+	entry.Status = debridTypes.TorrentStatusDownloading
+	entry.IsDownloading = false
+	if err := m.queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	var freshCalls atomic.Int32
+	m.clients.Store("torbox", &routingTestClient{
+		cfg: config.Debrid{Name: "torbox"},
+		check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "failed"
+			return torrent, debridTypes.ErrTerminalProviderTorrent
+		},
+		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			if freshCalls.Add(1) == 2 {
+				return torrent, errors.New("temporary provider outage")
+			}
+			return torrent, debridTypes.ErrTerminalProviderTorrent
+		},
+	})
+	for n, want := range []int{1, 0, 1, 2} {
+		if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+		current, err := m.queue.GetTorrent(entry.InfoHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.TerminalChecks != want {
+			t.Fatalf("poll %d checks = %d, want %d", n+1, current.TerminalChecks, want)
+		}
+		entry = current
+	}
+}
+
+func TestUncachedStallDoesNotHandoffMetadataOrPausedState(t *testing.T) {
+	for _, state := range []string{"metaDL", "paused", "checkingDL", "queued", "downloading", ""} {
+		want := state == "downloading" || state == ""
+		if got := stallableProviderState(state); got != want {
+			t.Fatalf("state %s stallable = %t", state, got)
+		}
+	}
+}
+
 func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/downloadclient":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"Decypharr","implementation":"QBittorrent","fields":[{"name":"host","value":"decypharr.example"},{"name":"port","value":8282}]}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"page":1,"pageSize":200,"totalRecords":1,"records":[{"id":17,"downloadId":"ABC123","protocol":"torrent"}]}`))
+			_, _ = w.Write([]byte(`{"page":1,"pageSize":200,"totalRecords":1,"records":[{"id":17,"downloadId":"ABC123","protocol":"torrent","downloadClient":"Decypharr"}]}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/bulk":
 			deletes.Add(1)
 			w.WriteHeader(http.StatusOK)
@@ -138,6 +235,7 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 		Category:         "sonarr",
 		State:            storage.EntryStateStalledDL,
 		DownloadUncached: true,
+		ClientEndpoint:   "decypharr.example:8282",
 	}
 	if err := queue.Add(entry); err != nil {
 		t.Fatal(err)
@@ -145,11 +243,35 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 	arrs := arr.NewStorage()
 	arrs.AddOrUpdate(arr.New("sonarr", server.URL, "token", false, nil, "", "manual"))
 	m := &Manager{queue: queue, arr: arrs, logger: zerolog.Nop()}
-	if err := m.handoffStalledUncached(context.Background()); err != nil {
+	if err := m.handoffUncachedFailures(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if deletes.Load() != 1 {
 		t.Fatalf("Arr delete requests = %d, want 1", deletes.Load())
+	}
+}
+
+func TestHandoffStalledUncachedRequiresSubmittingEndpoint(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	store := newLifecycleTestStorage(t)
+	queue := newLifecycleTestQueue(store, newEntryLifecycle())
+	entry := &storage.Entry{InfoHash: "legacy-stall", Protocol: config.ProtocolTorrent, Category: "sonarr", State: storage.EntryStateStalledDL, DownloadUncached: true}
+	if err := queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	arrs := arr.NewStorage()
+	arrs.AddOrUpdate(arr.New("sonarr", server.URL, "token", false, nil, "", "manual"))
+	m := &Manager{queue: queue, arr: arrs, logger: zerolog.Nop()}
+	if err := m.handoffUncachedFailures(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("unowned handoff made %d Arr requests", requests.Load())
 	}
 }
 

@@ -778,6 +778,7 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 		t.Speed = data.Speed
 		t.Seeders = data.Seeders
 		t.Status = getStatus(data.Status)
+		t.ProviderState = data.Status
 		t.Filename = data.Filename
 		t.OriginalFilename = data.OriginalFilename
 		t.Links = data.Links
@@ -839,6 +840,7 @@ func (r *RealDebrid) CheckStatusContext(ctx context.Context, t *types.Torrent) (
 		t.Seeders = data.Seeders
 		t.Links = data.Links
 		t.Status = getStatus(debridStatus)
+		t.ProviderState = debridStatus
 		t.Debrid = r.config.Name
 		t.Added = data.Added
 		if data.Hash != "" {

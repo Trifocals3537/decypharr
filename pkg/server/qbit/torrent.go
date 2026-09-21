@@ -15,6 +15,14 @@ import (
 )
 
 // All torrent-related helpers goes here
+type qbitEndpointKey struct{}
+
+func recordQBitEndpoint(ctx context.Context, request *manager.ImportRequest) {
+	if endpoint, ok := ctx.Value(qbitEndpointKey{}).(string); ok {
+		request.ClientEndpoint = endpoint
+	}
+}
+
 func (q *QBit) addMagnet(
 	ctx context.Context,
 	rawURL string,
@@ -38,6 +46,7 @@ func (q *QBit) addMagnet(
 	}
 
 	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
+	recordQBitEndpoint(ctx, importReq)
 
 	err = q.manager.AdmitNewTorrent(ctx, importReq)
 	if err != nil {
@@ -82,6 +91,7 @@ func (q *QBit) addTorrent(
 		)
 	}
 	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
+	recordQBitEndpoint(ctx, importReq)
 	err = q.manager.AdmitNewTorrent(ctx, importReq)
 	if err != nil {
 		return retainedBytes, fmt.Errorf("failed to process torrent: %w", err)

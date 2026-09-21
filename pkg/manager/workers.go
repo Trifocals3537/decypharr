@@ -81,6 +81,20 @@ func checkProviderStatus(ctx context.Context, client debrid.Client, torrent *deb
 	return result, err
 }
 
+type freshStatusChecker interface {
+	CheckStatusFreshContext(context.Context, *debridTypes.Torrent) (*debridTypes.Torrent, error)
+}
+
+func checkFreshProviderStatus(ctx context.Context, client debrid.Client, torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+	checker, ok := client.(freshStatusChecker)
+	if !ok {
+		// Other providers perform a direct status request here. TorBox implements
+		// the stronger capability above to bypass its documented list cache.
+		return checkProviderStatus(ctx, client, torrent)
+	}
+	return checker.CheckStatusFreshContext(ctx, torrent)
+}
+
 func syncProviderAccounts(ctx context.Context, client debrid.Client) error {
 	if contextual, ok := client.(debrid.ContextAccountSyncer); ok {
 		return contextual.SyncAccountsContext(ctx)
@@ -299,8 +313,8 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 	} else {
 		// Schedule the job
 		if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
-			if err := m.handoffStalledUncached(ctx); err != nil && ctx.Err() == nil {
-				m.logger.Error().Err(err).Msg("Stalled uncached transfer handoff failed")
+			if err := m.handoffUncachedFailures(ctx); err != nil && ctx.Err() == nil {
+				m.logger.Error().Err(err).Msg("Uncached transfer handoff failed")
 			}
 			if err := m.arr.Monitor(ctx); err != nil && ctx.Err() == nil {
 				m.logger.Error().Err(err).Msg("Arr queue monitoring failed")

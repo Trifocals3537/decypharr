@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"maps"
 	"os"
 	"sync"
@@ -9,6 +10,10 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 )
+
+// ErrTerminalProviderTorrent identifies an explicit provider-reported transfer
+// failure. Transport/API errors and unknown states must not trigger Arr handoff.
+var ErrTerminalProviderTorrent = errors.New("terminal provider torrent failure")
 
 type Torrent struct {
 	Id               string          `json:"id"`
@@ -21,6 +26,7 @@ type Torrent struct {
 	Magnet           *utils.Magnet   `json:"magnet"`
 	Files            map[string]File `json:"files"`
 	Status           TorrentStatus   `json:"status"`
+	ProviderState    string          `json:"-"` // Raw provider state, for conservative failure and stall decisions.
 	Added            time.Time       `json:"added"`
 	Progress         float64         `json:"progress"`
 	Speed            int64           `json:"speed"`
@@ -63,6 +69,7 @@ func (t *Torrent) Copy() *Torrent {
 		Magnet:           t.Magnet,
 		Files:            newFiles,
 		Status:           t.Status,
+		ProviderState:    t.ProviderState,
 		Added:            t.Added,
 		Progress:         t.Progress,
 		Speed:            t.Speed,

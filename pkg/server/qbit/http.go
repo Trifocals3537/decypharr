@@ -1,6 +1,7 @@
 package qbit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -116,7 +117,7 @@ func (q *QBit) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := context.WithValue(r.Context(), qbitEndpointKey{}, r.Host)
 
 	// Parse form based on content type
 	contentType := strings.ToLower(r.Header.Get("Content-Type"))

@@ -3,9 +3,89 @@ package storage
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 )
+
+func TestEntryItemsSharedFolderUpgradeRepairsCleanPartialIndex(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "db")
+	store, err := NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	entry := entryItemTransactionEntry(
+		"upgrade-survivor",
+		"upgrade-shared-folder",
+		"episode.mkv",
+	)
+	entry.AddedOn = base
+	entry.Files["episode.mkv"].AddedOn = base
+	entry.Files["extra.mkv"] = &File{
+		InfoHash: entry.InfoHash,
+		Name:     "extra.mkv",
+		AddedOn:  base,
+	}
+	if err := store.AddOrUpdate(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a clean shutdown from an older build after a shared-folder
+	// deletion removed one overlapping file but left another indexed.
+	partial, err := store.GetEntryItem(entry.GetFolder())
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(partial.Files, "episode.mkv")
+	partial.Size = partial.GetSize()
+	partialData, err := proto.Marshal(EntryItemToProto(partial))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.entryItems.Put(partial.Name, partialData, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.storageState.Delete(entryItemIntegrityStateKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.entryItems.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.storageState.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close upgraded storage: %v", err)
+		}
+	})
+	item, err := store.GetEntryItem(entry.GetFolder())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"episode.mkv", "extra.mkv"} {
+		file := item.Files[name]
+		if file == nil || file.InfoHash != entry.InfoHash {
+			t.Fatalf("upgraded %s = %#v, want authoritative entry", name, file)
+		}
+	}
+	version, err := store.storageState.Get(entryItemIntegrityStateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(version); got != entryItemSharedFolderVersion {
+		t.Fatalf("entry-item integrity version = %q, want %q", got, entryItemSharedFolderVersion)
+	}
+}
 
 func TestEntryItemsReconcileAfterUncleanShutdown(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "db")

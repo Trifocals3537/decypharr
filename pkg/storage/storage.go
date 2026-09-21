@@ -134,6 +134,11 @@ func NewStorage(dbPath string) (*Storage, error) {
 		_ = s.Close()
 		return nil, fmt.Errorf("start entry-item recovery session: %w", err)
 	}
+	needsSharedFolderUpgrade, err := s.needsEntryItemSharedFolderUpgrade()
+	if err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("inspect entry-item integrity version: %w", err)
+	}
 	if needsEntryItemRecovery {
 		if _, err := s.reconcileEntryItems(); err != nil {
 			_ = s.Close()
@@ -150,6 +155,23 @@ func NewStorage(dbPath string) (*Storage, error) {
 		log.Warn().Err(err).Msg("Metadata migration failed")
 	} else if count > 0 {
 		log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
+	}
+	if needsSharedFolderUpgrade {
+		if !needsEntryItemRecovery {
+			repaired, err := s.reconcileEntryItems()
+			if err != nil {
+				_ = s.Close()
+				return nil, fmt.Errorf("upgrade shared-folder entry-item index: %w", err)
+			}
+			if repaired > 0 {
+				log.Info().Int("count", repaired).
+					Msg("Repaired shared-folder entry-item index")
+			}
+		}
+		if err := s.markEntryItemSharedFolderUpgrade(); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
 	}
 	if err := s.PruneTorrentSources(); err != nil {
 		log.Warn().Err(err).Msg("Failed to prune unreferenced torrent sources")

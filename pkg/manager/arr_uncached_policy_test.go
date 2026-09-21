@@ -30,12 +30,12 @@ func policyTestMagnet() *utils.Magnet {
 // uncached reports a torrent_not_cached error, exactly like the real providers.
 type recordingPolicyClient struct {
 	debrid.Client
-	cfg     config.Debrid
-	cached  bool
+	cfg      config.Debrid
+	cached   bool
 	attempts *[]string
 }
 
-func (c *recordingPolicyClient) Config() config.Debrid { return c.cfg }
+func (c *recordingPolicyClient) Config() config.Debrid  { return c.cfg }
 func (c *recordingPolicyClient) Logger() zerolog.Logger { return zerolog.Nop() }
 
 func (c *recordingPolicyClient) SubmitMagnet(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
@@ -153,7 +153,7 @@ func TestSendToDebridArrTrueOverridesProviderCachedOnly(t *testing.T) {
 // two-pass ordering invariant regardless of the effective policy source.
 func TestSendToDebridNeverAttemptsUncachedBeforeAllCachedExhausted(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
+		name             string
 		downloadUncached *bool
 	}{
 		{name: "nil inherit policy", downloadUncached: nil},
@@ -200,6 +200,25 @@ func TestNewTorrentRequestPreservesDownloadUncachedPointer(t *testing.T) {
 			}
 			if tc.in != nil && *req.DownloadUncached != *tc.in {
 				t.Fatalf("DownloadUncached = %v, want %v", *req.DownloadUncached, *tc.in)
+			}
+		})
+	}
+}
+
+func TestUncachedPolicySourceDistinguishesProviderArrAndRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  *ImportRequest
+		want string
+	}{
+		{name: "nil request", req: nil, want: "provider"},
+		{name: "provider inheritance", req: &ImportRequest{Type: ImportTypeQBit}, want: "provider"},
+		{name: "arr override", req: &ImportRequest{Type: ImportTypeQBit, DownloadUncached: boolPointer(true)}, want: "arr"},
+		{name: "runtime API override", req: &ImportRequest{Type: ImportTypeAPI, DownloadUncached: boolPointer(true)}, want: "request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := uncachedPolicySource(tc.req); got != tc.want {
+				t.Fatalf("uncachedPolicySource() = %q, want %q", got, tc.want)
 			}
 		})
 	}

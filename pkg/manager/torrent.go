@@ -420,9 +420,12 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, providerSnapshots ...uint
 	// expensive work up front; the guard itself remains the authority when the
 	// check fails open.
 	if m.storage != nil {
-		if awaiting, err := m.storage.RediscoveryAwaitingAbsence(t.InfoHash, t.Debrid, providerSnapshot); err == nil && awaiting {
-			m.noteRediscoveryPending(t.Debrid, t.InfoHash)
-			return nil, nil
+		if awaiting, err := m.storage.RediscoveryAwaitingAbsence(t.InfoHash, t.Debrid, providerSnapshot); err == nil {
+			if awaiting {
+				m.noteRediscoveryPending(t.Debrid, t.InfoHash)
+				return nil, nil
+			}
+			m.clearRediscoveryPending(t.Debrid, t.InfoHash)
 		}
 	}
 

@@ -303,7 +303,7 @@
                                 </label>
                                 <input type="text" class="input w-full" id="uncachedStallTimeout"
                                        name="uncached_stall_timeout" placeholder="2h">
-                                <span class="text-sm opacity-70">Optional. After no progress for this long, blocklist the uncached release and let its Arr find a replacement (minimum 10m).</span>
+                                <span class="text-sm opacity-70">Optional maximum no-progress wait for uncached releases (minimum 10m). No-seeds and metadata states may be checked after 10m and 20m; two fresh checks are required before Arr replacement.</span>
                             </div>
                             <div>
                                 <label class="label" for="nzbUserAgent">

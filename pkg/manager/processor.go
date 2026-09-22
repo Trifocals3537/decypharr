@@ -334,6 +334,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		_ = m.queue.Update(entry)
 		return nil
 	}
+	stallKey := uncachedStallCandidateKey(entry)
 
 	client := m.ProviderClient(entry.ActiveProvider)
 	if client == nil {
@@ -367,6 +368,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 	}
 	if err != nil {
 		if entry.DownloadUncached && errors.Is(err, debridTypes.ErrTerminalProviderTorrent) {
+			m.clearUncachedStallCandidate(stallKey)
 			m.uncachedFreshChecks.Add(1)
 			fresh, freshErr := checkFreshProviderStatus(ctx, client, debridTorrent)
 			if errors.Is(freshErr, debridTypes.ErrTerminalProviderTorrent) && fresh != nil && fresh.Status == debridTypes.TorrentStatusError {
@@ -390,6 +392,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 			entry.TerminalChecks = 0
 			dbT = fresh
 		} else if dbT == nil || dbT.Status != debridTypes.TorrentStatusError {
+			m.clearUncachedStallCandidate(stallKey)
 			m.logger.Warn().Err(err).Str("name", entry.Name).Msg("Provider status unavailable; retaining queued job for retry")
 			if entry.TerminalChecks != 0 {
 				entry.TerminalChecks = 0
@@ -427,6 +430,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 	}
 
 	if debridTorrent.Status == debridTypes.TorrentStatusError {
+		m.clearUncachedStallCandidate(stallKey)
 		m.logger.Error().
 			Str("debrid", debridTorrent.Debrid).
 			Str("name", debridTorrent.Name).
@@ -453,34 +457,43 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		placement.Progress = entry.Progress
 	}
 
-	if uncachedTransferStalled(
+	stallKind, stallTimeout := uncachedStallPolicy(debridTorrent.ProviderState, debridTorrent.Seeders, m.uncachedStallTimeout)
+	if stallKind != "" && uncachedTransferStalled(
 		entry,
 		debridTorrent.Status,
 		observedAt,
-		m.uncachedStallTimeout,
+		stallTimeout,
 	) {
-		if !stallableProviderState(debridTorrent.ProviderState) {
-			return m.queue.Update(entry)
-		}
 		m.uncachedFreshChecks.Add(1)
 		fresh, freshErr := checkFreshProviderStatus(ctx, client, debridTorrent)
 		if freshErr != nil || fresh == nil {
+			m.clearUncachedStallCandidate(stallKey)
 			m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm uncached stall; retaining queued job")
 			return m.queue.Update(entry)
 		}
-		if fresh.Status != debridTypes.TorrentStatusDownloading || !stallableProviderState(fresh.ProviderState) || fresh.Speed > 0 || fresh.Progress/100.0 > entry.Progress {
+		freshKind, _ := uncachedStallPolicy(fresh.ProviderState, fresh.Seeders, m.uncachedStallTimeout)
+		if fresh.Status != debridTypes.TorrentStatusDownloading || freshKind != stallKind || fresh.Speed > 0 || fresh.Progress/100.0 > entry.Progress {
+			m.clearUncachedStallCandidate(stallKey)
 			entry.ObserveTransfer(fresh.Progress/100.0, time.Now())
 			entry.Progress = fresh.Progress / 100.0
 			entry.Speed = fresh.Speed
 			entry.TerminalChecks = 0
 			return m.queue.Update(entry)
 		}
+		if fresh.Progress/100.0 < entry.Progress {
+			// Contradictory progress snapshots are not evidence for removal.
+			m.clearUncachedStallCandidate(stallKey)
+			return m.queue.Update(entry)
+		}
+		if !m.confirmUncachedStall(stallKey, stallKind, time.Now()) {
+			return m.queue.Update(entry)
+		}
 		stallErr := fmt.Errorf(
-			"uncached provider transfer made no progress for %s",
-			m.uncachedStallTimeout,
+			"uncached provider transfer remained in %s without progress for %s",
+			stallKind, stallTimeout,
 		)
 		entry.MarkAsStalled(stallErr)
-		entry.HandoffReason = "stalled"
+		entry.HandoffReason = stallKind
 		m.uncachedStallConfirmed.Add(1)
 		if placement := entry.GetActiveProvider(); placement != nil {
 			placement.Status = debridTypes.TorrentStatusError
@@ -492,6 +505,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 			Msg("Uncached transfer stalled; waiting for Arr blocklist and replacement handoff")
 		return m.queue.Update(entry)
 	}
+	m.clearUncachedStallCandidate(stallKey)
 
 	// Check if done or failed.
 	if debridTorrent.Status == debridTypes.TorrentStatusDownloaded {

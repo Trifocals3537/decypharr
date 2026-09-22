@@ -107,6 +107,20 @@ func TestQueuedProviderPollPersistsStalledHandoffState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if current.State != storage.EntryStateDownloading {
+		t.Fatalf("first confirmation state = %s, want downloading", current.State)
+	}
+	key := uncachedStallCandidateKey(current)
+	m.stallCandidatesMu.Lock()
+	m.stallCandidates[key] = stallCandidate{kind: "stalled", checkedAt: time.Now().Add(-time.Minute)}
+	m.stallCandidatesMu.Unlock()
+	if err := m.processQueuedTorrent(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	current, err = m.queue.GetTorrent(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if current.State != storage.EntryStateStalledDL || current.Status != debridTypes.TorrentStatusError {
 		t.Fatalf("stalled state = %s/%s, want stalledDL/error", current.State, current.Status)
 	}
@@ -198,12 +212,197 @@ func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
 	}
 }
 
-func TestUncachedStallDoesNotHandoffMetadataOrPausedState(t *testing.T) {
-	for _, state := range []string{"metaDL", "paused", "checkingDL", "queued", "downloading", ""} {
-		want := state == "downloading" || state == ""
-		if got := stallableProviderState(state); got != want {
-			t.Fatalf("state %s stallable = %t", state, got)
+func TestUncachedStallPolicyUsesStateNotSeederCountAlone(t *testing.T) {
+	for _, test := range []struct {
+		state   string
+		seeders int
+		want    string
+		timeout time.Duration
+	}{
+		{state: "stalled (no seeds)", want: "no_seeds", timeout: 10 * time.Minute},
+		{state: "stalledDL", want: "no_seeds", timeout: 10 * time.Minute},
+		{state: "stalled (no seeds)", seeders: 2, want: "stalled", timeout: 30 * time.Minute},
+		{state: "metaDL", want: "metadata", timeout: 20 * time.Minute},
+		{state: "downloading", want: "stalled", timeout: 30 * time.Minute},
+		{state: "stalledDL", seeders: 2, want: "stalled", timeout: 30 * time.Minute},
+		{state: "", want: "stalled", timeout: 30 * time.Minute},
+		{state: "paused"},
+		{state: "checkingDL"},
+		{state: "queued"},
+	} {
+		kind, timeout := uncachedStallPolicy(test.state, test.seeders, 30*time.Minute)
+		if kind != test.want || timeout != test.timeout {
+			t.Errorf("state %q, seeders %d = %q/%s, want %q/%s", test.state, test.seeders, kind, timeout, test.want, test.timeout)
 		}
+	}
+	if kind, timeout := uncachedStallPolicy("metaDL", 0, 0); kind != "" || timeout != 0 {
+		t.Fatalf("disabled watchdog = %q/%s", kind, timeout)
+	}
+}
+
+func TestUncachedStallRequiresSpacedMatchingFreshChecks(t *testing.T) {
+	m := &Manager{}
+	base := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	if m.confirmUncachedStall("torrent", "no_seeds", base) ||
+		m.confirmUncachedStall("torrent", "no_seeds", base.Add(10*time.Second)) {
+		t.Fatal("stall confirmed without spaced checks")
+	}
+	if !m.confirmUncachedStall("torrent", "no_seeds", base.Add(31*time.Second)) {
+		t.Fatal("matching spaced checks did not confirm stall")
+	}
+	if m.confirmUncachedStall("torrent", "metadata", base) ||
+		m.confirmUncachedStall("torrent", "no_seeds", base.Add(time.Minute)) {
+		t.Fatal("different stall kinds were combined")
+	}
+	m.clearUncachedStallCandidate("torrent")
+	if m.confirmUncachedStall("torrent", "no_seeds", base.Add(2*time.Minute)) {
+		t.Fatal("cleared candidate still confirmed")
+	}
+}
+
+func TestQueuedUncachedStateSpecificStallThresholds(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		state         string
+		noProgressFor time.Duration
+		wantKind      string
+	}{
+		{name: "no seeds after ten minutes", state: "stalled (no seeds)", noProgressFor: 11 * time.Minute, wantKind: "no_seeds"},
+		{name: "metadata before twenty minutes", state: "metaDL", noProgressFor: 15 * time.Minute},
+		{name: "metadata after twenty minutes", state: "metaDL", noProgressFor: 21 * time.Minute, wantKind: "metadata"},
+		{name: "ordinary download before thirty minutes", state: "downloading", noProgressFor: 21 * time.Minute},
+		{name: "zero seeds alone does not accelerate", state: "downloading", noProgressFor: 11 * time.Minute},
+		{name: "paused is not a stall", state: "paused", noProgressFor: time.Hour},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newQueueRecoveryTestManager(t)
+			m.uncachedStallTimeout = 30 * time.Minute
+			entry := interruptedQueueTestEntry(test.name)
+			entry.Status = debridTypes.TorrentStatusDownloading
+			entry.IsDownloading = false
+			entry.Progress = 0.25
+			stale := time.Now().Add(-test.noProgressFor)
+			entry.LastProgressAt = &stale
+			if err := m.queue.Add(entry); err != nil {
+				t.Fatal(err)
+			}
+			var freshCalls atomic.Int32
+			m.clients.Store("torbox", &routingTestClient{
+				cfg: config.Debrid{Name: "torbox"},
+				check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+					torrent.Debrid = "torbox"
+					torrent.Name = "release.mkv"
+					torrent.Status = debridTypes.TorrentStatusDownloading
+					torrent.ProviderState = test.state
+					torrent.Progress = 25
+					return torrent, nil
+				},
+				fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+					freshCalls.Add(1)
+					return torrent, nil
+				},
+			})
+			if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
+				t.Fatal(err)
+			}
+			current, err := m.queue.GetTorrent(entry.InfoHash)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.State != storage.EntryStateDownloading {
+				t.Fatalf("first poll state = %s, want downloading", current.State)
+			}
+			key := uncachedStallCandidateKey(current)
+			m.stallCandidatesMu.Lock()
+			candidate, found := m.stallCandidates[key]
+			m.stallCandidatesMu.Unlock()
+			if found != (test.wantKind != "") || (found && candidate.kind != test.wantKind) {
+				t.Fatalf("candidate = %q (found=%t), want %q", candidate.kind, found, test.wantKind)
+			}
+			if got := freshCalls.Load(); got != int32(0) && test.wantKind == "" || got != 1 && test.wantKind != "" {
+				t.Fatalf("fresh checks = %d, want one only for eligible state", got)
+			}
+			if test.wantKind == "" {
+				return
+			}
+			m.stallCandidatesMu.Lock()
+			m.stallCandidates[key] = stallCandidate{kind: test.wantKind, checkedAt: time.Now().Add(-time.Minute)}
+			m.stallCandidatesMu.Unlock()
+			if err := m.processQueuedTorrent(context.Background(), current); err != nil {
+				t.Fatal(err)
+			}
+			current, err = m.queue.GetTorrent(entry.InfoHash)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.State != storage.EntryStateStalledDL || current.HandoffReason != test.wantKind {
+				t.Fatalf("confirmed state = %s/%s, want stalledDL/%s", current.State, current.HandoffReason, test.wantKind)
+			}
+		})
+	}
+}
+
+func TestQueuedUncachedFreshProgressCancelsHandoff(t *testing.T) {
+	m := newQueueRecoveryTestManager(t)
+	m.uncachedStallTimeout = 30 * time.Minute
+	entry := interruptedQueueTestEntry("recovering-no-seeds")
+	entry.Status = debridTypes.TorrentStatusDownloading
+	entry.IsDownloading = false
+	entry.Progress = 0.25
+	stale := time.Now().Add(-15 * time.Minute)
+	entry.LastProgressAt = &stale
+	if err := m.queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	var freshCalls atomic.Int32
+	m.clients.Store("torbox", &routingTestClient{
+		cfg: config.Debrid{Name: "torbox"},
+		check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			torrent.Debrid = "torbox"
+			torrent.Name = "release.mkv"
+			torrent.Status = debridTypes.TorrentStatusDownloading
+			torrent.ProviderState = "stalled (no seeds)"
+			torrent.Progress = 25
+			return torrent, nil
+		},
+		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			if freshCalls.Add(1) == 2 {
+				torrent.ProviderState = "downloading"
+				torrent.Progress = 26
+				torrent.Speed = 1024
+			}
+			return torrent, nil
+		},
+	})
+	if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+	current, err := m.queue.GetTorrent(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := uncachedStallCandidateKey(current)
+	m.stallCandidatesMu.Lock()
+	m.stallCandidates[key] = stallCandidate{kind: "no_seeds", checkedAt: time.Now().Add(-time.Minute)}
+	m.stallCandidatesMu.Unlock()
+	if err := m.processQueuedTorrent(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	current, err = m.queue.GetTorrent(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != storage.EntryStateDownloading || current.Progress != 0.26 || current.Speed != 1024 {
+		t.Fatalf("resumed transfer = %s, progress %v, speed %v", current.State, current.Progress, current.Speed)
+	}
+	if current.LastProgressAt == nil || !current.LastProgressAt.After(stale) {
+		t.Fatalf("resumed progress baseline was not reset: %v", current.LastProgressAt)
+	}
+	m.stallCandidatesMu.Lock()
+	_, pending := m.stallCandidates[key]
+	m.stallCandidatesMu.Unlock()
+	if pending {
+		t.Fatal("recovered transfer retained a pending failure confirmation")
 	}
 }
 

@@ -115,7 +115,7 @@ response when the bound is reached. Values above `4096` are clamped.
 | `job_queue_capacity`     | int    | Total admitted import limit (maximum `4096`)                                       | `256`         |
 | `refresh_interval`       | string | Provider status polling interval                                                   | `30s`         |
 | `remove_stalled_after`   | string | Legacy cleanup interval for inactive zero-progress queue items                     | `10m`         |
-| `uncached_stall_timeout` | string | No-progress timeout for Arr blocklist and replacement handoff; empty disables it   | `""`          |
+| `uncached_stall_timeout` | string | Maximum no-progress wait for uncached Arr replacement; empty disables it           | `""`          |
 | `allowed_file_types`     | array  | Extensions eligible for import                                                     | Media formats |
 | `allow_samples`          | bool   | Include files identified as samples                                                | `false`       |
 | `min_file_size`          | string | Minimum eligible file size                                                         | `""`          |
@@ -125,8 +125,13 @@ response when the bound is reached. Values above `4096` are clamped.
 started through an uncached provider pass. A successful provider poll must
 first establish a progress baseline. Decypharr then requires both no progress
 for the configured duration and zero provider-reported transfer speed before it
-marks the item `stalledDL`. The minimum is `10m`; invalid or shorter values
-disable the watchdog instead of risking premature removal.
+considers an ordinary transfer stalled. An explicit no-seeds state can use a
+shorter `10m` wait; a metadata-download (`metaDL`) state can use `20m`. The
+configured timeout remains a maximum for these states. Every handoff needs two
+matching fresh provider checks at least 30 seconds apart, so a resumed transfer
+or a changed state is retained. The minimum configured timeout is `10m`;
+invalid or shorter values disable the watchdog instead of risking premature
+removal. A restart discards a pending confirmation, not the progress baseline.
 
 For a configured Arr category, Decypharr resolves the exact torrent hash to one
 Sonarr/Radarr queue row, asks the Arr to remove and blocklist that release, and

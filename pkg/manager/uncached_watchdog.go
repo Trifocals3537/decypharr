@@ -13,19 +13,83 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
-const minimumUncachedStallTimeout = 10 * time.Minute
+const (
+	minimumUncachedStallTimeout = 10 * time.Minute
+	noSeedsStallTimeout         = 10 * time.Minute
+	metadataStallTimeout        = 20 * time.Minute
+	minimumStallConfirmation    = 30 * time.Second
+)
 
-func stallableProviderState(state string) bool {
-	state = strings.ToLower(strings.TrimSpace(strings.SplitN(state, "(", 2)[0]))
-	switch state {
-	case "":
-		// Older providers do not expose a raw state. Preserve their watchdog
-		// behavior, with the additional confirming status request.
-		return true
-	case "downloading", "stalled", "stalleddl":
-		return true
-	default:
+type stallCandidate struct {
+	kind      string
+	checkedAt time.Time
+}
+
+func uncachedStallCandidateKey(entry *storage.Entry) string {
+	placement := entry.GetActiveProvider()
+	if placement == nil {
+		return ""
+	}
+	return entry.InfoHash + "\x00" + entry.QueueIncarnation + "\x00" + entry.ActiveProvider + "\x00" + placement.ID
+}
+
+// Confirmation is deliberately scoped to one queue-row incarnation and
+// provider placement. A restart forgets pending evidence and therefore delays,
+// rather than accelerates, any handoff.
+func (m *Manager) confirmUncachedStall(key, kind string, now time.Time) bool {
+	if key == "" || kind == "" {
 		return false
+	}
+	m.stallCandidatesMu.Lock()
+	defer m.stallCandidatesMu.Unlock()
+	if m.stallCandidates == nil {
+		m.stallCandidates = make(map[string]stallCandidate)
+	}
+	for candidateKey, candidate := range m.stallCandidates {
+		if now.Sub(candidate.checkedAt) > 24*time.Hour {
+			delete(m.stallCandidates, candidateKey)
+		}
+	}
+	if previous, ok := m.stallCandidates[key]; ok && previous.kind == kind &&
+		!now.Before(previous.checkedAt.Add(minimumStallConfirmation)) {
+		delete(m.stallCandidates, key)
+		return true
+	}
+	if previous, ok := m.stallCandidates[key]; ok && previous.kind == kind {
+		return false
+	}
+	m.stallCandidates[key] = stallCandidate{kind: kind, checkedAt: now}
+	return false
+}
+
+func (m *Manager) clearUncachedStallCandidate(key string) {
+	if key == "" {
+		return
+	}
+	m.stallCandidatesMu.Lock()
+	delete(m.stallCandidates, key)
+	m.stallCandidatesMu.Unlock()
+}
+
+// TorBox's explicit no-seeds and metadata states justify shorter waits than
+// an ordinary slow transfer. A zero seeder count alone never does.
+func uncachedStallPolicy(state string, seeders int, generic time.Duration) (string, time.Duration) {
+	if generic <= 0 {
+		return "", 0
+	}
+	normalized := strings.ToLower(strings.TrimSpace(strings.SplitN(state, "(", 2)[0]))
+	switch normalized {
+	case "metadl":
+		return "metadata", min(generic, metadataStallTimeout)
+	case "stalled", "stalleddl":
+		if seeders == 0 {
+			return "no_seeds", min(generic, noSeedsStallTimeout)
+		}
+		return "stalled", generic
+	case "", "downloading":
+		return "stalled", generic
+	default:
+		return "", 0
 	}
 }
 

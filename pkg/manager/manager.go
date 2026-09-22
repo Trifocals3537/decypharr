@@ -54,6 +54,8 @@ type Manager struct {
 	migrationJobs             *xsync.Map[string, *storage.SwitcherJob]
 	refreshInterval           time.Duration
 	uncachedStallTimeout      time.Duration
+	stallCandidatesMu         sync.Mutex
+	stallCandidates           map[string]stallCandidate
 	uncachedFreshChecks       atomic.Uint64
 	uncachedTerminalConfirmed atomic.Uint64
 	uncachedStallConfirmed    atomic.Uint64

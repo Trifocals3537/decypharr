@@ -56,6 +56,7 @@ func (m *Manager) handoffHTTPStream(
 		candidateCtx := link.WithFailFast(link.WithoutRepair(ctx))
 		downloadLink, linkErr := m.linkService.GetLink(candidateCtx, candidateEntry, filename)
 		if linkErr != nil {
+			m.recordStreamFileCircuitFailure(original, filename, candidate.provider, linkErr)
 			failureClass, _ := classifyStreamProviderFailure(linkErr)
 			if failureClass == "" {
 				failureClass = "unknown"
@@ -101,6 +102,7 @@ func (m *Manager) handoffHTTPStream(
 		)
 		if current.err() == nil {
 			m.streamHandoffSuccesses.Add(1)
+			m.markStreamFileCircuitSuccess(original, filename, candidate.provider)
 			m.markStreamProviderReady(original, filename, candidate)
 			m.logger.Info().
 				Str("provider", candidate.provider).
@@ -116,6 +118,10 @@ func (m *Manager) handoffHTTPStream(
 		}
 
 		failureClass, _ := classifyStreamProviderFailure(current.sourceErr)
+		m.recordStreamFileCircuitFailure(original, filename, candidate.provider, StreamError{
+			Err:       current.sourceErr,
+			Retryable: true,
+		})
 		if failureClass == "" {
 			failureClass = "unknown"
 		}

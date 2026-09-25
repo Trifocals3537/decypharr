@@ -61,6 +61,9 @@ type Manager struct {
 	uncachedStallConfirmed    atomic.Uint64
 	uncachedHandoffAccepted   atomic.Uint64
 	uncachedHandoffErrors     atomic.Uint64
+	terminalReadFailures      atomic.Uint64
+	readFailureLogMu          sync.Mutex
+	readFailureLogLast        map[string]time.Time
 
 	config *config.Config
 
@@ -912,6 +915,7 @@ func (m *Manager) GetStats() (map[string]any, error) {
 			"arr_accepted":       m.uncachedHandoffAccepted.Load(),
 			"handoff_errors":     m.uncachedHandoffErrors.Load(),
 		},
+		"terminal_read_failures": m.terminalReadFailures.Load(),
 	}, nil
 }
 

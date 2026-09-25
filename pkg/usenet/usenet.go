@@ -217,7 +217,9 @@ type Usenet struct {
 	maxConnections           int         // Connections allocated per streaming file
 	processingMaxConnections int         // Connections allocated per file for parsing and NZB downloads
 	prefetchSize             int64       // Streaming prefetch size in bytes
-	failedFiles              *xsync.Map[string, error]
+	failedFiles              *xsync.Map[string, *failedFileState]
+	failureNow               func() time.Time
+	failureProbe             func(context.Context, string, string, int64) error
 	contentVerifySlots       chan struct{} // Deep repair probes are serialized to protect playback.
 
 	fs *xsync.Map[string, *fsEntry]
@@ -300,7 +302,7 @@ func New() (*Usenet, error) {
 		processingMaxConnections: processingMaxConns,
 		prefetchSize:             prefetchSize,
 		fs:                       xsync.NewMap[string, *fsEntry](),
-		failedFiles:              xsync.NewMap[string, error](),
+		failedFiles:              xsync.NewMap[string, *failedFileState](),
 		contentVerifySlots:       make(chan struct{}, 1),
 	}
 	u.initLifecycle()
@@ -383,9 +385,15 @@ func (u *Usenet) createEntryWithReadLimits(file *storage.NZBFile, maxConcurrent 
 
 // getOrCreateEntry returns the fsEntry and its cache key to avoid redundant key computation.
 func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (*fsEntry, string, error) {
+	return u.getOrCreateEntryInternal(ctx, nzoID, filename, false)
+}
+
+func (u *Usenet) getOrCreateEntryInternal(ctx context.Context, nzoID, filename string, allowFailed bool) (*fsEntry, string, error) {
 	key := fsKey(nzoID, filename)
-	if err := u.CheckStreamReady(nzoID, filename); err != nil {
-		return nil, key, err
+	if !allowFailed {
+		if err := u.CheckStreamReady(nzoID, filename); err != nil {
+			return nil, key, err
+		}
 	}
 
 	// Fast path: entry already exists and isn't being torn down. acquire() (a
@@ -404,7 +412,7 @@ func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (
 	}
 
 	// Pre-checks
-	if err := u.preStreamChecks(file); err != nil {
+	if err := u.preStreamChecksInternal(file, allowFailed); err != nil {
 		return nil, key, err
 	}
 
@@ -930,11 +938,18 @@ func (u *Usenet) getFiles(nzoID string, filenames []string) (map[string]*storage
 }
 
 func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
+	return u.preStreamChecksInternal(file, false)
+}
+
+func (u *Usenet) preStreamChecksInternal(file *storage.NZBFile, allowFailed bool) error {
 	// Check if we have Segments
 	if len(file.Segments) == 0 {
 		return fmt.Errorf("file has no Segments: %s", file.Name)
 	}
 
+	if allowFailed {
+		return nil
+	}
 	return u.CheckStreamReady(file.NzbID, file.Name)
 }
 
@@ -947,14 +962,18 @@ func (u *Usenet) CheckStreamReady(nzoID, filename string) error {
 	if u == nil || u.failedFiles == nil {
 		return nil
 	}
-	if cause, ok := u.failedFiles.Load(fsKey(nzoID, filename)); ok {
-		return customerror.NewArticleNotFoundError(cause)
+	if state, ok := u.failedFiles.Load(fsKey(nzoID, filename)); ok {
+		return state.streamError()
 	}
 	return nil
 }
 
 // Stream streams a file using the new streaming system with caching and worker limiting
 func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer) error {
+	return u.streamInternal(ctx, nzoID, filename, start, end, writer, false, true)
+}
+
+func (u *Usenet) streamInternal(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer, allowFailed, recordFailure bool) error {
 	if start < 0 {
 		start = 0
 	}
@@ -964,7 +983,7 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 
 	// Use getOrCreateEntry to get both entry and key in one call,
 	// avoiding redundant key computation in releaseFS.
-	ufsEntry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	ufsEntry, key, err := u.getOrCreateEntryInternal(ctx, nzoID, filename, allowFailed)
 	if err != nil {
 		return fmt.Errorf("failed to get or create file system: %w", err)
 	}
@@ -1014,7 +1033,7 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	defer releaseStreamBuffer(buf)
 
 	// Use a safe copy loop that checks context and validates read counts
-	_, err = safeCopyBuffer(ctx, writer, section, buf)
+	written, err := safeCopyBuffer(ctx, writer, section, buf)
 
 	// Handle context cancellation explicitly
 	if err != nil && ctx.Err() != nil {
@@ -1023,7 +1042,9 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 
 	// Mark file as failed if article not found (permanent error)
 	if err != nil && nntp.IsArticleNotFoundError(err) {
-		u.failedFiles.Store(key, err) // Reuse pre-computed key
+		if recordFailure {
+			u.recordFailedFile(key, failedReadOffset(rangeStart, rangeEnd, written), err)
+		}
 		// Wrap error to mark as permanent
 		return customerror.NewArticleNotFoundError(err)
 	}

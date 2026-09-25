@@ -1245,6 +1245,7 @@ func (item *CacheItem) ReadAtContext(ctx context.Context, p []byte, off int64) (
 	// EIO — ffprobe treats a single read error as fatal.
 	priority := isProbeRead(off, readSize, item.info.Size)
 	if err := dls.DownloadWithRetry(ctx, r, priority); err != nil {
+		item.recordTerminalReadFailure(off, readSize, err)
 		return 0, fmt.Errorf("download failed: %w", err)
 	}
 
@@ -1260,6 +1261,9 @@ func (item *CacheItem) ReadAtContext(ctx context.Context, p []byte, off int64) (
 		return 0, errors.New("cache file closed")
 	}
 	n, err := item.buf.ReadAt(p, off)
+	if n < len(p) && (err == nil || errors.Is(err, io.EOF)) {
+		err = io.ErrUnexpectedEOF
+	}
 	if err == nil || errors.Is(err, io.EOF) {
 		// Advance the read position to the end of what we just served. The region
 		// we read was already protected by the SetReadHead(off) above; this moves
@@ -1275,9 +1279,19 @@ func (item *CacheItem) ReadAtContext(ctx context.Context, p []byte, off int64) (
 		// would mean the metadata is out of sync with the buffer. Surface
 		// as EIO-equivalent rather than confusing the caller with the
 		// internal sentinel.
-		return n, fmt.Errorf("buffer reported missing range at %d+%d: %w", off, len(p), err)
+		err = fmt.Errorf("buffer reported missing range at %d+%d: %w", off, len(p), err)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		item.recordTerminalReadFailure(off, readSize, err)
 	}
 	return n, err
+}
+
+func (item *CacheItem) recordTerminalReadFailure(off, length int64, err error) {
+	if item == nil || item.cache == nil || item.cache.manager == nil {
+		return
+	}
+	item.cache.manager.RecordTerminalReadFailure(item.entry, item.filename, off, length, err)
 }
 
 // WriteAtNoOverwrite writes only the bytes in p that aren't already cached.

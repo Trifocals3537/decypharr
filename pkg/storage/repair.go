@@ -373,11 +373,20 @@ func (s *Storage) ClearEntryHealthByStatuses(statuses []HealthStatus) (int, erro
 // re-probe it. Called from the storage layer whenever the underlying file set
 // of an entry mutates.
 func (s *Storage) MarkEntryDirty(entryName string, protocol config.Protocol, reason string) {
+	_ = s.MarkEntryDirtyChecked(entryName, protocol, reason)
+}
+
+// MarkEntryDirtyChecked is the error-reporting form used by runtime read
+// feedback. Existing mutation paths retain the best-effort wrapper above.
+func (s *Storage) MarkEntryDirtyChecked(entryName string, protocol config.Protocol, reason string) error {
 	if entryName == "" {
-		return
+		return nil
 	}
 	state, err := s.GetEntryHealth(entryName)
-	if err != nil || state == nil {
+	if err != nil && !hybrid.IsNotFound(err) {
+		return fmt.Errorf("load entry health %q: %w", entryName, err)
+	}
+	if state == nil {
 		state = &EntryHealth{EntryName: entryName, Status: HealthUnknown}
 	}
 	if protocol != "" {
@@ -386,7 +395,7 @@ func (s *Storage) MarkEntryDirty(entryName string, protocol config.Protocol, rea
 	state.Dirty = true
 	state.DirtyReason = reason
 	state.NextCheckDueAt = time.Time{}
-	_ = s.SaveEntryHealth(state)
+	return s.SaveEntryHealth(state)
 }
 
 // healthCountsTTL bounds how often CountEntryHealthByStatus scans the entire

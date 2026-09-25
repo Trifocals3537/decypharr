@@ -618,7 +618,7 @@ func (m *Manager) streamUsenet(ctx context.Context, entry *storage.Entry, filena
 	// missing across every configured provider. Check before onReady writes a
 	// 200/206 response so WebDAV clients receive a bounded complete error on
 	// subsequent attempts rather than another truncated success response.
-	if err := m.usenet.CheckStreamReady(entry.InfoHash, filename); err != nil {
+	if err := m.usenet.EnsureStreamReady(ctx, entry.InfoHash, filename); err != nil {
 		return err
 	}
 

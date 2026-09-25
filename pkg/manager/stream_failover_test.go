@@ -741,7 +741,7 @@ func (b *partialFailureBody) Read(p []byte) (int, error) {
 
 func (*partialFailureBody) Close() error { return nil }
 
-func TestStreamNeverFailsOverToAlternateAfterResponseCommitment(t *testing.T) {
+func TestStreamRejectsInvalidAlternateAfterResponseCommitment(t *testing.T) {
 	var primaryRequests atomic.Int32
 	var fallbackRequests atomic.Int32
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -776,8 +776,12 @@ func TestStreamNeverFailsOverToAlternateAfterResponseCommitment(t *testing.T) {
 	if err == nil {
 		t.Fatal("Stream() succeeded, want committed body failure")
 	}
-	if output.String() != "ab" || readyCalls != 1 || primaryRequests.Load() != 4 || fallbackRequests.Load() != 0 {
-		t.Fatalf("output/ready/primary/fallback = %q/%d/%d/%d, want ab/1/4/0", output.String(), readyCalls, primaryRequests.Load(), fallbackRequests.Load())
+	if output.String() != "ab" || readyCalls != 1 || primaryRequests.Load() != 4 || fallbackRequests.Load() != 4 {
+		t.Fatalf("output/ready/primary/fallback = %q/%d/%d/%d, want ab/1/4/4", output.String(), readyCalls, primaryRequests.Load(), fallbackRequests.Load())
+	}
+	stats := manager.StreamFailoverStats()
+	if stats.CommittedHandoffs != 1 || stats.HandoffSuccesses != 0 || stats.Exhausted != 1 {
+		t.Fatalf("stream failover stats = %+v, want one exhausted committed handoff", stats)
 	}
 }
 
@@ -842,6 +846,183 @@ func TestStreamResumesInterruptedBodyFromExactNextByte(t *testing.T) {
 	}
 }
 
+func TestStreamHandsOffUnreadSuffixToIdenticalHashProvider(t *testing.T) {
+	var primaryRequests atomic.Int32
+	var fallbackRequests atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestRange := req.Header.Get("Range")
+		if req.URL.Hostname() == "fallback.example" {
+			fallbackRequests.Add(1)
+			return &http.Response{
+				StatusCode:    http.StatusPartialContent,
+				Header:        http.Header{"Content-Range": []string{"bytes 2-3/4"}},
+				Body:          io.NopCloser(strings.NewReader("cd")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		}
+
+		requestNumber := primaryRequests.Add(1)
+		body := io.ReadCloser(&partialFailureBody{})
+		contentRange := "bytes 0-3/4"
+		contentLength := int64(4)
+		if requestNumber > 1 {
+			body = &immediateFailureBody{}
+			contentRange = "bytes 2-3/4"
+			contentLength = 2
+		}
+		if requestNumber == 1 && requestRange != "bytes=0-3" {
+			t.Errorf("initial Range = %q, want bytes=0-3", requestRange)
+		}
+		if requestNumber > 1 && requestRange != "bytes=2-3" {
+			t.Errorf("resume Range = %q, want bytes=2-3", requestRange)
+		}
+		return &http.Response{
+			StatusCode:    http.StatusPartialContent,
+			Header:        http.Header{"Content-Range": []string{contentRange}},
+			Body:          body,
+			ContentLength: contentLength,
+			Request:       req,
+		}, nil
+	})}
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary":  {DownloadLink: "https://primary.example/file"},
+		"fallback": {DownloadLink: "https://fallback.example/file"},
+	}}
+	manager := newStreamFailoverTestManager(links, client, "primary", "fallback")
+	entry := streamFailoverEntry("primary", "fallback")
+
+	var output bytes.Buffer
+	readyCalls := 0
+	err := manager.Stream(context.Background(), entry, "video.mkv", 0, 3, &output, func(*StreamMetadata) error {
+		readyCalls++
+		return nil
+	}, "test")
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if output.String() != "abcd" || readyCalls != 1 ||
+		primaryRequests.Load() != 2 || fallbackRequests.Load() != 1 {
+		t.Fatalf(
+			"output/ready/primary/fallback = %q/%d/%d/%d, want abcd/1/2/1",
+			output.String(),
+			readyCalls,
+			primaryRequests.Load(),
+			fallbackRequests.Load(),
+		)
+	}
+	if got := links.callOrder(); !slices.Equal(got, []string{"primary", "fallback"}) {
+		t.Fatalf("provider link calls = %v, want primary then fallback", got)
+	}
+	stats := manager.StreamFailoverStats()
+	if stats.CommittedHandoffs != 1 || stats.HandoffSuccesses != 1 ||
+		stats.Attempts != 1 || stats.Successes != 1 {
+		t.Fatalf("stream failover stats = %+v, want one successful committed handoff", stats)
+	}
+}
+
+func TestStreamCarriesConfirmedCursorAcrossMultipleProviders(t *testing.T) {
+	var requestMu sync.Mutex
+	var requests []string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		host := req.URL.Hostname()
+		requestRange := req.Header.Get("Range")
+		requestMu.Lock()
+		requests = append(requests, host+" "+requestRange)
+		requestMu.Unlock()
+
+		var body io.ReadCloser
+		var contentRange string
+		var contentLength int64
+		switch host + " " + requestRange {
+		case "primary.example bytes=0-3":
+			body = &partialFailureBody{}
+			contentRange = "bytes 0-3/4"
+			contentLength = 4
+		case "primary.example bytes=2-3":
+			body = &immediateFailureBody{}
+			contentRange = "bytes 2-3/4"
+			contentLength = 2
+		case "beta.example bytes=2-3":
+			body = &terminalErrorBody{data: "c", err: io.ErrUnexpectedEOF}
+			contentRange = "bytes 2-3/4"
+			contentLength = 2
+		case "beta.example bytes=3-3":
+			body = &immediateFailureBody{}
+			contentRange = "bytes 3-3/4"
+			contentLength = 1
+		case "gamma.example bytes=3-3":
+			body = io.NopCloser(strings.NewReader("d"))
+			contentRange = "bytes 3-3/4"
+			contentLength = 1
+		default:
+			t.Fatalf("unexpected request %s %s", host, requestRange)
+			return nil, errors.New("unexpected request")
+		}
+		return &http.Response{
+			StatusCode:    http.StatusPartialContent,
+			Header:        http.Header{"Content-Range": []string{contentRange}},
+			Body:          body,
+			ContentLength: contentLength,
+			Request:       req,
+		}, nil
+	})}
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {DownloadLink: "https://primary.example/file"},
+		"beta":    {DownloadLink: "https://beta.example/file"},
+		"gamma":   {DownloadLink: "https://gamma.example/file"},
+	}}
+	manager := newStreamFailoverTestManager(links, client, "primary", "beta", "gamma")
+
+	var output bytes.Buffer
+	err := manager.Stream(
+		context.Background(),
+		streamFailoverEntry("primary", "beta", "gamma"),
+		"video.mkv",
+		0,
+		3,
+		&output,
+		nil,
+		"test",
+	)
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	requestMu.Lock()
+	gotRequests := append([]string(nil), requests...)
+	requestMu.Unlock()
+	wantRequests := []string{
+		"primary.example bytes=0-3",
+		"primary.example bytes=2-3",
+		"beta.example bytes=2-3",
+		"beta.example bytes=3-3",
+		"gamma.example bytes=3-3",
+	}
+	if output.String() != "abcd" || !slices.Equal(gotRequests, wantRequests) {
+		t.Fatalf("output/requests = %q/%v, want abcd/%v", output.String(), gotRequests, wantRequests)
+	}
+	stats := manager.StreamFailoverStats()
+	if stats.CommittedHandoffs != 2 || stats.HandoffSuccesses != 1 {
+		t.Fatalf("stream failover stats = %+v, want two handoffs and one success", stats)
+	}
+}
+
+type terminalErrorBody struct {
+	data string
+	err  error
+	done bool
+}
+
+func (b *terminalErrorBody) Read(p []byte) (int, error) {
+	if b.done {
+		return 0, b.err
+	}
+	b.done = true
+	return copy(p, b.data), b.err
+}
+
+func (*terminalErrorBody) Close() error { return nil }
+
 func TestStreamResumesRootedArchiveBodyFromExactUpstreamByte(t *testing.T) {
 	var requestMu sync.Mutex
 	var ranges []string
@@ -905,14 +1086,15 @@ func TestStreamBoundsInvalidSameProviderResume(t *testing.T) {
 	var primaryRequests atomic.Int32
 	var fallbackRequests atomic.Int32
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestNumber := primaryRequests.Add(1)
 		if req.URL.Hostname() == "fallback.example" {
 			fallbackRequests.Add(1)
+		} else {
+			primaryRequests.Add(1)
 		}
 		body := io.ReadCloser(&partialFailureBody{})
 		contentRange := "bytes 0-3/4"
 		contentLength := int64(4)
-		if requestNumber > 1 {
+		if req.Header.Get("Range") == "bytes=2-3" {
 			body = io.NopCloser(strings.NewReader("cd"))
 			contentRange = "bytes 0-1/4"
 			contentLength = 2
@@ -945,9 +1127,9 @@ func TestStreamBoundsInvalidSameProviderResume(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match requested range 2-3") {
 		t.Fatalf("Stream() error = %v, want invalid resumed Content-Range", err)
 	}
-	if output.String() != "ab" || primaryRequests.Load() != 4 || fallbackRequests.Load() != 0 {
+	if output.String() != "ab" || primaryRequests.Load() != 4 || fallbackRequests.Load() != 4 {
 		t.Fatalf(
-			"output/primary/fallback = %q/%d/%d, want ab/4/0",
+			"output/primary/fallback = %q/%d/%d, want ab/4/4",
 			output.String(),
 			primaryRequests.Load(),
 			fallbackRequests.Load(),

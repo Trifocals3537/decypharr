@@ -259,7 +259,8 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		}
 
 		candidateCtx := ctx
-		hasFallback := index+1 < len(candidates)
+		fallbackCandidates := candidates[index+1:]
+		hasFallback := len(fallbackCandidates) > 0
 		isAlternate := !strings.EqualFold(candidate.provider, torrent.ActiveProvider)
 		if isAlternate || (hasFallback && !candidate.recovery) {
 			candidateCtx = link.WithoutRepair(candidateCtx)
@@ -276,7 +277,7 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			writer,
 			onReady,
 			buf,
-			hasFallback,
+			fallbackCandidates,
 		)
 		if weatherProbe {
 			m.streamProviderWeather.releaseProbe(candidate.provider)
@@ -337,8 +338,9 @@ func (m *Manager) streamHTTPFromCandidate(
 	writer io.Writer,
 	onReady StreamReadyFunc,
 	buf []byte,
-	hasFallback bool,
+	fallbackCandidates []streamCandidate,
 ) (bool, error) {
+	hasFallback := len(fallbackCandidates) > 0
 	candidateEntry := candidate.entryForAttempt(original, filename)
 	downloadLink, err := m.linkService.GetLink(ctx, candidateEntry, filename)
 	if err != nil {
@@ -466,7 +468,8 @@ func (m *Manager) streamHTTPFromCandidate(
 		// Prove that the upstream body can produce at least one byte before the
 		// HTTP caller commits status/headers. This is the last point where a
 		// provider switch is safe. Once ready is reported or a writer is touched,
-		// this attempt is irrevocably committed and will never be replayed.
+		// committed bytes are never replayed; recovery can only request the exact
+		// unread suffix.
 		reader := io.Reader(resp.Body)
 		if rangePlan.expectedLen > 0 {
 			reader = io.LimitReader(resp.Body, rangePlan.expectedLen)
@@ -501,7 +504,7 @@ func (m *Manager) streamHTTPFromCandidate(
 			buf,
 		)
 		resp.Body.Close()
-		if transfer.sinkErr == nil && transfer.sourceErr != nil {
+		if transfer.sinkErr == nil && retryableCommittedSourceError(transfer.sourceErr) {
 			transfer = m.resumeHTTPStream(
 				ctx,
 				candidateEntry,
@@ -514,6 +517,21 @@ func (m *Manager) streamHTTPFromCandidate(
 				downloadLink,
 				expectedUpstreamTotal,
 				linkRefreshes,
+				m.streamStatusRetries(),
+			)
+		}
+		if transfer.sinkErr == nil && transfer.sourceErr != nil &&
+			transfer.written < rangePlan.expectedLen && len(fallbackCandidates) > 0 {
+			transfer = m.handoffHTTPStream(
+				ctx,
+				original,
+				candidate,
+				fallbackCandidates,
+				filename,
+				rangePlan,
+				writer,
+				buf,
+				transfer,
 			)
 		}
 		copyErr := transfer.err()

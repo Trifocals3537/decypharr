@@ -242,6 +242,9 @@ type EntryHealth struct {
 
 	Dirty       bool   `json:"dirty"`
 	DirtyReason string `json:"dirty_reason,omitempty"`
+	// DirtyRevision is incremented for every runtime failure signal. Stale
+	// health-probe saves retain a newer dirty revision instead of clearing it.
+	DirtyRevision uint64 `json:"dirty_revision,omitempty"`
 
 	LastCheckedAt  time.Time    `json:"last_checked_at"`
 	LastOKAt       time.Time    `json:"last_ok_at"`
@@ -280,9 +283,37 @@ func (h *EntryHealth) IsDue(now time.Time, recheck time.Duration) bool {
 }
 
 func (s *Storage) SaveEntryHealth(state *EntryHealth) error {
+	s.entryHealthMu.Lock()
+	defer s.entryHealthMu.Unlock()
+	return s.saveEntryHealthLocked(state)
+}
+
+func (s *Storage) saveEntryHealthLocked(state *EntryHealth) error {
 	if state == nil || state.EntryName == "" {
 		return fmt.Errorf("entry health is missing entry name")
 	}
+	data, err := s.repairState.Get(state.EntryName)
+	if err == nil {
+		var current EntryHealth
+		if err := json.Unmarshal(data, &current); err != nil {
+			return fmt.Errorf("decode current entry health %q: %w", state.EntryName, err)
+		}
+		if current.DirtyRevision > state.DirtyRevision {
+			state.Dirty = current.Dirty
+			state.DirtyReason = current.DirtyReason
+			state.DirtyRevision = current.DirtyRevision
+			state.NextCheckDueAt = current.NextCheckDueAt
+			if current.Protocol != "" {
+				state.Protocol = current.Protocol
+			}
+		}
+	} else if !hybrid.IsNotFound(err) {
+		return fmt.Errorf("load current entry health %q: %w", state.EntryName, err)
+	}
+	return s.putEntryHealthLocked(state)
+}
+
+func (s *Storage) putEntryHealthLocked(state *EntryHealth) error {
 	state.UpdatedAt = time.Now()
 	state.BrokenCount = len(state.BrokenFiles)
 	data, err := json.Marshal(state)
@@ -382,7 +413,17 @@ func (s *Storage) MarkEntryDirtyChecked(entryName string, protocol config.Protoc
 	if entryName == "" {
 		return nil
 	}
-	state, err := s.GetEntryHealth(entryName)
+	s.entryHealthMu.Lock()
+	defer s.entryHealthMu.Unlock()
+
+	var state *EntryHealth
+	data, err := s.repairState.Get(entryName)
+	if err == nil {
+		state = &EntryHealth{}
+		if err := json.Unmarshal(data, state); err != nil {
+			return fmt.Errorf("decode entry health %q: %w", entryName, err)
+		}
+	}
 	if err != nil && !hybrid.IsNotFound(err) {
 		return fmt.Errorf("load entry health %q: %w", entryName, err)
 	}
@@ -394,8 +435,9 @@ func (s *Storage) MarkEntryDirtyChecked(entryName string, protocol config.Protoc
 	}
 	state.Dirty = true
 	state.DirtyReason = reason
+	state.DirtyRevision++
 	state.NextCheckDueAt = time.Time{}
-	return s.SaveEntryHealth(state)
+	return s.putEntryHealthLocked(state)
 }
 
 // healthCountsTTL bounds how often CountEntryHealthByStatus scans the entire

@@ -84,6 +84,9 @@ type fileResult struct {
 
 // executeSweep is the body of a sweep: enumerate, filter due, probe, repair.
 func (r *Repair) executeSweep(ctx context.Context, run *storage.RepairRun, opts RepairRunOptions, stopState *repairStopState) {
+	r.eventProbeMu.Lock()
+	defer r.eventProbeMu.Unlock()
+
 	cfg := r.cfg()
 	log := r.logger.With().Str("run_id", run.ID).Logger()
 
@@ -445,6 +448,7 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 func (r *Repair) probeTorrentFile(ctx context.Context, entry *storage.Entry, file *storage.File, name string, res fileResult, opts RepairRunOptions) fileResult {
 	client := r.manager.ProviderClient(entry.ActiveProvider)
 	if client == nil {
+		res.broken = true
 		res.reason = "provider_client_not_found"
 		return res
 	}

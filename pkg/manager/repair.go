@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
@@ -33,6 +34,7 @@ type RepairStatus struct {
 	LastRun        *storage.RepairRun            `json:"last_run,omitempty"`
 	HealthCounts   map[storage.HealthStatus]int  `json:"health_counts"`
 	RecoveryCounts map[storage.RecoveryState]int `json:"recovery_counts,omitempty"`
+	EventQueue     RepairEventQueueStatus        `json:"event_queue"`
 }
 
 // RepairRunOptions are one-off options for a manually-started repair run.
@@ -66,6 +68,10 @@ const (
 	// repairStopFinalRepairTimeout bounds the Arr delete + re-search pass run
 	// when StopSchedule fires and auto-repair is enabled.
 	repairStopFinalRepairTimeout = 5 * time.Minute
+	repairEventQueueCapacity     = 256
+	repairEventProbeTimeout      = 2 * time.Minute
+	repairEventCooldown          = 2 * time.Minute
+	repairEventHistoryCapacity   = 4096
 )
 
 // Repair is the health-check / auto-repair service. One instance per Manager.
@@ -89,16 +95,49 @@ type Repair struct {
 	// Serializes Arr recovery intent across parallel entry probes. Network work
 	// is bounded by a per-job timeout; ordinary file probing remains parallel.
 	recoveryMu sync.Mutex
+
+	// Runtime read failures feed a single bounded worker. Durable dirty health
+	// records remain the source of truth; this queue only shortens the time to
+	// a non-destructive recheck.
+	eventMu           sync.Mutex
+	eventQueue        []string
+	eventQueued       map[string]struct{}
+	eventGeneration   map[string]uint64
+	eventLast         map[string]time.Time
+	eventSignal       chan struct{}
+	eventCancel       context.CancelFunc
+	eventStarted      bool
+	eventCurrent      string
+	eventProbeMu      sync.Mutex
+	eventCapacity     int
+	eventCooldown     time.Duration
+	eventProbeTimeout time.Duration
+	eventNow          func() time.Time
+	eventProcess      func(context.Context, string) repairEventOutcome
+	eventProcessed    atomic.Uint64
+	eventHealthy      atomic.Uint64
+	eventBroken       atomic.Uint64
+	eventIncomplete   atomic.Uint64
+	eventCoalesced    atomic.Uint64
+	eventDropped      atomic.Uint64
 }
 
 // NewRepair builds the repair service for the given manager. Call
 // Repair.Start to register the recurring sweep with the scheduler.
 func NewRepair(m *Manager) *Repair {
 	return &Repair{
-		manager:   m,
-		scheduler: m.scheduler,
-		logger:    logger.New("repair"),
-		parentCtx: context.Background(),
+		manager:           m,
+		scheduler:         m.scheduler,
+		logger:            logger.New("repair"),
+		parentCtx:         context.Background(),
+		eventQueued:       make(map[string]struct{}),
+		eventGeneration:   make(map[string]uint64),
+		eventLast:         make(map[string]time.Time),
+		eventSignal:       make(chan struct{}, 1),
+		eventCapacity:     repairEventQueueCapacity,
+		eventCooldown:     repairEventCooldown,
+		eventProbeTimeout: repairEventProbeTimeout,
+		eventNow:          time.Now,
 	}
 }
 
@@ -216,6 +255,9 @@ func (r *Repair) Start(ctx context.Context) error {
 		r.stopScheduled = true
 		r.logger.Info().Str("stop_schedule", stopSchedule).Msg("Repair sweep stop schedule registered")
 	}
+	if err := r.startEventWorker(ctx); err != nil {
+		return fmt.Errorf("failed to start event-driven repair worker: %w", err)
+	}
 	return nil
 }
 
@@ -272,6 +314,7 @@ func (r *Repair) stop(reopen bool) error {
 		r.stopScheduled = false
 	}
 	r.mu.Unlock()
+	r.stopEventWorker()
 	if cancel != nil {
 		cancel()
 	}
@@ -395,6 +438,7 @@ func (r *Repair) Status() RepairStatus {
 	st := RepairStatus{
 		Enabled:      cfg.Enabled,
 		HealthCounts: r.manager.storage.CountEntryHealthByStatus(),
+		EventQueue:   r.eventQueueStatus(),
 	}
 	if counts, err := r.manager.storage.RepairRecoveryCounts(); err == nil {
 		st.RecoveryCounts = counts

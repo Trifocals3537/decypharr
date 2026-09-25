@@ -49,6 +49,7 @@ type Storage struct {
 	entryItemsMu        sync.Mutex
 	entryItemsDirty     bool
 	startupComplete     bool
+	entryHealthMu       sync.Mutex
 	healthCountsMu      sync.Mutex
 	healthCounts        map[HealthStatus]int
 	healthCountsBuiltAt time.Time

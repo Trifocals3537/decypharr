@@ -46,6 +46,10 @@ func TestRecordTerminalReadFailureMarksDirtyRateLimitsAndRedactsError(t *testing
 
 	var logs bytes.Buffer
 	m := &Manager{storage: store, logger: zerolog.New(&logs)}
+	m.repair = NewRepair(m)
+	m.repair.eventMu.Lock()
+	m.repair.eventStarted = true
+	m.repair.eventMu.Unlock()
 	entry := &storage.Entry{
 		Name:           "Movie.Release",
 		InfoHash:       "safe-hash",
@@ -68,7 +72,13 @@ func TestRecordTerminalReadFailureMarksDirtyRateLimitsAndRedactsError(t *testing
 	if got := m.terminalReadFailures.Load(); got != 2 {
 		t.Fatalf("terminal read failures = %d, want 2", got)
 	}
+	if status := m.repair.eventQueueStatus(); status.Pending != 1 || status.Coalesced != 1 {
+		t.Fatalf("event queue status = %+v, want one pending and one coalesced dirty event", status)
+	}
 	output := logs.String()
+	if count := strings.Count(output, "Terminal media read failure"); count != 1 {
+		t.Fatalf("terminal read failure log count = %d, want 1", count)
+	}
 	if strings.Contains(output, secret) {
 		t.Fatal("raw provider error leaked into structured log")
 	}

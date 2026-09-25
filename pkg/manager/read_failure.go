@@ -95,13 +95,17 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 	class, retryable := classifyTerminalReadFailure(err)
 	m.terminalReadFailures.Add(1)
 	key := strings.Join([]string{entry.InfoHash, filename, class}, "\x00")
-	if !m.allowReadFailureLog(key, time.Now()) {
-		return
-	}
+	shouldLog := m.allowReadFailureLog(key, time.Now())
 
 	persisted := false
 	if m.storage != nil && entry.Name != "" {
 		persisted = m.storage.MarkEntryDirtyChecked(entry.Name, entry.Protocol, "read_failure:"+class) == nil
+	}
+	if persisted && m.repair != nil {
+		m.repair.QueueDirtyEntry(entry.Name)
+	}
+	if !shouldLog {
+		return
 	}
 
 	provider := entry.ActiveProvider

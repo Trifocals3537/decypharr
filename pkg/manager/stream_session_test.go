@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,90 +15,81 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
-type sessionRange struct {
-	start int64
-	end   int64
-}
-
 type sessionSource struct {
-	mu    sync.Mutex
-	data  []byte
-	calls []sessionRange
-	hook  func(context.Context, int64, int64, io.Writer) error
+	mu      sync.Mutex
+	data    []byte
+	offsets []int64
+	open    func(context.Context, int64) (io.ReadCloser, error)
 }
 
-func (s *sessionSource) stream(ctx context.Context, start, end int64, writer io.Writer) error {
+func (s *sessionSource) openAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
 	s.mu.Lock()
-	s.calls = append(s.calls, sessionRange{start: start, end: end})
-	hook := s.hook
+	s.offsets = append(s.offsets, offset)
+	open := s.open
 	data := s.data
 	s.mu.Unlock()
-	if hook != nil {
-		return hook(ctx, start, end, writer)
+	if open != nil {
+		return open(ctx, offset)
 	}
-	_, err := writer.Write(data[start : end+1])
-	return err
+	return io.NopCloser(bytes.NewReader(data[offset:])), nil
 }
 
-func (s *sessionSource) ranges() []sessionRange {
+func (s *sessionSource) openedAt() []int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]sessionRange(nil), s.calls...)
+	return append([]int64(nil), s.offsets...)
 }
 
-func TestStreamSessionSequentialReadAndSeek(t *testing.T) {
-	source := &sessionSource{data: []byte("abcdefghij")}
-	session, err := newStreamSession(t.Context(), int64(len(source.data)), 0, source.stream)
+func newTestStreamSession(t *testing.T, source *sessionSource, offset int64) *streamSession {
+	t.Helper()
+	session, err := newStreamSession(t.Context(), int64(len(source.data)), offset, source.openAt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return session
+}
+
+func TestStreamSessionReusesBodyAcrossSequentialReads(t *testing.T) {
+	source := &sessionSource{data: []byte("abcdefghij")}
+	session := newTestStreamSession(t, source, 0)
 	defer session.Close()
 
-	buf := make([]byte, 4)
-	n, err := session.Read(buf)
-	if err != nil || n != 4 || string(buf) != "abcd" {
-		t.Fatalf("first read = %d, %q, %v", n, buf, err)
+	first := make([]byte, 4)
+	if n, err := session.Read(first); err != nil || n != 4 || string(first) != "abcd" {
+		t.Fatalf("first read = %d, %q, %v", n, first, err)
 	}
-	if got, err := session.Seek(2, io.SeekCurrent); err != nil || got != 6 {
-		t.Fatalf("seek current = %d, %v", got, err)
+	second := make([]byte, 3)
+	if n, err := session.Read(second); err != nil || n != 3 || string(second) != "efg" {
+		t.Fatalf("second read = %d, %q, %v", n, second, err)
 	}
+	if got := source.openedAt(); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("open offsets = %#v, want [0]", got)
+	}
+}
 
-	buf = make([]byte, 3)
-	n, err = session.Read(buf)
-	if err != nil || n != 3 || string(buf) != "ghi" {
-		t.Fatalf("second read = %d, %q, %v", n, buf, err)
-	}
-	if got, err := session.Seek(-2, io.SeekEnd); err != nil || got != 8 {
-		t.Fatalf("seek end = %d, %v", got, err)
-	}
+func TestStreamSessionSeekReopensAtExactOffset(t *testing.T) {
+	source := &sessionSource{data: []byte("abcdefghij")}
+	session := newTestStreamSession(t, source, 0)
+	defer session.Close()
 
-	buf = make([]byte, 4)
-	n, err = session.Read(buf)
-	if err != nil || n != 2 || string(buf[:n]) != "ij" {
-		t.Fatalf("tail read = %d, %q, %v", n, buf[:n], err)
+	buf := make([]byte, 2)
+	if _, err := session.Read(buf); err != nil {
+		t.Fatal(err)
 	}
-	if n, err = session.Read(buf); n != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("EOF read = %d, %v", n, err)
+	if got, err := session.Seek(6, io.SeekStart); err != nil || got != 6 {
+		t.Fatalf("seek = %d, %v", got, err)
 	}
-
-	want := []sessionRange{{0, 3}, {6, 8}, {8, 9}}
-	got := source.ranges()
-	if len(got) != len(want) {
-		t.Fatalf("ranges = %#v, want %#v", got, want)
+	if n, err := session.Read(buf); err != nil || n != 2 || string(buf) != "gh" {
+		t.Fatalf("read after seek = %d, %q, %v", n, buf, err)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("range %d = %#v, want %#v", i, got[i], want[i])
-		}
+	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 6 {
+		t.Fatalf("open offsets = %#v, want [0 6]", got)
 	}
 }
 
 func TestStreamSessionPrimeDoesNotAdvance(t *testing.T) {
 	source := &sessionSource{data: []byte("prime")}
-	session, err := newStreamSession(t.Context(), int64(len(source.data)), 0, source.stream)
-	if err != nil {
-		t.Fatal(err)
-	}
+	session := newTestStreamSession(t, source, 0)
 	defer session.Close()
 
 	if err := session.Prime(); err != nil {
@@ -110,49 +102,118 @@ func TestStreamSessionPrimeDoesNotAdvance(t *testing.T) {
 	if n, err := session.Read(buf); err != nil || n != 2 || string(buf) != "pr" {
 		t.Fatalf("read after prime = %d, %q, %v", n, buf, err)
 	}
-
-	want := []sessionRange{{0, 0}, {0, 1}}
-	got := source.ranges()
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("ranges = %#v, want %#v", got, want)
+	if got := source.openedAt(); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("open offsets = %#v, want [0]", got)
 	}
 }
 
-func TestStreamSessionRejectsIncompleteExactRange(t *testing.T) {
-	source := &sessionSource{data: []byte("short")}
-	source.hook = func(_ context.Context, _, _ int64, writer io.Writer) error {
-		_, err := writer.Write([]byte("sh"))
-		return err
+func TestStreamSessionResumesFromConfirmedByte(t *testing.T) {
+	data := []byte("abcdefgh")
+	var opens int
+	source := &sessionSource{data: data}
+	source.open = func(_ context.Context, offset int64) (io.ReadCloser, error) {
+		opens++
+		if opens == 1 {
+			return io.NopCloser(bytes.NewReader(data[offset : offset+2])), nil
+		}
+		return io.NopCloser(bytes.NewReader(data[offset:])), nil
 	}
-	session, err := newStreamSession(t.Context(), int64(len(source.data)), 0, source.stream)
+	session := newTestStreamSession(t, source, 0)
+	defer session.Close()
+
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(session, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "abcde" {
+		t.Fatalf("resumed data = %q", buf)
+	}
+	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 2 {
+		t.Fatalf("open offsets = %#v, want [0 2]", got)
+	}
+}
+
+func TestStreamSessionBoundsResumeAttempts(t *testing.T) {
+	source := &sessionSource{data: []byte("retry")}
+	source.open = func(context.Context, int64) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	session := newTestStreamSession(t, source, 0)
+	session.recover = func(context.Context, error, int) error { return nil }
+	defer session.Close()
+
+	if n, err := session.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("bounded failure = %d, %v", n, err)
+	} else {
+		var exhausted *StreamSessionExhaustedError
+		if !errors.As(err, &exhausted) || exhausted.Attempts != streamSessionMaxResumes+1 || exhausted.Offset != 0 {
+			t.Fatalf("exhausted error = %#v", exhausted)
+		}
+	}
+	if got := len(source.openedAt()); got != streamSessionMaxResumes+1 {
+		t.Fatalf("open attempts = %d, want %d", got, streamSessionMaxResumes+1)
+	}
+}
+
+func TestStreamSessionOptionsBoundTotalAttempts(t *testing.T) {
+	source := &sessionSource{data: []byte("retry")}
+	source.open = func(context.Context, int64) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	session, err := newStreamSessionWithOptions(
+		t.Context(),
+		int64(len(source.data)),
+		0,
+		source.openAt,
+		func(context.Context, error, int) error { return nil },
+		StreamSessionOptions{MaxAttempts: 2},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer session.Close()
 
-	buf := make([]byte, 4)
-	n, err := session.Read(buf)
-	if n != 2 || !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("short read = %d, %v", n, err)
+	if _, err := session.Read(make([]byte, 1)); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("bounded failure = %v", err)
 	}
-	if got, err := session.Seek(0, io.SeekCurrent); err != nil || got != 2 {
-		t.Fatalf("position after short read = %d, %v", got, err)
+	if got := len(source.openedAt()); got != 2 {
+		t.Fatalf("open attempts = %d, want 2", got)
 	}
 }
+
+func TestRecoverStreamSessionHonorsExplicitRetryability(t *testing.T) {
+	retryable := StreamError{Err: errors.New("provider returned 404 during a retryable refresh"), Retryable: true}
+	if err := recoverStreamSession(t.Context(), retryable, 0); err != nil {
+		t.Fatalf("explicitly retryable error was rejected: %v", err)
+	}
+
+	permanent := StreamError{Err: io.ErrUnexpectedEOF, Retryable: false}
+	if err := recoverStreamSession(t.Context(), permanent, 0); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("explicitly permanent error = %v", err)
+	}
+}
+
+type blockingStreamBody struct {
+	ctx context.Context
+}
+
+func (b *blockingStreamBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*blockingStreamBody) Close() error { return nil }
 
 func TestStreamSessionCloseCancelsBlockedRead(t *testing.T) {
 	started := make(chan struct{})
 	var startedOnce sync.Once
 	source := &sessionSource{data: []byte("cancel")}
-	source.hook = func(ctx context.Context, _, _ int64, _ io.Writer) error {
+	source.open = func(ctx context.Context, _ int64) (io.ReadCloser, error) {
 		startedOnce.Do(func() { close(started) })
-		<-ctx.Done()
-		return ctx.Err()
+		return &blockingStreamBody{ctx: ctx}, nil
 	}
-	session, err := newStreamSession(t.Context(), int64(len(source.data)), 0, source.stream)
-	if err != nil {
-		t.Fatal(err)
-	}
+	session := newTestStreamSession(t, source, 0)
+	session.recover = func(_ context.Context, err error, _ int) error { return err }
 
 	readDone := make(chan error, 1)
 	go func() {
@@ -169,7 +230,7 @@ func TestStreamSessionCloseCancelsBlockedRead(t *testing.T) {
 	}
 	select {
 	case readErr := <-readDone:
-		if !errors.Is(readErr, context.Canceled) {
+		if !errors.Is(readErr, context.Canceled) && !errors.Is(readErr, os.ErrClosed) {
 			t.Fatalf("blocked read error = %v", readErr)
 		}
 	case <-time.After(time.Second):
@@ -180,13 +241,133 @@ func TestStreamSessionCloseCancelsBlockedRead(t *testing.T) {
 	}
 }
 
-func TestStreamSessionSeekValidation(t *testing.T) {
-	session, err := newStreamSession(t.Context(), 10, 0, func(context.Context, int64, int64, io.Writer) error {
-		return nil
-	})
+func TestStreamSessionIdleClosesAndReopensBody(t *testing.T) {
+	source := &sessionSource{data: []byte("idle")}
+	session := newTestStreamSession(t, source, 0)
+	session.idleTimeout = 10 * time.Millisecond
+	defer session.Close()
+
+	buf := make([]byte, 1)
+	if _, err := session.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		session.mu.Lock()
+		idleClosed := session.body == nil
+		session.mu.Unlock()
+		if idleClosed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("idle body did not close")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := session.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.openedAt(); len(got) != 2 || got[1] != 1 {
+		t.Fatalf("open offsets = %#v, want [0 1]", got)
+	}
+}
+
+func TestStreamSessionStallCancelsAndResumes(t *testing.T) {
+	data := []byte("stall")
+	var opens int
+	source := &sessionSource{data: data}
+	source.open = func(ctx context.Context, offset int64) (io.ReadCloser, error) {
+		opens++
+		if opens == 1 {
+			return &blockingStreamBody{ctx: ctx}, nil
+		}
+		return io.NopCloser(bytes.NewReader(data[offset:])), nil
+	}
+	session := newTestStreamSession(t, source, 0)
+	session.stallTimeout = 10 * time.Millisecond
+	defer session.Close()
+
+	buf := make([]byte, 2)
+	if n, err := session.Read(buf); err != nil || n != 2 || string(buf) != "st" {
+		t.Fatalf("read after stall = %d, %q, %v", n, buf, err)
+	}
+	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("open offsets = %#v, want [0 0]", got)
+	}
+}
+
+func TestStreamSessionOpenTimeoutCancelsAndResumes(t *testing.T) {
+	data := []byte("connect")
+	var opens int
+	source := &sessionSource{data: data}
+	source.open = func(ctx context.Context, offset int64) (io.ReadCloser, error) {
+		opens++
+		if opens == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return io.NopCloser(bytes.NewReader(data[offset:])), nil
+	}
+	session := newTestStreamSession(t, source, 0)
+	session.stallTimeout = 10 * time.Millisecond
+	defer session.Close()
+
+	buf := make([]byte, 2)
+	if n, err := session.Read(buf); err != nil || n != 2 || string(buf) != "co" {
+		t.Fatalf("read after open timeout = %d, %q, %v", n, buf, err)
+	}
+	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("open offsets = %#v, want [0 0]", got)
+	}
+}
+
+func TestStreamSessionBadSourceDoesNotBlockHealthySession(t *testing.T) {
+	started := make(chan struct{})
+	badSource := &sessionSource{data: []byte("bad")}
+	badSource.open = func(ctx context.Context, _ int64) (io.ReadCloser, error) {
+		close(started)
+		return &blockingStreamBody{ctx: ctx}, nil
+	}
+	bad, err := newStreamSessionWithOptions(
+		t.Context(),
+		int64(len(badSource.data)),
+		0,
+		badSource.openAt,
+		nil,
+		StreamSessionOptions{MaxAttempts: 1, StallTimeout: 20 * time.Millisecond},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer bad.Close()
+	badDone := make(chan error, 1)
+	go func() {
+		_, readErr := bad.Read(make([]byte, 1))
+		badDone <- readErr
+	}()
+	<-started
+
+	healthySource := &sessionSource{data: []byte("healthy")}
+	healthy := newTestStreamSession(t, healthySource, 0)
+	defer healthy.Close()
+	buf := make([]byte, 3)
+	if n, err := healthy.Read(buf); err != nil || n != 3 || string(buf) != "hea" {
+		t.Fatalf("healthy read = %d, %q, %v", n, buf, err)
+	}
+
+	select {
+	case err := <-badDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("bad read error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bad session did not fail within its bound")
+	}
+}
+
+func TestStreamSessionSeekValidation(t *testing.T) {
+	source := &sessionSource{data: []byte("0123456789")}
+	session := newTestStreamSession(t, source, 0)
 	defer session.Close()
 
 	if _, err := session.Seek(-1, io.SeekStart); err == nil {

@@ -741,7 +741,7 @@ func (b *partialFailureBody) Read(p []byte) (int, error) {
 
 func (*partialFailureBody) Close() error { return nil }
 
-func TestStreamNeverFailsOverAfterResponseCommitment(t *testing.T) {
+func TestStreamNeverFailsOverToAlternateAfterResponseCommitment(t *testing.T) {
 	var primaryRequests atomic.Int32
 	var fallbackRequests atomic.Int32
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -776,8 +776,224 @@ func TestStreamNeverFailsOverAfterResponseCommitment(t *testing.T) {
 	if err == nil {
 		t.Fatal("Stream() succeeded, want committed body failure")
 	}
-	if output.String() != "ab" || readyCalls != 1 || primaryRequests.Load() != 1 || fallbackRequests.Load() != 0 {
-		t.Fatalf("output/ready/primary/fallback = %q/%d/%d/%d, want ab/1/1/0", output.String(), readyCalls, primaryRequests.Load(), fallbackRequests.Load())
+	if output.String() != "ab" || readyCalls != 1 || primaryRequests.Load() != 4 || fallbackRequests.Load() != 0 {
+		t.Fatalf("output/ready/primary/fallback = %q/%d/%d/%d, want ab/1/4/0", output.String(), readyCalls, primaryRequests.Load(), fallbackRequests.Load())
+	}
+}
+
+func TestStreamResumesInterruptedBodyFromExactNextByte(t *testing.T) {
+	var requestMu sync.Mutex
+	var ranges []string
+	var fallbackRequests atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Hostname() == "fallback.example" {
+			fallbackRequests.Add(1)
+		}
+		requestRange := req.Header.Get("Range")
+		requestMu.Lock()
+		ranges = append(ranges, requestRange)
+		requestMu.Unlock()
+
+		body := io.ReadCloser(&partialFailureBody{})
+		contentRange := "bytes 0-3/4"
+		contentLength := int64(4)
+		if requestRange == "bytes=2-3" {
+			body = io.NopCloser(strings.NewReader("cd"))
+			contentRange = "bytes 2-3/4"
+			contentLength = 2
+		}
+		return &http.Response{
+			StatusCode:    http.StatusPartialContent,
+			Header:        http.Header{"Content-Range": []string{contentRange}},
+			Body:          body,
+			ContentLength: contentLength,
+			Request:       req,
+		}, nil
+	})}
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary":  {DownloadLink: "https://primary.example/file"},
+		"fallback": {DownloadLink: "https://fallback.example/file"},
+	}}
+	manager := newStreamFailoverTestManager(links, client, "primary", "fallback")
+	entry := streamFailoverEntry("primary", "fallback")
+
+	var output bytes.Buffer
+	readyCalls := 0
+	err := manager.Stream(context.Background(), entry, "video.mkv", 0, 3, &output, func(*StreamMetadata) error {
+		readyCalls++
+		return nil
+	}, "test")
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	requestMu.Lock()
+	gotRanges := append([]string(nil), ranges...)
+	requestMu.Unlock()
+	if output.String() != "abcd" || readyCalls != 1 || fallbackRequests.Load() != 0 {
+		t.Fatalf(
+			"output/ready/fallback = %q/%d/%d, want abcd/1/0",
+			output.String(),
+			readyCalls,
+			fallbackRequests.Load(),
+		)
+	}
+	if want := []string{"bytes=0-3", "bytes=2-3"}; !slices.Equal(gotRanges, want) {
+		t.Fatalf("request ranges = %v, want %v", gotRanges, want)
+	}
+}
+
+func TestStreamResumesRootedArchiveBodyFromExactUpstreamByte(t *testing.T) {
+	var requestMu sync.Mutex
+	var ranges []string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestRange := req.Header.Get("Range")
+		requestMu.Lock()
+		ranges = append(ranges, requestRange)
+		requestMu.Unlock()
+
+		body := io.ReadCloser(&partialFailureBody{})
+		contentRange := "bytes 10-13/100"
+		contentLength := int64(4)
+		if requestRange == "bytes=12-13" {
+			body = io.NopCloser(strings.NewReader("cd"))
+			contentRange = "bytes 12-13/100"
+			contentLength = 2
+		}
+		return &http.Response{
+			StatusCode:    http.StatusPartialContent,
+			Header:        http.Header{"Content-Range": []string{contentRange}},
+			Body:          body,
+			ContentLength: contentLength,
+			Request:       req,
+		}, nil
+	})}
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary": {
+			DownloadLink: "https://primary.example/archive",
+			Size:         100,
+		},
+	}}
+	manager := newStreamFailoverTestManager(links, client, "primary")
+	entry := streamFailoverEntry("primary")
+	entry.Files["video.mkv"].ByteRange = &[2]int64{10, 13}
+
+	var output bytes.Buffer
+	var metadata *StreamMetadata
+	err := manager.Stream(context.Background(), entry, "video.mkv", 0, 3, &output, func(got *StreamMetadata) error {
+		metadata = got
+		return nil
+	}, "test")
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	requestMu.Lock()
+	gotRanges := append([]string(nil), ranges...)
+	requestMu.Unlock()
+	if output.String() != "abcd" {
+		t.Fatalf("output = %q, want abcd", output.String())
+	}
+	if want := []string{"bytes=10-13", "bytes=12-13"}; !slices.Equal(gotRanges, want) {
+		t.Fatalf("request ranges = %v, want %v", gotRanges, want)
+	}
+	if metadata == nil || metadata.StatusCode != http.StatusOK || metadata.ContentLength != 4 ||
+		metadata.Header.Get("Content-Range") != "" {
+		t.Fatalf("logical metadata = %+v, want full four-byte logical response", metadata)
+	}
+}
+
+func TestStreamBoundsInvalidSameProviderResume(t *testing.T) {
+	var primaryRequests atomic.Int32
+	var fallbackRequests atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestNumber := primaryRequests.Add(1)
+		if req.URL.Hostname() == "fallback.example" {
+			fallbackRequests.Add(1)
+		}
+		body := io.ReadCloser(&partialFailureBody{})
+		contentRange := "bytes 0-3/4"
+		contentLength := int64(4)
+		if requestNumber > 1 {
+			body = io.NopCloser(strings.NewReader("cd"))
+			contentRange = "bytes 0-1/4"
+			contentLength = 2
+		}
+		return &http.Response{
+			StatusCode:    http.StatusPartialContent,
+			Header:        http.Header{"Content-Range": []string{contentRange}},
+			Body:          body,
+			ContentLength: contentLength,
+			Request:       req,
+		}, nil
+	})}
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary":  {DownloadLink: "https://primary.example/file"},
+		"fallback": {DownloadLink: "https://fallback.example/file"},
+	}}
+	manager := newStreamFailoverTestManager(links, client, "primary", "fallback")
+
+	var output bytes.Buffer
+	err := manager.Stream(
+		context.Background(),
+		streamFailoverEntry("primary", "fallback"),
+		"video.mkv",
+		0,
+		3,
+		&output,
+		nil,
+		"test",
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match requested range 2-3") {
+		t.Fatalf("Stream() error = %v, want invalid resumed Content-Range", err)
+	}
+	if output.String() != "ab" || primaryRequests.Load() != 4 || fallbackRequests.Load() != 0 {
+		t.Fatalf(
+			"output/primary/fallback = %q/%d/%d, want ab/4/0",
+			output.String(),
+			primaryRequests.Load(),
+			fallbackRequests.Load(),
+		)
+	}
+}
+
+func TestStreamSinkFailureNeverFallsThroughOrDegradesProvider(t *testing.T) {
+	var primaryRequests atomic.Int32
+	var fallbackRequests atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Hostname() == "fallback.example" {
+			fallbackRequests.Add(1)
+		} else {
+			primaryRequests.Add(1)
+		}
+		return &http.Response{
+			StatusCode:    http.StatusPartialContent,
+			Header:        http.Header{"Content-Range": []string{"bytes 0-3/4"}},
+			Body:          io.NopCloser(strings.NewReader("data")),
+			ContentLength: 4,
+			Request:       req,
+		}, nil
+	})}
+	links := &failoverLinkService{links: map[string]debridTypes.DownloadLink{
+		"primary":  {DownloadLink: "https://primary.example/file"},
+		"fallback": {DownloadLink: "https://fallback.example/file"},
+	}}
+	manager := newStreamFailoverTestManager(links, client, "primary", "fallback")
+	entry := streamFailoverEntry("primary", "fallback")
+	writer := &failingStreamWriter{limit: 2, err: errTestSinkClosed}
+
+	err := manager.Stream(context.Background(), entry, "video.mkv", 0, 3, writer, nil, "test")
+	if !errors.Is(err, errTestSinkClosed) {
+		t.Fatalf("Stream() error = %v, want sink failure", err)
+	}
+	if writer.written != 2 || primaryRequests.Load() != 1 || fallbackRequests.Load() != 0 {
+		t.Fatalf(
+			"written/primary/fallback = %d/%d/%d, want 2/1/0",
+			writer.written,
+			primaryRequests.Load(),
+			fallbackRequests.Load(),
+		)
+	}
+	if manager.streamProviderWeather.candidateDegraded("primary") {
+		t.Fatal("client sink failure degraded the upstream provider")
 	}
 }
 

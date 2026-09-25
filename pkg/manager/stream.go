@@ -493,21 +493,30 @@ func (m *Manager) streamHTTPFromCandidate(
 			}
 		}
 
-		firstWritten, copyErr := writer.Write(firstByte[:firstN])
-		written := int64(firstWritten)
-		if copyErr == nil && firstWritten != firstN {
-			copyErr = io.ErrShortWrite
-		}
-		if copyErr == nil {
-			var copied int64
-			copied, copyErr = io.CopyBuffer(writer, reader, buf)
-			written += copied
-		}
+		transfer := transferStreamBody(
+			writer,
+			reader,
+			firstByte[:firstN],
+			rangePlan.expectedLen,
+			buf,
+		)
 		resp.Body.Close()
-
-		if rangePlan.expectedLen > 0 && written < rangePlan.expectedLen && copyErr == nil {
-			copyErr = io.ErrUnexpectedEOF
+		if transfer.sinkErr == nil && transfer.sourceErr != nil {
+			transfer = m.resumeHTTPStream(
+				ctx,
+				candidateEntry,
+				candidate,
+				filename,
+				rangePlan,
+				writer,
+				buf,
+				transfer,
+				downloadLink,
+				expectedUpstreamTotal,
+				linkRefreshes,
+			)
 		}
+		copyErr := transfer.err()
 
 		if copyErr != nil && copyErr != io.EOF {
 			// Check if this is a retriable error (timeout, network issue)

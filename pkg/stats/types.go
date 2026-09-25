@@ -16,6 +16,7 @@ type Snapshot struct {
 	ActiveStreams    ActiveStreamStats             `json:"active_streams"`
 	CDNTraffic       cdntraffic.Stats              `json:"cdn_traffic"`
 	StreamFailover   manager.StreamFailoverStats   `json:"stream_failover"`
+	StreamSessions   manager.StreamSessionStats    `json:"stream_sessions"`
 	TorrentAdmission manager.TorrentAdmissionStats `json:"torrent_admission"`
 	Storage          StorageStats                  `json:"storage"`
 	Queue            QueueStats                    `json:"queue"`

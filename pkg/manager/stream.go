@@ -356,6 +356,8 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			nextProvider = "active"
 		}
 		m.logger.Debug().
+			Str("event", "stream.provider_failover").
+			Str("outcome", "retrying").
 			Str("failed_provider", providerLabel).
 			Str("next_provider", nextProvider).
 			Str("failure_class", weather.Class).
@@ -617,6 +619,8 @@ func (m *Manager) markStreamProviderReady(original *storage.Entry, filename stri
 	if m.streamProviderWeather != nil && m.streamProviderWeather.recordSuccess(candidate.provider) {
 		m.streamProviderRecoveries.Add(1)
 		m.logger.Info().
+			Str("event", "stream.provider_recovered").
+			Str("outcome", "healthy").
 			Str("provider", candidate.provider).
 			Msg("Stream provider recovered")
 	}

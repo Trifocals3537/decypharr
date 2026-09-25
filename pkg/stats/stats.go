@@ -247,6 +247,7 @@ func (c *Collector) collect(ctx context.Context) (*Snapshot, error) {
 	}
 	snap.CDNTraffic = c.mgr.CDNTrafficStats()
 	snap.StreamFailover = c.mgr.StreamFailoverStats()
+	snap.StreamSessions = c.mgr.StreamSessionStats()
 	snap.TorrentAdmission = c.mgr.TorrentAdmissionStats()
 
 	// --- Storage ---

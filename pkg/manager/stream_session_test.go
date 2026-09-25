@@ -67,6 +67,96 @@ func TestStreamSessionReusesBodyAcrossSequentialReads(t *testing.T) {
 	}
 }
 
+func TestStreamSessionStatsAggregateReuseRecoveryIdleAndClose(t *testing.T) {
+	data := []byte("abcdef")
+	var opens int
+	source := &sessionSource{data: data}
+	source.open = func(_ context.Context, offset int64) (io.ReadCloser, error) {
+		opens++
+		if opens == 1 {
+			return io.NopCloser(bytes.NewReader(data[offset : offset+2])), nil
+		}
+		return io.NopCloser(bytes.NewReader(data[offset:])), nil
+	}
+	manager := &Manager{}
+	session, err := newStreamSessionWithOptions(
+		t.Context(),
+		int64(len(data)),
+		0,
+		source.openAt,
+		func(context.Context, error, int) error {
+			time.Sleep(2 * time.Millisecond)
+			return nil
+		},
+		StreamSessionOptions{MaxAttempts: 2, IdleTimeout: 10 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.metrics = &manager.streamSessionMetrics
+	manager.streamSessionMetrics.sessionsOpened.Add(1)
+
+	for want := byte('a'); want <= 'c'; want++ {
+		buf := make([]byte, 1)
+		if n, readErr := session.Read(buf); readErr != nil || n != 1 || buf[0] != want {
+			t.Fatalf("read %q = %d, %q, %v", want, n, buf, readErr)
+		}
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for manager.StreamSessionStats().IdleCloses == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	stats := manager.StreamSessionStats()
+	if stats.SessionsOpened != 1 || stats.ActiveSessions != 1 || stats.SourceOpens != 2 {
+		t.Fatalf("open stats = %+v", stats)
+	}
+	if stats.ReusedReads != 2 || stats.RecoveryAttempts != 1 || stats.RecoveriesScheduled != 1 || stats.RecoveriesExhausted != 0 {
+		t.Fatalf("recovery stats = %+v", stats)
+	}
+	if stats.IdleCloses != 1 || stats.RecoveryWaitTotalMS == 0 || stats.RecoveryWaitMaxMS == 0 {
+		t.Fatalf("timing stats = %+v", stats)
+	}
+
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stats = manager.StreamSessionStats()
+	if stats.SessionsClosed != 1 || stats.ActiveSessions != 0 {
+		t.Fatalf("closed stats = %+v", stats)
+	}
+}
+
+func TestStreamSessionStatsCountExhaustionWithoutRetry(t *testing.T) {
+	source := &sessionSource{data: []byte("x")}
+	source.open = func(context.Context, int64) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	manager := &Manager{}
+	session, err := newStreamSessionWithOptions(
+		t.Context(),
+		1,
+		0,
+		source.openAt,
+		func(context.Context, error, int) error { return nil },
+		StreamSessionOptions{MaxAttempts: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.metrics = &manager.streamSessionMetrics
+	manager.streamSessionMetrics.sessionsOpened.Add(1)
+	defer session.Close()
+
+	if _, readErr := session.Read(make([]byte, 1)); readErr == nil {
+		t.Fatal("exhausted read succeeded")
+	}
+	stats := manager.StreamSessionStats()
+	if stats.SourceOpens != 1 || stats.RecoveryAttempts != 0 || stats.RecoveriesExhausted != 1 {
+		t.Fatalf("exhaustion stats = %+v", stats)
+	}
+}
+
 func TestStreamSessionSeekReopensAtExactOffset(t *testing.T) {
 	source := &sessionSource{data: []byte("abcdefghij")}
 	session := newTestStreamSession(t, source, 0)
@@ -284,6 +374,9 @@ func TestStreamSessionStallCancelsAndResumes(t *testing.T) {
 		return io.NopCloser(bytes.NewReader(data[offset:])), nil
 	}
 	session := newTestStreamSession(t, source, 0)
+	manager := &Manager{}
+	session.metrics = &manager.streamSessionMetrics
+	manager.streamSessionMetrics.sessionsOpened.Add(1)
 	session.stallTimeout = 10 * time.Millisecond
 	defer session.Close()
 
@@ -293,6 +386,10 @@ func TestStreamSessionStallCancelsAndResumes(t *testing.T) {
 	}
 	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
 		t.Fatalf("open offsets = %#v, want [0 0]", got)
+	}
+	stats := manager.StreamSessionStats()
+	if stats.ReadStalls != 1 || stats.OpenStalls != 0 || stats.RecoveriesScheduled != 1 {
+		t.Fatalf("stall stats = %+v", stats)
 	}
 }
 
@@ -309,6 +406,9 @@ func TestStreamSessionOpenTimeoutCancelsAndResumes(t *testing.T) {
 		return io.NopCloser(bytes.NewReader(data[offset:])), nil
 	}
 	session := newTestStreamSession(t, source, 0)
+	manager := &Manager{}
+	session.metrics = &manager.streamSessionMetrics
+	manager.streamSessionMetrics.sessionsOpened.Add(1)
 	session.stallTimeout = 10 * time.Millisecond
 	defer session.Close()
 
@@ -318,6 +418,10 @@ func TestStreamSessionOpenTimeoutCancelsAndResumes(t *testing.T) {
 	}
 	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
 		t.Fatalf("open offsets = %#v, want [0 0]", got)
+	}
+	stats := manager.StreamSessionStats()
+	if stats.OpenStalls != 1 || stats.ReadStalls != 0 || stats.RecoveriesScheduled != 1 {
+		t.Fatalf("open timeout stats = %+v", stats)
 	}
 }
 

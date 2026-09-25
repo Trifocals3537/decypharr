@@ -250,6 +250,8 @@ func (m *Manager) recordStreamFileCircuitFailure(entry *storage.Entry, filename,
 	if result.NewlyOpen {
 		m.streamFileCircuitOpens.Add(1)
 		m.logger.Info().
+			Str("event", "stream.file_circuit_opened").
+			Str("outcome", "cooldown").
 			Str("hash", entry.InfoHash).
 			Str("file", filename).
 			Str("provider", provider).
@@ -277,6 +279,8 @@ func (m *Manager) markStreamFileCircuitSuccess(entry *storage.Entry, filename, p
 	if m.streamFileCircuits.recordSuccess(streamFileCircuitKey(entry, filename, provider)) {
 		m.streamFileCircuitRecovers.Add(1)
 		m.logger.Info().
+			Str("event", "stream.file_circuit_recovered").
+			Str("outcome", "healthy").
 			Str("hash", entry.InfoHash).
 			Str("file", filename).
 			Str("provider", provider).

@@ -241,4 +241,9 @@ func TestProviderWeatherLogsOneWarningPerEpisodeWithoutFileIdentity(t *testing.T
 	if strings.Contains(logs, "private-") {
 		t.Fatalf("provider warning exposed file identity: %s", logs)
 	}
+	for _, want := range []string{`"event":"stream.provider_degraded"`, `"outcome":"cooldown"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("provider warning missing %s: %s", want, logs)
+		}
+	}
 }

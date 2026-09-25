@@ -72,6 +72,7 @@ type streamSession struct {
 	idleTimeout  time.Duration
 	stallTimeout time.Duration
 	maxResumes   int
+	metrics      *streamSessionMetrics
 
 	mu         sync.Mutex
 	pos        int64
@@ -181,6 +182,9 @@ func (s *streamSession) Read(p []byte) (int, error) {
 		p = p[:int(remaining)]
 	}
 	s.stopIdleLocked()
+	if s.body != nil && s.metrics != nil {
+		s.metrics.reusedReads.Add(1)
+	}
 
 	for attempt := 0; ; attempt++ {
 		if err := s.ctx.Err(); err != nil {
@@ -198,6 +202,9 @@ func (s *streamSession) Read(p []byte) (int, error) {
 		stallState := s.armStallLocked()
 		n, err := s.body.Read(p)
 		stalled := s.finishStallLocked(stallState)
+		if stalled && s.metrics != nil {
+			s.metrics.readStalls.Add(1)
+		}
 		if n > len(p) {
 			s.closeBodyLocked()
 			return 0, fmt.Errorf("stream body returned %d bytes for a %d-byte read", n, len(p))
@@ -314,10 +321,16 @@ func (s *streamSession) Close() error {
 	if onClose != nil {
 		onClose()
 	}
+	if s.metrics != nil {
+		s.metrics.sessionsClosed.Add(1)
+	}
 	return nil
 }
 
 func (s *streamSession) connectLocked() error {
+	if s.metrics != nil {
+		s.metrics.sourceOpens.Add(1)
+	}
 	bodyCtx, cancel := context.WithCancel(s.ctx)
 	state := &streamStallState{}
 	var timer *time.Timer
@@ -333,6 +346,9 @@ func (s *streamSession) connectLocked() error {
 		timedOut = !timer.Stop() || state.expired.Load()
 	}
 	if timedOut {
+		if s.metrics != nil {
+			s.metrics.openStalls.Add(1)
+		}
 		if body != nil {
 			_ = body.Close()
 		}
@@ -360,6 +376,9 @@ func (s *streamSession) recoverLocked(err error, attempt int) error {
 		return contextErr
 	}
 	if attempt >= s.maxResumes {
+		if s.metrics != nil {
+			s.metrics.recoveriesExhausted.Add(1)
+		}
 		return &StreamSessionExhaustedError{
 			Err:      err,
 			Attempts: attempt + 1,
@@ -370,7 +389,18 @@ func (s *streamSession) recoverLocked(err error, attempt int) error {
 	// Keep read, seek, and recovery state serialized. Close cancels s.ctx before
 	// taking this lock, so it can still interrupt a backoff immediately without
 	// allowing a concurrent seek to change this read's resume offset.
-	return s.recover(s.ctx, err, attempt)
+	started := time.Now()
+	if s.metrics != nil {
+		s.metrics.recoveryAttempts.Add(1)
+	}
+	recoveryErr := s.recover(s.ctx, err, attempt)
+	if s.metrics != nil {
+		if recoveryErr == nil {
+			s.metrics.observeRecoveryWait(time.Since(started))
+			s.metrics.recoveriesScheduled.Add(1)
+		}
+	}
+	return recoveryErr
 }
 
 func (s *streamSession) closeBodyLocked() {
@@ -410,6 +440,9 @@ func (s *streamSession) idleFired(generation uint64) {
 		return
 	}
 	s.idle = nil
+	if s.body != nil && s.metrics != nil {
+		s.metrics.idleCloses.Add(1)
+	}
 	s.closeBodyLocked()
 }
 
@@ -579,12 +612,18 @@ func (m *Manager) openStreamUntracked(
 		return nil, fmt.Errorf("file %s has invalid size %d", filename, file.Size)
 	}
 
-	return newStreamSessionWithOptions(ctx, file.Size, offset, func(
+	session, err := newStreamSessionWithOptions(ctx, file.Size, offset, func(
 		bodyCtx context.Context,
 		start int64,
 	) (io.ReadCloser, error) {
 		return m.openManagerStreamBody(bodyCtx, entry, filename, start, file.Size, client)
 	}, nil, options)
+	if err != nil {
+		return nil, err
+	}
+	session.metrics = &m.streamSessionMetrics
+	m.streamSessionMetrics.sessionsOpened.Add(1)
+	return session, nil
 }
 
 func (m *Manager) openManagerStreamBody(

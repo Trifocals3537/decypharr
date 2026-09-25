@@ -845,6 +845,10 @@ func TestStreamResumesInterruptedBodyFromExactNextByte(t *testing.T) {
 	if want := []string{"bytes=0-3", "bytes=2-3"}; !slices.Equal(gotRanges, want) {
 		t.Fatalf("request ranges = %v, want %v", gotRanges, want)
 	}
+	sessionStats := manager.StreamSessionStats()
+	if sessionStats.HTTPResumeAttempts != 1 || sessionStats.HTTPResumeSuccesses != 1 {
+		t.Fatalf("HTTP resume stats = %+v, want one successful resume", sessionStats)
+	}
 }
 
 func TestStreamHandsOffUnreadSuffixToIdenticalHashProvider(t *testing.T) {
@@ -920,6 +924,10 @@ func TestStreamHandsOffUnreadSuffixToIdenticalHashProvider(t *testing.T) {
 		stats.Attempts != 1 || stats.Successes != 1 ||
 		stats.FileCircuitOpens != 1 || stats.OpenFileCircuits != 1 {
 		t.Fatalf("stream failover stats = %+v, want one successful handoff with failed primary isolated", stats)
+	}
+	sessionStats := manager.StreamSessionStats()
+	if sessionStats.HTTPResumeAttempts != 2 || sessionStats.HTTPResumeSuccesses != 1 {
+		t.Fatalf("HTTP resume stats = %+v, want failed primary resume and successful handoff resume", sessionStats)
 	}
 	candidates := manager.streamCandidates(entry, "video.mkv")
 	if len(candidates) != 2 || candidates[0].provider != "fallback" || candidates[1].provider != "primary" {

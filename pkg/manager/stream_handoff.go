@@ -62,8 +62,10 @@ func (m *Manager) handoffHTTPStream(
 				failureClass = "unknown"
 			}
 			m.logger.Debug().
+				Str("event", "stream.handoff").
+				Str("outcome", "link_failed").
 				Str("failed_provider", failedCandidate.provider).
-				Str("handoff_provider", candidate.provider).
+				Str("provider", candidate.provider).
 				Str("file", filename).
 				Str("failure_class", failureClass).
 				Msg("Committed stream handoff could not obtain alternate link")
@@ -74,17 +76,8 @@ func (m *Manager) handoffHTTPStream(
 		if expectedUpstreamTotal <= 0 && !rangePlan.rooted {
 			expectedUpstreamTotal = rangePlan.logicalSize
 		}
-		resumeStart := rangePlan.upstreamStart + current.written
 		m.streamHandoffAttempts.Add(1)
 		m.streamFailoverAttempts.Add(1)
-		m.logger.Info().
-			Str("failed_provider", failedCandidate.provider).
-			Str("handoff_provider", candidate.provider).
-			Str("file", filename).
-			Int64("resume_start", resumeStart).
-			Int64("resume_end", rangePlan.upstreamEnd).
-			Int64("bytes_delivered", current.written).
-			Msg("Handing off unread stream suffix to identical-hash provider")
 
 		current = m.resumeHTTPStream(
 			candidateCtx,
@@ -105,6 +98,9 @@ func (m *Manager) handoffHTTPStream(
 			m.markStreamFileCircuitSuccess(original, filename, candidate.provider)
 			m.markStreamProviderReady(original, filename, candidate)
 			m.logger.Info().
+				Str("event", "stream.handoff").
+				Str("outcome", "succeeded").
+				Str("failed_provider", failedCandidate.provider).
 				Str("provider", candidate.provider).
 				Str("file", filename).
 				Int64("bytes_delivered", current.written).
@@ -126,6 +122,8 @@ func (m *Manager) handoffHTTPStream(
 			failureClass = "unknown"
 		}
 		m.logger.Debug().
+			Str("event", "stream.handoff").
+			Str("outcome", "failed").
 			Str("provider", candidate.provider).
 			Str("file", filename).
 			Int64("bytes_delivered", current.written).

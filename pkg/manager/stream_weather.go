@@ -67,6 +67,8 @@ func (m *Manager) recordStreamProviderFailure(provider, fileKey string, err erro
 	if result.NewlyDegraded {
 		m.streamProviderDegraded.Add(1)
 		m.logger.Warn().
+			Str("event", "stream.provider_degraded").
+			Str("outcome", "cooldown").
 			Str("provider", provider).
 			Str("failure_class", result.Class).
 			Int("distinct_files", result.DistinctFiles).

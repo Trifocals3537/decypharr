@@ -85,7 +85,7 @@ func TestRecordTerminalReadFailureMarksDirtyRateLimitsAndRedactsError(t *testing
 	if got := strings.Count(output, "Terminal media read failure"); got != 1 {
 		t.Fatalf("log count = %d, want 1; output=%s", got, output)
 	}
-	for _, want := range []string{`"failure_class":"content_missing"`, `"provider":"usenet"`, `"health_dirty_persisted":true`} {
+	for _, want := range []string{`"event":"stream.read_terminal_failure"`, `"outcome":"failed"`, `"failure_class":"content_missing"`, `"provider":"usenet"`, `"health_dirty_persisted":true`} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("log missing %s: %s", want, output)
 		}

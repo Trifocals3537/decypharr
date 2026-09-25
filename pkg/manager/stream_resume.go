@@ -28,19 +28,21 @@ func (m *Manager) resumeHTTPStream(
 	downloadLink types.DownloadLink,
 	expectedUpstreamTotal int64,
 	linkRefreshes int,
+	maxAttempts int,
 ) streamTransferResult {
-	maxResumes := m.streamStatusRetries()
-	if maxResumes <= 0 || !retryableCommittedSourceError(current.sourceErr) {
+	if maxAttempts <= 0 {
 		return current
 	}
 
-	for attempt := 1; attempt <= maxResumes; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			current.sourceErr = ctxErr
 			return current
 		}
-		if current.sinkErr != nil || current.written >= rangePlan.expectedLen ||
-			!retryableCommittedSourceError(current.sourceErr) {
+		if current.sinkErr != nil || current.written >= rangePlan.expectedLen {
+			return current
+		}
+		if attempt > 1 && !retryableCommittedSourceError(current.sourceErr) {
 			return current
 		}
 

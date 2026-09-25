@@ -38,6 +38,8 @@ type StreamFailoverStats struct {
 	ProviderDeferrals    uint64 `json:"provider_deferrals"`
 	ProviderDegradations uint64 `json:"provider_degradations"`
 	ProviderRecoveries   uint64 `json:"provider_recoveries"`
+	CommittedHandoffs    uint64 `json:"committed_handoffs"`
+	HandoffSuccesses     uint64 `json:"handoff_successes"`
 }
 
 // StreamFailoverStats returns a lock-free snapshot of provider failover.
@@ -53,6 +55,8 @@ func (m *Manager) StreamFailoverStats() StreamFailoverStats {
 		ProviderDeferrals:    m.streamProviderDeferrals.Load(),
 		ProviderDegradations: m.streamProviderDegraded.Load(),
 		ProviderRecoveries:   m.streamProviderRecoveries.Load(),
+		CommittedHandoffs:    m.streamHandoffAttempts.Load(),
+		HandoffSuccesses:     m.streamHandoffSuccesses.Load(),
 	}
 }
 

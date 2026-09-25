@@ -134,6 +134,8 @@ type Manager struct {
 	streamProviderDeferrals   atomic.Uint64
 	streamProviderDegraded    atomic.Uint64
 	streamProviderRecoveries  atomic.Uint64
+	streamHandoffAttempts     atomic.Uint64
+	streamHandoffSuccesses    atomic.Uint64
 
 	// Provider-scoped content-policy cooldowns prevent recurring Arr grabs
 	// from re-hitting a provider while preserving fallback to other providers.

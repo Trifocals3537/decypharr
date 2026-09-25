@@ -48,15 +48,7 @@ func (m *Manager) resumeHTTPStream(
 
 		remaining := rangePlan.expectedLen - current.written
 		resumeStart := rangePlan.upstreamStart + current.written
-		m.logger.Debug().
-			Str("provider", candidate.provider).
-			Str("file", filename).
-			Int("resume_attempt", attempt).
-			Int64("resume_start", resumeStart).
-			Int64("resume_end", rangePlan.upstreamEnd).
-			Int64("bytes_delivered", current.written).
-			Msg("Resuming interrupted stream from confirmed byte offset")
-
+		m.streamSessionMetrics.httpResumeAttempts.Add(1)
 		resp, requestErr := m.doRequest(
 			ctx,
 			downloadLink,
@@ -135,12 +127,7 @@ func (m *Manager) resumeHTTPStream(
 		current.sourceErr = resumed.sourceErr
 		current.sinkErr = resumed.sinkErr
 		if current.err() == nil {
-			m.logger.Debug().
-				Str("provider", candidate.provider).
-				Str("file", filename).
-				Int("resume_attempt", attempt).
-				Int64("bytes_delivered", current.written).
-				Msg("Interrupted stream resumed successfully")
+			m.streamSessionMetrics.httpResumeSuccesses.Add(1)
 			return current
 		}
 	}

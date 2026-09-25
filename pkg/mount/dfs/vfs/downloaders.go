@@ -666,9 +666,6 @@ func (dls *Downloaders) countErrors(n int64, err error) {
 		}
 		dls.errorCount++
 		dls.lastErr = err
-		if !customerror.IsSilentError(err) {
-			dls.item.logger.Debug().Err(err).Int("count", dls.errorCount).Msg("download error")
-		}
 		// Only a genuinely permanent provider failure (article missing, auth,
 		// payment/permission) fast-trips the breaker — retrying those 10× is
 		// pointless. Transient/ambiguous errors (timeout, stall, "stream

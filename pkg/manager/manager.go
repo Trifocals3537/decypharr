@@ -140,6 +140,7 @@ type Manager struct {
 	streamFileCircuitOpens    atomic.Uint64
 	streamFileCircuitDefers   atomic.Uint64
 	streamFileCircuitRecovers atomic.Uint64
+	streamSessionMetrics      streamSessionMetrics
 
 	// Provider-scoped content-policy cooldowns prevent recurring Arr grabs
 	// from re-hitting a provider while preserving fallback to other providers.

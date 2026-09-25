@@ -113,6 +113,8 @@ func (m *Manager) RecordTerminalReadFailure(entry *storage.Entry, filename strin
 		provider = "usenet"
 	}
 	m.logger.Warn().
+		Str("event", "stream.read_terminal_failure").
+		Str("outcome", "failed").
 		Str("entry", entry.Name).
 		Str("hash", entry.InfoHash).
 		Str("file", filename).

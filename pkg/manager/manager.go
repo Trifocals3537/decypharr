@@ -127,6 +127,7 @@ type Manager struct {
 	// exposed through the secret-free stats snapshot.
 	streamProviderPreferences *xsync.Map[string, streamProviderPreference]
 	streamProviderWeather     *streamProviderWeather
+	streamFileCircuits        *streamFileCircuitBreaker
 	streamFailoverAttempts    atomic.Uint64
 	streamFailoverSuccesses   atomic.Uint64
 	streamFailoverExhausted   atomic.Uint64
@@ -136,6 +137,9 @@ type Manager struct {
 	streamProviderRecoveries  atomic.Uint64
 	streamHandoffAttempts     atomic.Uint64
 	streamHandoffSuccesses    atomic.Uint64
+	streamFileCircuitOpens    atomic.Uint64
+	streamFileCircuitDefers   atomic.Uint64
+	streamFileCircuitRecovers atomic.Uint64
 
 	// Provider-scoped content-policy cooldowns prevent recurring Arr grabs
 	// from re-hitting a provider while preserving fallback to other providers.
@@ -238,6 +242,7 @@ func New() *Manager {
 		activeStreams:             xsync.NewMap[string, *ActiveStream](),
 		streamProviderPreferences: xsync.NewMap[string, streamProviderPreference](),
 		streamProviderWeather:     newStreamProviderWeather(),
+		streamFileCircuits:        newStreamFileCircuitBreaker(),
 		processingEntries:         xsync.NewMap[string, struct{}](),
 		submissionRejections:      newSubmissionRejectionCache(defaultSubmissionRejectionTTL, defaultSubmissionRejectionCapacity),
 		entryLifecycle:            entryLifecycle,

@@ -241,9 +241,53 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	candidates = streamAttemptCandidates(candidates, torrent.ActiveProvider)
 
 	failures := make([]error, 0, len(candidates))
+	fileCircuitDecisions := make(map[string]bool, len(candidates))
+	fileCircuitProbeKeys := make(map[string]string, len(candidates))
+	fileCircuitFailures := make(map[string]bool, len(candidates))
+	defer func() {
+		if m.streamFileCircuits == nil {
+			return
+		}
+		for _, key := range fileCircuitProbeKeys {
+			m.streamFileCircuits.releaseProbe(key)
+		}
+	}()
+	recordFileCircuitFailure := func(provider string, failure error) {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		if fileCircuitFailures[providerKey] {
+			return
+		}
+		if result := m.recordStreamFileCircuitFailure(torrent, filename, provider, failure); result.NewlyOpen {
+			fileCircuitFailures[providerKey] = true
+		}
+	}
 	for index, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return retry.Unrecoverable(err)
+		}
+		provider := candidate.provider
+		if provider == "" {
+			provider = torrent.ActiveProvider
+		}
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		allowed, decided := fileCircuitDecisions[providerKey]
+		if !decided {
+			circuitKey, probe, circuitAllowed, retryAfter := m.beginStreamFileCircuitAttempt(torrent, filename, provider)
+			allowed = circuitAllowed
+			fileCircuitDecisions[providerKey] = circuitAllowed
+			if probe {
+				fileCircuitProbeKeys[providerKey] = circuitKey
+			}
+			if !circuitAllowed {
+				m.streamFileCircuitDefers.Add(1)
+				failures = append(failures, fmt.Errorf("provider %s: %w", provider, StreamError{
+					Err:       streamFileCircuitOpenError{retryAfter: retryAfter},
+					Retryable: true,
+				}))
+			}
+		}
+		if !allowed {
+			continue
 		}
 		weatherProbe := false
 		if m.streamProviderWeather != nil {
@@ -289,18 +333,19 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		provider := candidate.provider
-		if provider == "" {
-			provider = "active"
+		providerLabel := provider
+		if providerLabel == "" {
+			providerLabel = "active"
 		}
-		weather := m.recordStreamProviderFailure(provider, streamPreferenceKey(torrent, filename), err)
+		recordFileCircuitFailure(provider, err)
+		weather := m.recordStreamProviderFailure(providerLabel, streamPreferenceKey(torrent, filename), err)
 		if !hasFallback && len(failures) == 0 {
 			// Preserve the exact historical error type/semantics when an entry
 			// has no alternate placement.
 			return err
 		}
 
-		failures = append(failures, fmt.Errorf("provider %s: %w", provider, err))
+		failures = append(failures, fmt.Errorf("provider %s: %w", providerLabel, err))
 		if !hasFallback {
 			break
 		}
@@ -311,7 +356,7 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			nextProvider = "active"
 		}
 		m.logger.Debug().
-			Str("failed_provider", provider).
+			Str("failed_provider", providerLabel).
 			Str("next_provider", nextProvider).
 			Str("failure_class", weather.Class).
 			Int("distinct_files", weather.DistinctFiles).
@@ -520,8 +565,16 @@ func (m *Manager) streamHTTPFromCandidate(
 				m.streamStatusRetries(),
 			)
 		}
+		if transfer.sinkErr == nil && transfer.sourceErr != nil && transfer.written < rangePlan.expectedLen {
+			m.recordStreamFileCircuitFailure(original, filename, candidate.provider, StreamError{
+				Err:       transfer.sourceErr,
+				Retryable: true,
+			})
+		}
+		handoffAttempted := false
 		if transfer.sinkErr == nil && transfer.sourceErr != nil &&
 			transfer.written < rangePlan.expectedLen && len(fallbackCandidates) > 0 {
+			handoffAttempted = true
 			transfer = m.handoffHTTPStream(
 				ctx,
 				original,
@@ -549,6 +602,9 @@ func (m *Manager) streamHTTPFromCandidate(
 			}
 			// Unknown error - don't retry to avoid infinite loops
 			return true, retry.Unrecoverable(copyErr)
+		}
+		if !handoffAttempted && copyErr == nil && transfer.written == rangePlan.expectedLen {
+			m.markStreamFileCircuitSuccess(original, filename, candidate.provider)
 		}
 		return true, nil
 	}

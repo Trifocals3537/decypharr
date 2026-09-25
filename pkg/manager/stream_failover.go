@@ -31,33 +31,46 @@ type streamCandidate struct {
 // Successes counts alternate providers that became ready before response
 // commitment; Exhausted counts requests that tried every eligible placement.
 type StreamFailoverStats struct {
-	Attempts             uint64 `json:"attempts"`
-	Successes            uint64 `json:"successes"`
-	Exhausted            uint64 `json:"exhausted"`
-	PreferredHits        uint64 `json:"preferred_hits"`
-	ProviderDeferrals    uint64 `json:"provider_deferrals"`
-	ProviderDegradations uint64 `json:"provider_degradations"`
-	ProviderRecoveries   uint64 `json:"provider_recoveries"`
-	CommittedHandoffs    uint64 `json:"committed_handoffs"`
-	HandoffSuccesses     uint64 `json:"handoff_successes"`
+	Attempts              uint64 `json:"attempts"`
+	Successes             uint64 `json:"successes"`
+	Exhausted             uint64 `json:"exhausted"`
+	PreferredHits         uint64 `json:"preferred_hits"`
+	ProviderDeferrals     uint64 `json:"provider_deferrals"`
+	ProviderDegradations  uint64 `json:"provider_degradations"`
+	ProviderRecoveries    uint64 `json:"provider_recoveries"`
+	CommittedHandoffs     uint64 `json:"committed_handoffs"`
+	HandoffSuccesses      uint64 `json:"handoff_successes"`
+	FileCircuitOpens      uint64 `json:"file_circuit_opens"`
+	FileCircuitDeferrals  uint64 `json:"file_circuit_deferrals"`
+	FileCircuitRecoveries uint64 `json:"file_circuit_recoveries"`
+	OpenFileCircuits      int    `json:"open_file_circuits"`
 }
 
-// StreamFailoverStats returns a lock-free snapshot of provider failover.
+// StreamFailoverStats returns a secret-free snapshot of provider failover.
+// Counters are lock-free; the bounded open-circuit gauge takes its small
+// registry lock for a consistent current count.
 func (m *Manager) StreamFailoverStats() StreamFailoverStats {
 	if m == nil {
 		return StreamFailoverStats{}
 	}
-	return StreamFailoverStats{
-		Attempts:             m.streamFailoverAttempts.Load(),
-		Successes:            m.streamFailoverSuccesses.Load(),
-		Exhausted:            m.streamFailoverExhausted.Load(),
-		PreferredHits:        m.streamPreferredHits.Load(),
-		ProviderDeferrals:    m.streamProviderDeferrals.Load(),
-		ProviderDegradations: m.streamProviderDegraded.Load(),
-		ProviderRecoveries:   m.streamProviderRecoveries.Load(),
-		CommittedHandoffs:    m.streamHandoffAttempts.Load(),
-		HandoffSuccesses:     m.streamHandoffSuccesses.Load(),
+	stats := StreamFailoverStats{
+		Attempts:              m.streamFailoverAttempts.Load(),
+		Successes:             m.streamFailoverSuccesses.Load(),
+		Exhausted:             m.streamFailoverExhausted.Load(),
+		PreferredHits:         m.streamPreferredHits.Load(),
+		ProviderDeferrals:     m.streamProviderDeferrals.Load(),
+		ProviderDegradations:  m.streamProviderDegraded.Load(),
+		ProviderRecoveries:    m.streamProviderRecoveries.Load(),
+		CommittedHandoffs:     m.streamHandoffAttempts.Load(),
+		HandoffSuccesses:      m.streamHandoffSuccesses.Load(),
+		FileCircuitOpens:      m.streamFileCircuitOpens.Load(),
+		FileCircuitDeferrals:  m.streamFileCircuitDefers.Load(),
+		FileCircuitRecoveries: m.streamFileCircuitRecovers.Load(),
 	}
+	if m.streamFileCircuits != nil {
+		stats.OpenFileCircuits = m.streamFileCircuits.openCount()
+	}
+	return stats
 }
 
 func (m *Manager) streamCandidates(entry *storage.Entry, filename string) []streamCandidate {
@@ -133,7 +146,8 @@ func (m *Manager) streamCandidates(entry *storage.Entry, filename string) []stre
 			preferred: preferred != "" && strings.EqualFold(provider, preferred),
 		})
 	}
-	return m.orderStreamCandidatesByWeather(candidates)
+	candidates = m.orderStreamCandidatesByWeather(candidates)
+	return m.orderStreamCandidatesByFileCircuit(entry, filename, candidates)
 }
 
 func (candidate streamCandidate) entryForAttempt(original *storage.Entry, filename string) *storage.Entry {

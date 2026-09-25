@@ -102,6 +102,7 @@ func newStreamFailoverTestManager(
 		activeStreams:             xsync.NewMap[string, *ActiveStream](),
 		streamProviderPreferences: xsync.NewMap[string, streamProviderPreference](),
 		streamProviderWeather:     newStreamProviderWeather(),
+		streamFileCircuits:        newStreamFileCircuitBreaker(),
 	}
 }
 
@@ -916,8 +917,13 @@ func TestStreamHandsOffUnreadSuffixToIdenticalHashProvider(t *testing.T) {
 	}
 	stats := manager.StreamFailoverStats()
 	if stats.CommittedHandoffs != 1 || stats.HandoffSuccesses != 1 ||
-		stats.Attempts != 1 || stats.Successes != 1 {
-		t.Fatalf("stream failover stats = %+v, want one successful committed handoff", stats)
+		stats.Attempts != 1 || stats.Successes != 1 ||
+		stats.FileCircuitOpens != 1 || stats.OpenFileCircuits != 1 {
+		t.Fatalf("stream failover stats = %+v, want one successful handoff with failed primary isolated", stats)
+	}
+	candidates := manager.streamCandidates(entry, "video.mkv")
+	if len(candidates) != 2 || candidates[0].provider != "fallback" || candidates[1].provider != "primary" {
+		t.Fatalf("post-handoff candidates = %+v, want fallback before isolated primary", candidates)
 	}
 }
 
@@ -1176,6 +1182,9 @@ func TestStreamSinkFailureNeverFallsThroughOrDegradesProvider(t *testing.T) {
 	}
 	if manager.streamProviderWeather.candidateDegraded("primary") {
 		t.Fatal("client sink failure degraded the upstream provider")
+	}
+	if stats := manager.StreamFailoverStats(); stats.FileCircuitOpens != 0 || stats.OpenFileCircuits != 0 {
+		t.Fatalf("client sink failure opened file/provider circuit: %+v", stats)
 	}
 }
 

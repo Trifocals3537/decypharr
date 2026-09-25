@@ -1,12 +1,15 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
-	"sync/atomic"
+	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/customerror"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
@@ -444,67 +447,102 @@ func TestCacheItemReleaseStopsDownloadersOnZeroOpens(t *testing.T) {
 	}
 }
 
-func TestNoProgressWatchdogCancelsStalledAttempt(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+type dfsTestStream struct {
+	reader *bytes.Reader
+	size   int64
+	closed bool
+}
+
+func newDFSTestStream(data []byte, offset int64) *dfsTestStream {
+	reader := bytes.NewReader(data)
+	_, _ = reader.Seek(offset, io.SeekStart)
+	return &dfsTestStream{reader: reader, size: int64(len(data))}
+}
+
+func (s *dfsTestStream) Read(p []byte) (int, error)         { return s.reader.Read(p) }
+func (s *dfsTestStream) Seek(o int64, w int) (int64, error) { return s.reader.Seek(o, w) }
+func (s *dfsTestStream) Size() int64                        { return s.size }
+func (s *dfsTestStream) Prime() error                       { return nil }
+func (s *dfsTestStream) Close() error {
+	s.closed = true
+	return nil
+}
+
+func TestDownloaderReusesPersistentStreamAcrossChunks(t *testing.T) {
+	data := []byte("abcdefgh")
+	cache := newQuotaTestCache(t, t.TempDir(), 0)
+	item := newQuotaTestItem(t, cache, "entry/video.mkv", int64(len(data)))
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	dls := &Downloaders{ctx: ctx, cancel: cancel, item: item}
+	var opened []*dfsTestStream
+	dls.openStream = func(_ context.Context, offset int64) (manager.StreamReader, error) {
+		stream := newDFSTestStream(data, offset)
+		opened = append(opened, stream)
+		return stream, nil
+	}
+	dl := schedulerTestDownloader(dls, 0, int64(len(data)), false)
 
-	var lastProgressNanos atomic.Int64
-	lastProgressNanos.Store(time.Now().Add(-300 * time.Millisecond).UnixNano())
-
-	var timedOut atomic.Bool
-	stop := startNoProgressWatchdog(
-		ctx,
-		120*time.Millisecond,
-		10*time.Millisecond,
-		&lastProgressNanos,
-		cancel,
-		&timedOut,
-	)
-	defer stop()
-
-	select {
-	case <-ctx.Done():
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("expected context cancellation from no-progress watchdog")
+	if written, err := dl.streamChunk(0, 4); err != nil || written != 4 {
+		t.Fatalf("first chunk = %d, %v", written, err)
+	}
+	if written, err := dl.streamChunk(4, 8); err != nil || written != 4 {
+		t.Fatalf("second chunk = %d, %v", written, err)
+	}
+	if len(opened) != 1 {
+		t.Fatalf("stream opens = %d, want 1", len(opened))
 	}
 
-	if !timedOut.Load() {
-		t.Fatal("expected watchdog timeout flag to be set")
+	got := make([]byte, len(data))
+	if n, err := item.buf.ReadAt(got, 0); err != nil || n != len(got) || !bytes.Equal(got, data) {
+		t.Fatalf("cached data = %d, %q, %v", n, got, err)
+	}
+	dl.close()
+	if !opened[0].closed {
+		t.Fatal("persistent stream was not closed with downloader")
 	}
 }
 
-func TestNoProgressWatchdogKeepsAliveWithProgress(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+func TestDownloaderRepositionsPersistentStreamForDisjointRange(t *testing.T) {
+	data := []byte("abcdefgh")
+	cache := newQuotaTestCache(t, t.TempDir(), 0)
+	item := newQuotaTestItem(t, cache, "entry/video.mkv", int64(len(data)))
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-
-	var lastProgressNanos atomic.Int64
-	lastProgressNanos.Store(time.Now().UnixNano())
-
-	var timedOut atomic.Bool
-	stop := startNoProgressWatchdog(
-		ctx,
-		160*time.Millisecond,
-		20*time.Millisecond,
-		&lastProgressNanos,
-		cancel,
-		&timedOut,
-	)
-	defer stop()
-
-	deadline := time.Now().Add(300 * time.Millisecond)
-	ticker := time.NewTicker(30 * time.Millisecond)
-	defer ticker.Stop()
-
-	for time.Now().Before(deadline) {
-		select {
-		case <-ticker.C:
-			lastProgressNanos.Store(time.Now().UnixNano())
-		case <-ctx.Done():
-			t.Fatal("unexpected watchdog cancellation while progress was advancing")
-		}
+	dls := &Downloaders{ctx: ctx, cancel: cancel, item: item}
+	openCount := 0
+	dls.openStream = func(_ context.Context, offset int64) (manager.StreamReader, error) {
+		openCount++
+		return newDFSTestStream(data, offset), nil
 	}
+	dl := schedulerTestDownloader(dls, 4, int64(len(data)), true)
+	defer dl.close()
 
-	if timedOut.Load() {
-		t.Fatal("watchdog timed out despite ongoing progress")
+	if _, err := dl.streamChunk(4, 8); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dl.streamChunk(0, 4); err != nil {
+		t.Fatal(err)
+	}
+	if openCount != 1 {
+		t.Fatalf("stream opens = %d, want 1", openCount)
+	}
+}
+
+func TestDownloaderRejectsTruncatedPersistentStream(t *testing.T) {
+	cache := newQuotaTestCache(t, t.TempDir(), 0)
+	item := newQuotaTestItem(t, cache, "entry/video.mkv", 4)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	dls := &Downloaders{ctx: ctx, cancel: cancel, item: item}
+	dls.openStream = func(_ context.Context, offset int64) (manager.StreamReader, error) {
+		return newDFSTestStream([]byte("ab"), offset), nil
+	}
+	dl := schedulerTestDownloader(dls, 0, 4, false)
+	defer dl.close()
+
+	written, err := dl.streamChunk(0, 4)
+	if written != 2 || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated chunk = %d, %v", written, err)
 	}
 }

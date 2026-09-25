@@ -33,6 +33,32 @@ type StreamReader interface {
 	Prime() error
 }
 
+// StreamSessionOptions bounds one logical stream session. Zero values select
+// the production defaults. MaxAttempts includes the initial connection.
+type StreamSessionOptions struct {
+	MaxAttempts     int
+	IdleTimeout     time.Duration
+	StallTimeout    time.Duration
+	ResumeBaseDelay time.Duration
+}
+
+// StreamSessionExhaustedError reports a bounded terminal session failure.
+// It deliberately retains the provider error for errors.Is/errors.As while
+// allowing callers to avoid multiplying an already-consumed retry budget.
+type StreamSessionExhaustedError struct {
+	Err      error
+	Attempts int
+	Offset   int64
+}
+
+func (e *StreamSessionExhaustedError) Error() string {
+	return fmt.Sprintf("stream session exhausted %d attempt(s) at offset %d: %v", e.Attempts, e.Offset, e.Err)
+}
+
+func (e *StreamSessionExhaustedError) Unwrap() error {
+	return e.Err
+}
+
 type streamOpenFunc func(context.Context, int64) (io.ReadCloser, error)
 type streamRecoverFunc func(context.Context, error, int) error
 
@@ -45,6 +71,7 @@ type streamSession struct {
 
 	idleTimeout  time.Duration
 	stallTimeout time.Duration
+	maxResumes   int
 
 	mu         sync.Mutex
 	pos        int64
@@ -70,6 +97,17 @@ func newStreamSession(
 	open streamOpenFunc,
 	recover streamRecoverFunc,
 ) (*streamSession, error) {
+	return newStreamSessionWithOptions(ctx, size, offset, open, recover, StreamSessionOptions{})
+}
+
+func newStreamSessionWithOptions(
+	ctx context.Context,
+	size int64,
+	offset int64,
+	open streamOpenFunc,
+	recover streamRecoverFunc,
+	options StreamSessionOptions,
+) (*streamSession, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("invalid stream size %d", size)
 	}
@@ -82,8 +120,26 @@ func newStreamSession(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	idleTimeout := options.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultStreamSessionIdleTimeout
+	}
+	stallTimeout := options.StallTimeout
+	if stallTimeout <= 0 {
+		stallTimeout = defaultStreamSessionStallTimeout
+	}
+	maxResumes := streamSessionMaxResumes
+	if options.MaxAttempts > 0 {
+		maxResumes = options.MaxAttempts - 1
+	}
+	resumeBaseDelay := options.ResumeBaseDelay
+	if resumeBaseDelay <= 0 {
+		resumeBaseDelay = streamSessionResumeBaseDelay
+	}
 	if recover == nil {
-		recover = recoverStreamSession
+		recover = func(ctx context.Context, err error, attempt int) error {
+			return recoverStreamSessionWithDelay(ctx, err, attempt, resumeBaseDelay)
+		}
 	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	session := &streamSession{
@@ -93,8 +149,9 @@ func newStreamSession(
 		recover:      recover,
 		size:         size,
 		pos:          offset,
-		idleTimeout:  defaultStreamSessionIdleTimeout,
-		stallTimeout: defaultStreamSessionStallTimeout,
+		idleTimeout:  idleTimeout,
+		stallTimeout: stallTimeout,
+		maxResumes:   maxResumes,
 	}
 	return session, nil
 }
@@ -302,19 +359,18 @@ func (s *streamSession) recoverLocked(err error, attempt int) error {
 	if contextErr := s.ctx.Err(); contextErr != nil {
 		return contextErr
 	}
-	if attempt >= streamSessionMaxResumes {
-		return err
+	if attempt >= s.maxResumes {
+		return &StreamSessionExhaustedError{
+			Err:      err,
+			Attempts: attempt + 1,
+			Offset:   s.pos,
+		}
 	}
 
-	// Recovery may wait. Release the state lock so Close can cancel it and a
-	// future consumer can reposition the session without waiting on backoff.
-	s.mu.Unlock()
-	recoveryErr := s.recover(s.ctx, err, attempt)
-	s.mu.Lock()
-	if s.closed {
-		return os.ErrClosed
-	}
-	return recoveryErr
+	// Keep read, seek, and recovery state serialized. Close cancels s.ctx before
+	// taking this lock, so it can still interrupt a backoff immediately without
+	// allowing a concurrent seek to change this read's resume offset.
+	return s.recover(s.ctx, err, attempt)
 }
 
 func (s *streamSession) closeBodyLocked() {
@@ -390,6 +446,10 @@ func (s *streamSession) finishStallLocked(state *streamStallState) bool {
 }
 
 func recoverStreamSession(ctx context.Context, err error, attempt int) error {
+	return recoverStreamSessionWithDelay(ctx, err, attempt, streamSessionResumeBaseDelay)
+}
+
+func recoverStreamSessionWithDelay(ctx context.Context, err error, attempt int, baseDelay time.Duration) error {
 	if err == nil {
 		return nil
 	}
@@ -402,7 +462,7 @@ func recoverStreamSession(ctx context.Context, err error, attempt int) error {
 		if !streamErr.Retryable {
 			return err
 		}
-		return waitForStreamSessionRetry(ctx, attempt)
+		return waitForStreamSessionRetry(ctx, attempt, baseDelay)
 	}
 	if customerror.IsPermanentError(err) {
 		return err
@@ -414,13 +474,13 @@ func recoverStreamSession(ctx context.Context, err error, attempt int) error {
 		return err
 	}
 
-	return waitForStreamSessionRetry(ctx, attempt)
+	return waitForStreamSessionRetry(ctx, attempt, baseDelay)
 }
 
-func waitForStreamSessionRetry(ctx context.Context, attempt int) error {
+func waitForStreamSessionRetry(ctx context.Context, attempt int, baseDelay time.Duration) error {
 	delay := time.Duration(0)
 	if attempt > 0 {
-		delay = streamSessionResumeBaseDelay << min(attempt-1, 3)
+		delay = baseDelay << min(attempt-1, 3)
 	}
 	return waitForStreamRetry(ctx, delay)
 }
@@ -465,7 +525,7 @@ func (m *Manager) OpenStream(
 	offset int64,
 	client string,
 ) (StreamReader, error) {
-	session, err := m.openStreamUntracked(ctx, entry, filename, offset, client)
+	session, err := m.openStreamUntracked(ctx, entry, filename, offset, client, StreamSessionOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +542,19 @@ func (m *Manager) OpenStreamUntracked(
 	filename string,
 	offset int64,
 ) (StreamReader, error) {
-	return m.openStreamUntracked(ctx, entry, filename, offset, "")
+	return m.openStreamUntracked(ctx, entry, filename, offset, "", StreamSessionOptions{})
+}
+
+// OpenStreamUntrackedWithOptions is OpenStreamUntracked with an explicit
+// session budget for consumers such as DFS that already expose retry tuning.
+func (m *Manager) OpenStreamUntrackedWithOptions(
+	ctx context.Context,
+	entry *storage.Entry,
+	filename string,
+	offset int64,
+	options StreamSessionOptions,
+) (StreamReader, error) {
+	return m.openStreamUntracked(ctx, entry, filename, offset, "", options)
 }
 
 func (m *Manager) openStreamUntracked(
@@ -491,6 +563,7 @@ func (m *Manager) openStreamUntracked(
 	filename string,
 	offset int64,
 	client string,
+	options StreamSessionOptions,
 ) (*streamSession, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manager is nil")
@@ -506,12 +579,12 @@ func (m *Manager) openStreamUntracked(
 		return nil, fmt.Errorf("file %s has invalid size %d", filename, file.Size)
 	}
 
-	return newStreamSession(ctx, file.Size, offset, func(
+	return newStreamSessionWithOptions(ctx, file.Size, offset, func(
 		bodyCtx context.Context,
 		start int64,
 	) (io.ReadCloser, error) {
 		return m.openManagerStreamBody(bodyCtx, entry, filename, start, file.Size, client)
-	}, nil)
+	}, nil, options)
 }
 
 func (m *Manager) openManagerStreamBody(

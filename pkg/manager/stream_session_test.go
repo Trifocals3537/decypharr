@@ -144,9 +144,40 @@ func TestStreamSessionBoundsResumeAttempts(t *testing.T) {
 
 	if n, err := session.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("bounded failure = %d, %v", n, err)
+	} else {
+		var exhausted *StreamSessionExhaustedError
+		if !errors.As(err, &exhausted) || exhausted.Attempts != streamSessionMaxResumes+1 || exhausted.Offset != 0 {
+			t.Fatalf("exhausted error = %#v", exhausted)
+		}
 	}
 	if got := len(source.openedAt()); got != streamSessionMaxResumes+1 {
 		t.Fatalf("open attempts = %d, want %d", got, streamSessionMaxResumes+1)
+	}
+}
+
+func TestStreamSessionOptionsBoundTotalAttempts(t *testing.T) {
+	source := &sessionSource{data: []byte("retry")}
+	source.open = func(context.Context, int64) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	session, err := newStreamSessionWithOptions(
+		t.Context(),
+		int64(len(source.data)),
+		0,
+		source.openAt,
+		func(context.Context, error, int) error { return nil },
+		StreamSessionOptions{MaxAttempts: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	if _, err := session.Read(make([]byte, 1)); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("bounded failure = %v", err)
+	}
+	if got := len(source.openedAt()); got != 2 {
+		t.Fatalf("open attempts = %d, want 2", got)
 	}
 }
 
@@ -287,6 +318,50 @@ func TestStreamSessionOpenTimeoutCancelsAndResumes(t *testing.T) {
 	}
 	if got := source.openedAt(); len(got) != 2 || got[0] != 0 || got[1] != 0 {
 		t.Fatalf("open offsets = %#v, want [0 0]", got)
+	}
+}
+
+func TestStreamSessionBadSourceDoesNotBlockHealthySession(t *testing.T) {
+	started := make(chan struct{})
+	badSource := &sessionSource{data: []byte("bad")}
+	badSource.open = func(ctx context.Context, _ int64) (io.ReadCloser, error) {
+		close(started)
+		return &blockingStreamBody{ctx: ctx}, nil
+	}
+	bad, err := newStreamSessionWithOptions(
+		t.Context(),
+		int64(len(badSource.data)),
+		0,
+		badSource.openAt,
+		nil,
+		StreamSessionOptions{MaxAttempts: 1, StallTimeout: 20 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bad.Close()
+	badDone := make(chan error, 1)
+	go func() {
+		_, readErr := bad.Read(make([]byte, 1))
+		badDone <- readErr
+	}()
+	<-started
+
+	healthySource := &sessionSource{data: []byte("healthy")}
+	healthy := newTestStreamSession(t, healthySource, 0)
+	defer healthy.Close()
+	buf := make([]byte, 3)
+	if n, err := healthy.Read(buf); err != nil || n != 3 || string(buf) != "hea" {
+		t.Fatalf("healthy read = %d, %q, %v", n, buf, err)
+	}
+
+	select {
+	case err := <-badDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("bad read error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bad session did not fail within its bound")
 	}
 }
 

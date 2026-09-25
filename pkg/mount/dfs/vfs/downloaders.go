@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/manager"
@@ -43,13 +42,6 @@ const (
 	// scans) issues many short-lived reads, so a long lockout turns a brief
 	// provider hiccup into minutes of "unable to detect if file is a sample".
 	circuitCooldownDuration = 2 * time.Minute
-	// noProgressTimeout is the max time a stream attempt may run without any
-	// bytes written. Keep this above the NNTP per-segment idle timeout so a
-	// slow/stalled usenet provider can be classified and retried before DFS
-	// cancels the attempt.
-	noProgressTimeout = 90 * time.Second
-	// noProgressCheckInterval is how often stall detection checks for forward progress.
-	noProgressCheckInterval = 1 * time.Second
 	// maxChunkSizeMultiplier caps adaptive chunk growth at this multiple of baseChunkSize.
 	// Without a cap, binary doubling eventually produces chunk sizes in the GB range,
 	// causing oversized HTTP range requests that are wasteful on seeks.
@@ -74,6 +66,9 @@ type Downloaders struct {
 	chunkSize     int64
 	readAheadSize int64
 	retries       int
+	// openStream is an internal seam for deterministic stream-session tests.
+	// Production uses Manager.OpenStreamUntrackedWithOptions.
+	openStream func(context.Context, int64) (manager.StreamReader, error)
 	// runDownloader is an internal seam for deterministic scheduler tests. A
 	// nil value uses downloader.run in production.
 	runDownloader func(*downloader) (int64, error)
@@ -166,71 +161,13 @@ type downloader struct {
 	baseChunkSize    int64
 	currentChunkSize int64
 	// priority downloaders keep a small fixed chunk size (no adaptive growth)
-	// so each Stream call is short and yields its connection quickly.
+	// so they satisfy probes without filling unnecessary read-ahead cache.
 	priority bool
 
 	wg sync.WaitGroup
 
 	idleTimer *time.Timer
-}
-
-// startNoProgressWatchdog cancels an in-flight stream attempt when no bytes are
-// observed for the configured timeout window.
-func startNoProgressWatchdog(
-	ctx context.Context,
-	timeout time.Duration,
-	interval time.Duration,
-	lastProgressNanos *atomic.Int64,
-	cancel context.CancelFunc,
-	timedOut *atomic.Bool,
-) func() {
-	if timeout <= 0 || lastProgressNanos == nil || cancel == nil {
-		return func() {}
-	}
-	if interval <= 0 || interval > timeout {
-		interval = timeout / 5
-		if interval <= 0 {
-			interval = time.Second
-		}
-	}
-
-	done := make(chan struct{})
-	var once sync.Once
-	stop := func() {
-		once.Do(func() {
-			close(done)
-		})
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				last := lastProgressNanos.Load()
-				now := time.Now().UnixNano()
-				if last == 0 {
-					lastProgressNanos.Store(now)
-					continue
-				}
-				if now-last >= int64(timeout) {
-					if timedOut != nil {
-						timedOut.Store(true)
-					}
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-
-	return stop
+	stream    manager.StreamReader
 }
 
 // NewDownloaders creates a new download coordinator
@@ -261,6 +198,15 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 		retries:       retries,
 		// streamID is populated lazily when the first read occurs.
 		streamID: "",
+	}
+	dls.openStream = func(streamCtx context.Context, offset int64) (manager.StreamReader, error) {
+		return mgr.OpenStreamUntrackedWithOptions(
+			streamCtx,
+			item.entry,
+			item.filename,
+			offset,
+			manager.StreamSessionOptions{MaxAttempts: retries},
+		)
 	}
 	dls.touchActivity() // Initialize activity timestamp
 
@@ -424,7 +370,8 @@ func (dls *Downloaders) DownloadWithRetry(ctx context.Context, r ranges.Range, p
 		if err = dls.DownloadWithPriority(ctx, r, priority); err == nil {
 			return nil
 		}
-		if ctx.Err() != nil || dls.isCircuitOpen() || !customerror.IsRetriableError(err) {
+		var exhausted *manager.StreamSessionExhaustedError
+		if ctx.Err() != nil || dls.isCircuitOpen() || errors.As(err, &exhausted) || !customerror.IsRetriableError(err) {
 			return err
 		}
 		select {
@@ -637,7 +584,7 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64, pri
 	}
 
 	// Each downloader gets its own context derived from the Downloaders context.
-	// stop() cancels dlCtx, which interrupts any in-flight manager.Stream call
+	// stop() cancels dlCtx, which interrupts any in-flight stream-session read
 	// without having to cancel the shared dls.ctx.
 	dlCtx, dlCancel := context.WithCancel(dls.ctx)
 
@@ -769,7 +716,7 @@ func (dls *Downloaders) kickWaiters() {
 	}
 	dls.waiters = remaining
 	// Spawn at most one missing downloader per kick. Re-ensuring for every
-	// waiter can create duplicate stream calls for the same range under load.
+	// waiter can create duplicate provider sessions for the same range under load.
 	if len(remaining) == 0 || circuitOpen || dls.errorCount >= maxErrorCount {
 		return
 	}
@@ -1002,7 +949,7 @@ func (dls *Downloaders) StopAll() {
 	oldKickerDone := dls.kickerDone
 	dls.mu.Unlock()
 
-	// Cancel active context so in-flight Stream calls can be interrupted.
+	// Cancel active context so in-flight session reads can be interrupted.
 	oldCancel()
 
 	// Unblock any pending readers waiting on ranges from old downloaders.
@@ -1115,6 +1062,10 @@ func (dl *downloader) run() (totalBytes int64, err error) {
 
 		// Nothing to do - wait for more work or timeout
 		if start >= targetEnd {
+			// Do not hold a provider connection while waiting for a future range.
+			// Active sequential chunks still share one session; a later kick opens
+			// exactly at its new missing offset.
+			dl.closeStream()
 			if !dl.waitForWork() {
 				return totalBytes, nil
 			}
@@ -1122,7 +1073,7 @@ func (dl *downloader) run() (totalBytes int64, err error) {
 		}
 
 		// Calculate chunk boundaries
-		// Always download at least chunkSize to reduce Stream calls
+		// Always download at least chunkSize to amortize cache bookkeeping.
 		chunkEnd := min(start+chunkSize, fileSize)
 
 		// Ensure we're downloading something meaningful
@@ -1130,8 +1081,7 @@ func (dl *downloader) run() (totalBytes int64, err error) {
 			continue
 		}
 
-		// Download with retry
-		written, chunkErr := dl.downloadChunkWithRetry(start, chunkEnd)
+		written, chunkErr := dl.downloadChunk(start, chunkEnd)
 		totalBytes += written
 
 		if chunkErr != nil {
@@ -1188,63 +1138,21 @@ func (dl *downloader) waitForWork() bool {
 	}
 }
 
-// downloadChunkWithRetry downloads a chunk with retry logic
-func (dl *downloader) downloadChunkWithRetry(start, end int64) (int64, error) {
-	attempts := dl.retryAttempts()
+// downloadChunk downloads one adaptive cache chunk. Provider retries, exact
+// offset resume, and backoff are owned by the persistent stream session; DFS
+// must not multiply that budget with another outer retry loop.
+func (dl *downloader) downloadChunk(start, end int64) (int64, error) {
 	chunkLen := end - start
-	delay := config.DefaultRetryDelay
-	maxDelay := config.DefaultRetryDelayMax
-
-	// attempts >= 1 always (retryAttempts floors at 3), so the "last attempt
-	// failed" return inside the loop is the guaranteed exit on failure.
-	for attempt := 1; ; attempt++ {
-		written, err := dl.streamChunk(start, end)
-
-		if err == nil {
-			dl.adjustChunkSize(chunkLen, written, true)
-			return written, nil
-		}
-
-		dl.adjustChunkSize(chunkLen, written, false)
-
-		// Non-retriable conditions
-		if errors.Is(err, io.EOF) {
-			return written, err
-		}
-		if dl.ctx.Err() != nil {
-			return written, dl.ctx.Err()
-		}
-		if !customerror.IsRetriableError(err) {
-			return written, err
-		}
-
-		// Last attempt failed
-		if attempt == attempts {
-			return written, err
-		}
-
-		// Log and backoff
-		if !customerror.IsSilentError(err) {
-			dl.dls.item.logger.Debug().
-				Err(err).
-				Int("attempt", attempt).
-				Msg("stream error, retrying")
-		}
-
-		timer := time.NewTimer(delay)
-		select {
-		case <-timer.C:
-		case <-dl.ctx.Done():
-			timer.Stop()
-			return written, dl.ctx.Err()
-		}
-
-		// Exponential backoff
-		delay *= 2
-		if delay > maxDelay {
-			delay = maxDelay
-		}
+	written, err := dl.streamChunk(start, end)
+	if err == nil {
+		dl.adjustChunkSize(chunkLen, written, true)
+		return written, nil
 	}
+	dl.adjustChunkSize(chunkLen, written, false)
+	if dl.ctx.Err() != nil {
+		return written, dl.ctx.Err()
+	}
+	return written, err
 }
 
 // getRange returns the current download range
@@ -1299,38 +1207,10 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 		offset: missingRange.Pos,
 	}
 
-	// Use an attempt-scoped context so a no-progress timeout can cancel only this
-	// stream call while keeping the downloader alive for retries.
-	attemptCtx, attemptCancel := context.WithCancel(dl.ctx)
-	defer attemptCancel()
-
-	var lastProgressNanos atomic.Int64
-	lastProgressNanos.Store(time.Now().UnixNano())
-	var timedOut atomic.Bool
-	stopWatchdog := startNoProgressWatchdog(
-		attemptCtx,
-		noProgressTimeout,
-		noProgressCheckInterval,
-		&lastProgressNanos,
-		attemptCancel,
-		&timedOut,
-	)
-	defer stopWatchdog()
-
-	writer.onProgress = func(_ int) {
-		lastProgressNanos.Store(time.Now().UnixNano())
+	stream, err := dl.streamAt(missingRange.Pos)
+	if err == nil {
+		_, err = io.CopyN(writer, stream, missingRange.Size)
 	}
-
-	err := dl.dls.manager.Stream(
-		attemptCtx,
-		dl.dls.item.entry,
-		dl.dls.item.filename,
-		missingRange.Pos,
-		missingRange.Pos+missingRange.Size-1, // manager.Stream uses inclusive end
-		writer,
-		nil,
-		"DFS",
-	)
 
 	// Always drain the coalescing buffer — partial trailing bytes from the
 	// stream still need to land on disk and in info.Rs before we return so
@@ -1344,8 +1224,8 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 		if dl.ctx.Err() != nil {
 			return writer.written, dl.ctx.Err()
 		}
-		if timedOut.Load() {
-			return writer.written, fmt.Errorf("stream stalled for %s: i/o timeout", noProgressTimeout)
+		if errors.Is(err, io.EOF) && writer.offset < missingRange.End() {
+			err = io.ErrUnexpectedEOF
 		}
 		return writer.written, err
 	}
@@ -1373,6 +1253,36 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 	}
 
 	return writer.written, nil
+}
+
+func (dl *downloader) streamAt(offset int64) (manager.StreamReader, error) {
+	if dl.stream == nil {
+		if dl.dls.openStream == nil {
+			return nil, errors.New("DFS stream opener is not configured")
+		}
+		stream, err := dl.dls.openStream(dl.ctx, offset)
+		if err != nil {
+			return nil, err
+		}
+		dl.stream = stream
+		return stream, nil
+	}
+	position, err := dl.stream.Seek(offset, io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+	if position != offset {
+		return nil, fmt.Errorf("DFS stream seek returned offset %d, want %d", position, offset)
+	}
+	return dl.stream, nil
+}
+
+func (dl *downloader) closeStream() {
+	if dl.stream == nil {
+		return
+	}
+	_ = dl.stream.Close()
+	dl.stream = nil
 }
 
 // setMaxOffset extends the download range
@@ -1426,7 +1336,7 @@ func (dl *downloader) adjustChunkSize(chunkLen, written int64, success bool) {
 }
 
 // stop signals the downloader to stop and cancels its context so any
-// in-flight manager.Stream call is interrupted promptly.
+// in-flight stream-session read is interrupted promptly.
 func (dl *downloader) stop() {
 	dl.mu.Lock()
 	if !dl.stopped {
@@ -1439,6 +1349,7 @@ func (dl *downloader) stop() {
 
 // close marks the downloader as closed
 func (dl *downloader) close() {
+	dl.closeStream()
 	dl.mu.Lock()
 	dl.closed = true
 	dl.mu.Unlock()
@@ -1449,13 +1360,6 @@ func (dl *downloader) isClosed() bool {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
 	return dl.closed
-}
-
-func (dl *downloader) retryAttempts() int {
-	if dl.dls.retries <= 0 {
-		return 3
-	}
-	return dl.dls.retries
 }
 
 // cacheWriter writes streamed body bytes straight through to the cache item.
@@ -1478,8 +1382,6 @@ type cacheWriter struct {
 	item    *CacheItem
 	offset  int64 // next write offset; advances with Write
 	written int64
-	// onProgress is called whenever bytes are consumed from the stream.
-	onProgress func(int)
 }
 
 func (w *cacheWriter) Write(p []byte) (int, error) {
@@ -1490,10 +1392,6 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	if err != nil {
 		return n, err
 	}
-	if n > 0 && w.onProgress != nil {
-		w.onProgress(n)
-	}
-
 	w.dl.mu.Lock()
 	if skipped == n {
 		w.dl.skipped += int64(skipped)

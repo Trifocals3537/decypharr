@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
@@ -31,6 +32,235 @@ func getMaxOffset(dl *downloader) int64 {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
 	return dl.maxOffset
+}
+
+func schedulerTestDownloader(dls *Downloaders, start, targetEnd int64, priority bool) *downloader {
+	ctx, cancel := context.WithCancel(dls.ctx)
+	return &downloader{
+		dls:              dls,
+		quit:             make(chan struct{}),
+		kick:             make(chan struct{}, 1),
+		ctx:              ctx,
+		cancel:           cancel,
+		start:            start,
+		offset:           start,
+		maxOffset:        targetEnd,
+		baseChunkSize:    4 * testMiB,
+		currentChunkSize: 4 * testMiB,
+		priority:         priority,
+	}
+}
+
+func downloaderStopped(dl *downloader) bool {
+	dl.mu.Lock()
+	defer dl.mu.Unlock()
+	return dl.stopped
+}
+
+func TestEnsureDownloaderLockedCapsActiveWorkersForLiveReaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cache := &Cache{}
+	item := &CacheItem{cache: cache, info: ItemInfo{Size: 512 * testMiB}}
+	dls := &Downloaders{ctx: ctx, cancel: cancel, item: item, chunkSize: 4 * testMiB, readAheadSize: 16 * testMiB}
+	first := schedulerTestDownloader(dls, 0, 16*testMiB, false)
+	second := schedulerTestDownloader(dls, 128*testMiB, 144*testMiB, false)
+	dls.dls = []*downloader{first, second}
+	dls.waiters = []waiter{
+		{r: ranges.Range{Pos: 0, Size: 128 * testKiB}},
+		{r: ranges.Range{Pos: 128 * testMiB, Size: 128 * testKiB}},
+		{r: ranges.Range{Pos: 256 * testMiB, Size: 128 * testKiB}, priority: true},
+	}
+
+	if err := dls.ensureDownloaderLocked(dls.waiters[2].r, true); err != nil {
+		t.Fatalf("ensureDownloaderLocked returned error: %v", err)
+	}
+	if got := dls.activeDownloaderCountLocked(); got != maxFileDownloaders {
+		t.Fatalf("active downloaders = %d, want %d", got, maxFileDownloaders)
+	}
+	if downloaderStopped(first) || downloaderStopped(second) {
+		t.Fatal("scheduler preempted a worker still serving a live reader")
+	}
+	if got := cache.schedulerPreemptions.Load(); got != 0 {
+		t.Fatalf("scheduler preemptions = %d, want 0", got)
+	}
+}
+
+func TestEnsureDownloaderLockedPreemptsOnlyObsoleteReadAhead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cache := &Cache{}
+	item := &CacheItem{cache: cache, info: ItemInfo{Size: 512 * testMiB}}
+	dls := &Downloaders{ctx: ctx, cancel: cancel, item: item, chunkSize: 4 * testMiB, readAheadSize: 16 * testMiB}
+	bulk := schedulerTestDownloader(dls, 0, 16*testMiB, false)
+	probe := schedulerTestDownloader(dls, 128*testMiB, 129*testMiB, true)
+	dls.dls = []*downloader{bulk, probe}
+	request := ranges.Range{Pos: 256 * testMiB, Size: 128 * testKiB}
+	if err := dls.appendWaiterLocked(waiter{r: request, errChan: make(chan error, 1)}); err != nil {
+		t.Fatalf("append waiter: %v", err)
+	}
+
+	if err := dls.ensureDownloaderLocked(request, false); err != nil {
+		t.Fatalf("ensureDownloaderLocked returned error: %v", err)
+	}
+	if !downloaderStopped(bulk) {
+		t.Fatal("obsolete bulk read-ahead was not preempted")
+	}
+	if downloaderStopped(probe) {
+		t.Fatal("bulk request preempted a priority probe")
+	}
+	if got := dls.activeDownloaderCountLocked(); got != 1 {
+		t.Fatalf("active downloaders after preemption = %d, want 1", got)
+	}
+	if got := cache.schedulerPreemptions.Load(); got != 1 {
+		t.Fatalf("scheduler preemptions = %d, want 1", got)
+	}
+	cancel()
+}
+
+func TestEnsureDownloaderLockedStartsReplacementOnlyAfterSlotIsFree(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cache := &Cache{}
+	item := &CacheItem{cache: cache, info: ItemInfo{Size: 512 * testMiB}}
+	dls := &Downloaders{
+		parentCtx:     context.Background(),
+		ctx:           ctx,
+		cancel:        cancel,
+		item:          item,
+		chunkSize:     4 * testMiB,
+		readAheadSize: 16 * testMiB,
+	}
+	bulk := schedulerTestDownloader(dls, 0, 16*testMiB, false)
+	probe := schedulerTestDownloader(dls, 128*testMiB, 129*testMiB, true)
+	dls.dls = []*downloader{bulk, probe}
+	request := ranges.Range{Pos: 256 * testMiB, Size: 128 * testKiB}
+	if err := dls.appendWaiterLocked(waiter{r: request, errChan: make(chan error, 1)}); err != nil {
+		t.Fatalf("append waiter: %v", err)
+	}
+
+	if err := dls.ensureDownloaderLocked(request, false); err != nil {
+		t.Fatalf("first ensureDownloaderLocked returned error: %v", err)
+	}
+	if got := cache.activeDownloads.Load(); got != 0 {
+		t.Fatalf("replacement started before canceled worker exited: active=%d", got)
+	}
+
+	started := make(chan struct{}, 1)
+	dls.runDownloader = func(dl *downloader) (int64, error) {
+		started <- struct{}{}
+		<-dl.ctx.Done()
+		return 0, dl.ctx.Err()
+	}
+	if err := dls.ensureDownloaderLocked(request, false); err != nil {
+		t.Fatalf("second ensureDownloaderLocked returned error: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("replacement downloader did not start after a slot became available")
+	}
+	if got := dls.activeDownloaderCountLocked(); got != maxFileDownloaders {
+		t.Fatalf("active downloaders = %d, want %d", got, maxFileDownloaders)
+	}
+	if got := cache.activeDownloads.Load(); got != 1 {
+		t.Fatalf("running replacement gauge = %d, want 1", got)
+	}
+
+	dls.StopAll()
+}
+
+func TestEnsureDownloaderLockedIgnoresStoppedWorkerNearRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cache := &Cache{}
+	item := &CacheItem{cache: cache, info: ItemInfo{Size: 64 * testMiB}}
+	dls := &Downloaders{
+		parentCtx:     context.Background(),
+		ctx:           ctx,
+		cancel:        cancel,
+		item:          item,
+		chunkSize:     4 * testMiB,
+		readAheadSize: 16 * testMiB,
+	}
+	request := ranges.Range{Pos: 8 * testMiB, Size: 128 * testKiB}
+	stopped := schedulerTestDownloader(dls, request.Pos, request.End()+16*testMiB, false)
+	stopped.stop()
+	dls.dls = []*downloader{stopped}
+	if err := dls.appendWaiterLocked(waiter{r: request, errChan: make(chan error, 1)}); err != nil {
+		t.Fatalf("append waiter: %v", err)
+	}
+
+	started := make(chan struct{}, 1)
+	dls.runDownloader = func(dl *downloader) (int64, error) {
+		started <- struct{}{}
+		<-dl.ctx.Done()
+		return 0, dl.ctx.Err()
+	}
+	if err := dls.ensureDownloaderLocked(request, false); err != nil {
+		t.Fatalf("ensureDownloaderLocked returned error: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stopped nearby downloader prevented replacement from starting")
+	}
+	if got := dls.activeDownloaderCountLocked(); got != 1 {
+		t.Fatalf("active downloaders = %d, want 1", got)
+	}
+	dls.StopAll()
+}
+
+func TestAppendWaiterLockedBoundsPerFileQueue(t *testing.T) {
+	cache := &Cache{}
+	dls := &Downloaders{item: &CacheItem{cache: cache}}
+	for index := 0; index < maxFileWaiters; index++ {
+		if err := dls.appendWaiterLocked(waiter{
+			r:       ranges.Range{Pos: int64(index), Size: 1},
+			errChan: make(chan error, 1),
+		}); err != nil {
+			t.Fatalf("append waiter %d: %v", index, err)
+		}
+	}
+	err := dls.appendWaiterLocked(waiter{r: ranges.Range{Size: 1}, errChan: make(chan error, 1)})
+	if err == nil {
+		t.Fatal("queue accepted a waiter beyond its bound")
+	}
+	if !customerror.IsRetriableError(err) {
+		t.Fatalf("queue-full error is not retryable: %v", err)
+	}
+	if got := cache.pendingReads.Load(); got != maxFileWaiters {
+		t.Fatalf("pending read gauge = %d, want %d", got, maxFileWaiters)
+	}
+	if got := cache.schedulerQueueFull.Load(); got != 1 {
+		t.Fatalf("queue-full count = %d, want 1", got)
+	}
+	for _, w := range dls.waiters {
+		dls.finishWaiterLocked(w)
+	}
+	dls.waiters = nil
+	if got := cache.pendingReads.Load(); got != 0 {
+		t.Fatalf("pending read gauge after drain = %d, want 0", got)
+	}
+}
+
+func TestFinishWaiterRecordsBoundedSchedulerLatency(t *testing.T) {
+	cache := &Cache{}
+	dls := &Downloaders{item: &CacheItem{cache: cache}}
+	w := waiter{enqueuedAt: time.Now().Add(-10 * time.Millisecond)}
+	dls.waiterCount.Store(1)
+	cache.pendingReads.Store(1)
+	dls.finishWaiterLocked(w)
+
+	if got := cache.readWaitCount.Load(); got != 1 {
+		t.Fatalf("read wait count = %d, want 1", got)
+	}
+	if got := cache.readWaitMaxNanos.Load(); got < int64(10*time.Millisecond) {
+		t.Fatalf("max read wait = %s, want at least 10ms", time.Duration(got))
+	}
+	if got := dls.waiterCount.Load(); got != 0 {
+		t.Fatalf("waiter count = %d, want 0", got)
+	}
+	if got := cache.pendingReads.Load(); got != 0 {
+		t.Fatalf("pending reads = %d, want 0", got)
+	}
 }
 
 func TestEnsureDownloaderLocked_ExtendsMissByReadAhead(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,14 @@ const (
 	// Without a cap, binary doubling eventually produces chunk sizes in the GB range,
 	// causing oversized HTTP range requests that are wasteful on seeks.
 	maxChunkSizeMultiplier = 16
+	// maxFileDownloaders bounds provider and CPU pressure from disjoint reads
+	// against one file. Two workers allow sequential playback plus one probe,
+	// seek, or second reader without letting seek storms fan out indefinitely.
+	maxFileDownloaders = 2
+	// maxFileWaiters bounds memory retained by callers waiting on one file. A
+	// full queue fails new reads explicitly and retryably instead of allowing a
+	// stalled provider to accumulate an unbounded backlog inside the FUSE mount.
+	maxFileWaiters = 256
 )
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
@@ -65,6 +74,9 @@ type Downloaders struct {
 	chunkSize     int64
 	readAheadSize int64
 	retries       int
+	// runDownloader is an internal seam for deterministic scheduler tests. A
+	// nil value uses downloader.run in production.
+	runDownloader func(*downloader) (int64, error)
 
 	mu         sync.Mutex
 	dls        []*downloader
@@ -126,8 +138,9 @@ func (dls *Downloaders) untrackStreamLocked() {
 
 // waiter represents a caller waiting for a range to be downloaded
 type waiter struct {
-	r       ranges.Range
-	errChan chan<- error
+	r          ranges.Range
+	errChan    chan<- error
+	enqueuedAt time.Time
 	// priority marks a latency-sensitive read (e.g. ffprobe's near-EOF moov
 	// seek). Priority waiters spawn a dedicated small-chunk downloader with no
 	// read-ahead extension so they don't queue behind bulk prefetch.
@@ -308,10 +321,13 @@ func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range
 		dls.mu.Unlock()
 		return nil
 	}
-	// Create waiter channel
+	// Create waiter channel. Admission is bounded per file so a stalled source
+	// cannot retain an unlimited number of blocked FUSE requests.
 	errChan := make(chan error, 1)
-	dls.waiters = append(dls.waiters, waiter{r: r, errChan: errChan, priority: priority})
-	dls.waiterCount.Add(1)
+	if err := dls.appendWaiterLocked(waiter{r: r, errChan: errChan, priority: priority}); err != nil {
+		dls.mu.Unlock()
+		return err
+	}
 
 	// Ensure downloader running
 	if err := dls.ensureDownloaderLocked(r, priority); err != nil {
@@ -334,6 +350,41 @@ func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range
 		dls.removeWaiterLocked(errChan)
 		dls.mu.Unlock()
 		return ctx.Err()
+	}
+}
+
+func (dls *Downloaders) appendWaiterLocked(w waiter) error {
+	if len(dls.waiters) >= maxFileWaiters {
+		if dls.item != nil && dls.item.cache != nil {
+			dls.item.cache.schedulerQueueFull.Add(1)
+		}
+		return customerror.NewError(
+			fmt.Errorf("DFS read queue full for file (%d pending reads)", len(dls.waiters)),
+			http.StatusServiceUnavailable,
+			"dfs_read_queue_full",
+			true,
+			false,
+		).Retryable()
+	}
+	if w.enqueuedAt.IsZero() {
+		w.enqueuedAt = time.Now()
+	}
+	dls.waiters = append(dls.waiters, w)
+	dls.waiterCount.Add(1)
+	if dls.item != nil && dls.item.cache != nil {
+		dls.item.cache.pendingReads.Add(1)
+	}
+	return nil
+}
+
+func (dls *Downloaders) finishWaiterLocked(w waiter) {
+	dls.waiterCount.Add(-1)
+	if dls.item == nil || dls.item.cache == nil {
+		return
+	}
+	dls.item.cache.pendingReads.Add(-1)
+	if !w.enqueuedAt.IsZero() {
+		dls.item.cache.recordReadWait(time.Since(w.enqueuedAt))
 	}
 }
 
@@ -393,7 +444,7 @@ func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
 			last := len(dls.waiters) - 1
 			dls.waiters[i] = dls.waiters[last]
 			dls.waiters = dls.waiters[:last]
-			dls.waiterCount.Add(-1)
+			dls.finishWaiterLocked(w)
 			return
 		}
 	}
@@ -445,8 +496,84 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range, priority bool) er
 		return nil
 	}
 
-	// Start new downloader
-	return dls.newDownloaderLocked(r, targetEnd, priority)
+	// Start new downloader when a per-file slot is available. If both slots
+	// are occupied, cancel only obsolete read-ahead (a worker that no current
+	// waiter still needs). The queued waiter will be reconsidered when that
+	// worker exits and calls kickWaiters. We deliberately do not start the
+	// replacement here, which keeps the hard concurrency bound intact.
+	if dls.activeDownloaderCountLocked() < maxFileDownloaders {
+		return dls.newDownloaderLocked(r, targetEnd, priority)
+	}
+	if stale := dls.obsoleteDownloaderLocked(r.Pos, priority); stale != nil {
+		stale.stop()
+		if dls.item != nil && dls.item.cache != nil {
+			dls.item.cache.schedulerPreemptions.Add(1)
+		}
+	}
+	return nil
+}
+
+func (dls *Downloaders) activeDownloaderCountLocked() int {
+	count := 0
+	for _, dl := range dls.dls {
+		if dl.isActive() {
+			count++
+		}
+	}
+	return count
+}
+
+// obsoleteDownloaderLocked chooses a worker that is doing read-ahead only:
+// no live waiter intersects the bytes it can still produce. Non-priority
+// workers are preferred so a short probe already in flight can finish.
+func (dls *Downloaders) obsoleteDownloaderLocked(requestPos int64, requestPriority bool) *downloader {
+	var best *downloader
+	bestPriority := false
+	bestDistance := int64(-1)
+	for _, dl := range dls.dls {
+		start, offset, targetEnd, priority, active := dl.schedulingState()
+		if !active || dls.downloaderHasWaiterLocked(start, offset, targetEnd) {
+			continue
+		}
+		// Bulk playback must not evict a short latency-sensitive probe. A new
+		// probe may evict obsolete work of either class.
+		if !requestPriority && priority {
+			continue
+		}
+		if best != nil && !bestPriority && priority {
+			continue
+		}
+		if best != nil && bestPriority && !priority {
+			best = nil
+			bestDistance = -1
+		}
+		distance := requestPos - offset
+		if distance < 0 {
+			distance = -distance
+		}
+		if best == nil || distance > bestDistance {
+			best = dl
+			bestPriority = priority
+			bestDistance = distance
+		}
+	}
+	return best
+}
+
+func (dls *Downloaders) downloaderHasWaiterLocked(start, offset, targetEnd int64) bool {
+	if targetEnd < offset {
+		targetEnd = offset
+	}
+	coverage := ranges.Range{Pos: start, Size: targetEnd - start}
+	if coverage.IsEmpty() {
+		return false
+	}
+	for _, w := range dls.waiters {
+		if !coverage.Intersection(w.r).IsEmpty() {
+			return true
+		}
+	}
+	return false
 }
 
 // extendAndFindMissingRangeLocked expands a request by read-ahead and returns
@@ -475,6 +602,9 @@ func (dls *Downloaders) downloaderMatchWindowLocked() int64 {
 func (dls *Downloaders) findDownloaderForPosLocked(pos int64) *downloader {
 	window := dls.downloaderMatchWindowLocked()
 	for _, dl := range dls.dls {
+		if !dl.isActive() {
+			continue
+		}
 		start, offset := dl.getRange()
 		if pos >= start && pos < offset+window {
 			return dl
@@ -527,18 +657,29 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64, pri
 
 	dls.dls = append(dls.dls, dl)
 
-	// Track active download count
-	dls.item.cache.activeDownloads.Add(1)
+	// Track active download count.
+	if dls.item != nil && dls.item.cache != nil {
+		dls.item.cache.activeDownloads.Add(1)
+	}
 
 	dl.wg.Go(func() {
-		defer dls.item.cache.activeDownloads.Add(-1)
 		defer dlCancel() // always release the per-downloader context
-		n, err := dl.run()
+		run := dl.run
+		if dls.runDownloader != nil {
+			run = func() (int64, error) { return dls.runDownloader(dl) }
+		}
+		n, err := run()
 		dl.close()
 		// Only count real errors. If dl.ctx was canceled (intentional stop/close),
 		// the error is not a network/server failure and must not trip the circuit breaker.
 		if dl.ctx.Err() == nil {
 			dls.countErrors(n, err)
+		}
+		// Release the slot before scheduling queued work. This makes
+		// active_downloads reflect the hard per-file scheduler bound even while
+		// this goroutine performs its final waiter notification.
+		if dls.item != nil && dls.item.cache != nil {
+			dls.item.cache.activeDownloads.Add(-1)
 		}
 		dls.kickWaiters()
 	})
@@ -609,7 +750,6 @@ func (dls *Downloaders) kickWaiters() {
 	// Check circuit state once to avoid spinning
 	circuitOpen := dls.circuitOpen.Load()
 
-	fulfilled := 0
 	remaining := dls.waiters[:0]
 	for _, w := range dls.waiters {
 		// Clip range to actual file size
@@ -618,23 +758,22 @@ func (dls *Downloaders) kickWaiters() {
 
 		if dls.item.HasRange(r) {
 			w.errChan <- nil // Fulfilled!
-			fulfilled++
+			dls.finishWaiterLocked(w)
 		} else if circuitOpen || dls.errorCount >= maxErrorCount {
 			// Circuit is open or max errors reached - fail waiter without creating new downloaders
 			w.errChan <- dls.lastErr
-			fulfilled++
+			dls.finishWaiterLocked(w)
 		} else {
 			remaining = append(remaining, w)
 		}
 	}
 	dls.waiters = remaining
-	if fulfilled > 0 {
-		dls.waiterCount.Add(-int32(fulfilled))
-	}
-
 	// Spawn at most one missing downloader per kick. Re-ensuring for every
 	// waiter can create duplicate stream calls for the same range under load.
 	if len(remaining) == 0 || circuitOpen || dls.errorCount >= maxErrorCount {
+		return
+	}
+	if dls.closed || dls.stopping {
 		return
 	}
 
@@ -645,9 +784,9 @@ func (dls *Downloaders) kickWaiters() {
 		ctxErr := dls.ctx.Err()
 		for _, w := range remaining {
 			w.errChan <- ctxErr
+			dls.finishWaiterLocked(w)
 		}
 		dls.waiters = remaining[:0]
-		dls.waiterCount.Store(0)
 		return
 	}
 
@@ -715,8 +854,8 @@ func (dls *Downloaders) Close(inErr error) error {
 		} else {
 			w.errChan <- errors.New("downloaders closed")
 		}
+		dls.finishWaiterLocked(w)
 	}
-	dls.waiterCount.Store(0)
 	dls.waiters = nil
 	dls.dls = nil
 	dls.mu.Unlock()
@@ -848,8 +987,10 @@ func (dls *Downloaders) StopAll() {
 	copy(dlsCopy, dls.dls)
 	waitersCopy := make([]waiter, len(dls.waiters))
 	copy(waitersCopy, dls.waiters)
+	for _, w := range dls.waiters {
+		dls.finishWaiterLocked(w)
+	}
 	dls.waiters = nil
-	dls.waiterCount.Store(0)
 
 	// Stop all downloaders
 	for _, dl := range dlsCopy {
@@ -1111,6 +1252,17 @@ func (dl *downloader) getRange() (start, offset int64) {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
 	return dl.start, dl.offset
+}
+
+func (dl *downloader) schedulingState() (start, offset, targetEnd int64, priority, active bool) {
+	dl.mu.Lock()
+	defer dl.mu.Unlock()
+	return dl.start, dl.offset, dl.maxOffset, dl.priority, !dl.stopped && !dl.closed
+}
+
+func (dl *downloader) isActive() bool {
+	_, _, _, _, active := dl.schedulingState()
+	return active
 }
 
 func (dl *downloader) streamChunk(start, end int64) (int64, error) {

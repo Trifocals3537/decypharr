@@ -79,6 +79,14 @@ type Cache struct {
 	quotaPressure   atomic.Int64
 	quotaDenials    atomic.Int64
 	quotaReclaimed  atomic.Int64
+	// Scheduler counters make bounded per-file read behavior observable without
+	// logging individual ranges or provider URLs.
+	pendingReads         atomic.Int32
+	schedulerPreemptions atomic.Int64
+	schedulerQueueFull   atomic.Int64
+	readWaitCount        atomic.Int64
+	readWaitNanos        atomic.Int64
+	readWaitMaxNanos     atomic.Int64
 }
 
 type candidateEntry struct {
@@ -898,6 +906,21 @@ func (c *Cache) AddDownloadedBytes(n int64) {
 	c.totalDownloaded.Add(n)
 }
 
+func (c *Cache) recordReadWait(wait time.Duration) {
+	if c == nil || wait < 0 {
+		return
+	}
+	nanos := wait.Nanoseconds()
+	c.readWaitCount.Add(1)
+	c.readWaitNanos.Add(nanos)
+	for {
+		current := c.readWaitMaxNanos.Load()
+		if nanos <= current || c.readWaitMaxNanos.CompareAndSwap(current, nanos) {
+			return
+		}
+	}
+}
+
 // updateSpeed samples the current download speed. It is called only from
 // speedSampleLoop (a single goroutine); the two Swaps are NOT atomic as a
 // pair, so adding a second caller would need real synchronization here.
@@ -951,26 +974,35 @@ func (c *Cache) GetStats() map[string]any {
 	if total := hits + misses; total > 0 {
 		hitRate = float64(hits) / float64(total)
 	}
+	readWaitAverageMS := float64(0)
+	if count := c.readWaitCount.Load(); count > 0 {
+		readWaitAverageMS = float64(c.readWaitNanos.Load()) / float64(count) / float64(time.Millisecond)
+	}
 
 	stats := map[string]any{
-		"type":              "vfs",
-		"total_size":        quota.Used,
-		"max_size":          quota.Limit,
-		"reserved_size":     quota.Reserved,
-		"available_size":    quota.Available,
-		"item_count":        c.diskItems.Load(),
-		"active_item_count": c.itemCount.Load(),
-		"utilization":       utilization,
-		"cache_hits":        hits,
-		"cache_misses":      misses,
-		"cache_hit_rate":    hitRate,
-		"active_downloads":  c.activeDownloads.Load(),
-		"total_downloaded":  c.totalDownloaded.Load(),
-		"download_speed":    c.downloadSpeed.Load(),
-		"circuit_breakers":  c.circuitBreakers.Load(),
-		"quota_pressure":    c.quotaPressure.Load(),
-		"quota_denials":     c.quotaDenials.Load(),
-		"quota_reclaimed":   c.quotaReclaimed.Load(),
+		"type":                  "vfs",
+		"total_size":            quota.Used,
+		"max_size":              quota.Limit,
+		"reserved_size":         quota.Reserved,
+		"available_size":        quota.Available,
+		"item_count":            c.diskItems.Load(),
+		"active_item_count":     c.itemCount.Load(),
+		"utilization":           utilization,
+		"cache_hits":            hits,
+		"cache_misses":          misses,
+		"cache_hit_rate":        hitRate,
+		"active_downloads":      c.activeDownloads.Load(),
+		"total_downloaded":      c.totalDownloaded.Load(),
+		"download_speed":        c.downloadSpeed.Load(),
+		"circuit_breakers":      c.circuitBreakers.Load(),
+		"quota_pressure":        c.quotaPressure.Load(),
+		"quota_denials":         c.quotaDenials.Load(),
+		"quota_reclaimed":       c.quotaReclaimed.Load(),
+		"pending_reads":         c.pendingReads.Load(),
+		"scheduler_preemptions": c.schedulerPreemptions.Load(),
+		"scheduler_queue_full":  c.schedulerQueueFull.Load(),
+		"read_wait_average_ms":  readWaitAverageMS,
+		"read_wait_max_ms":      float64(c.readWaitMaxNanos.Load()) / float64(time.Millisecond),
 	}
 	if c.pool != nil {
 		memory := c.pool.Stats()

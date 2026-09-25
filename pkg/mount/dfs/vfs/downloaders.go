@@ -60,7 +60,7 @@ const (
 	maxFileDownloaders = 2
 	// maxFileWaiters bounds memory retained by callers waiting on one file. A
 	// full queue fails new reads explicitly and retryably instead of allowing a
-	// stalled provider to grow an unbounded backlog inside the FUSE mount.
+	// stalled provider to accumulate an unbounded backlog inside the FUSE mount.
 	maxFileWaiters = 256
 )
 

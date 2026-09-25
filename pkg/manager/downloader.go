@@ -284,27 +284,35 @@ func (d *Downloader) processSymlink(ctx context.Context, entry *storage.Entry, m
 		return err
 	}
 
-	// Warm the mount cache for the first few files so a subsequent import scan is fast
-	// Usenet parsing/probing deliberately avoids the streaming read-ahead
-	// setting. A large playback window can turn a small import probe into a
-	// substantial background download and hold an active slot unnecessarily.
-	if !entry.IsNZB() && !d.manager.config.SkipPreCache && len(filePaths) > 0 {
-		probeFiles := filePaths
-		if len(probeFiles) > MaxNZBPreCacheFiles {
-			probeFiles = probeFiles[:MaxNZBPreCacheFiles]
+	// Before reporting completion to the Arr, prove a deterministic sample of
+	// media files can be opened and read at the head, middle, and tail with the
+	// expected logical size. SkipPreCache remains the explicit compatibility
+	// opt-out. Mounts without a context-aware opener retain legacy behavior.
+	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
+		probeFiles, err := d.importReadinessFiles(entry, filePaths, MaxImportReadinessFiles)
+		if err != nil {
+			return fmt.Errorf("prepare import readiness check: %w", err)
 		}
-		d.logger.Debug().Int("files", len(probeFiles)).Msgf("Warming cache for %s", entry.Name)
-		if err := d.manager.WarmFileCache(ctx, probeFiles); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if errors.Is(err, ErrCacheWarmUnavailable) {
-				d.logger.Debug().Err(err).Str("entry", entry.Name).Msg("Cache warm skipped")
+		if len(probeFiles) > 0 {
+			if err := d.manager.verifyImportReadiness(ctx, entry.InfoHash, probeFiles); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if errors.Is(err, ErrCacheWarmUnavailable) {
+					d.logger.Warn().
+						Str("entry", entry.Name).
+						Int("sampled_files", len(probeFiles)).
+						Msg("Import readiness verification unavailable for mount backend; retaining compatibility behavior")
+				} else {
+					return fmt.Errorf("import readiness verification failed: %w", err)
+				}
 			} else {
-				d.logger.Warn().Err(err).Str("entry", entry.Name).Msg("Cache warm did not complete")
+				d.logger.Info().
+					Str("entry", entry.Name).
+					Int("sampled_files", len(probeFiles)).
+					Int("media_files", countMediaPaths(filePaths)).
+					Msg("Import readiness verification passed")
 			}
-		} else {
-			d.logger.Debug().Str("entry", entry.Name).Msgf("Warmed cache for %d/%d files", len(probeFiles), len(filePaths))
 		}
 	}
 

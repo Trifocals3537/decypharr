@@ -12,9 +12,13 @@ import (
 )
 
 const (
-	MaxCacheWarmWorkers = 10
-	MaxNZBPreCacheFiles = 5
-	CacheWarmTimeout    = 60 * time.Second
+	MaxCacheWarmWorkers     = 10
+	MaxImportReadinessFiles = 5
+	// MaxNZBPreCacheFiles is retained for source compatibility. Import
+	// readiness now samples both torrent and NZB media files.
+	MaxNZBPreCacheFiles    = MaxImportReadinessFiles
+	CacheWarmTimeout       = 60 * time.Second
+	ImportReadinessTimeout = 2 * time.Minute
 
 	// Container metadata lives at the head (streamable MP4 moov, EBML header)
 	// or the tail (non-streamable MP4 moov, MKV cues/seek index), so warming

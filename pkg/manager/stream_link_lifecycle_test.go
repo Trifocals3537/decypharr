@@ -229,7 +229,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestStreamDoesNotRefreshOrReplayAfterBytesAreWritten(t *testing.T) {
+func TestStreamDoesNotRefreshOrReplayCommittedBytesDuringInvalidResume(t *testing.T) {
 	var requests atomic.Int32
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		requests.Add(1)
@@ -261,7 +261,7 @@ func TestStreamDoesNotRefreshOrReplayAfterBytesAreWritten(t *testing.T) {
 	if output.String() != "ab" {
 		t.Fatalf("streamed data = %q, want only first two bytes", output.String())
 	}
-	if requests.Load() != 1 || links.refreshes.Load() != 0 || readyCalls != 1 {
-		t.Fatalf("requests/refreshes/ready = %d/%d/%d, want 1/0/1", requests.Load(), links.refreshes.Load(), readyCalls)
+	if requests.Load() != 4 || links.refreshes.Load() != 0 || readyCalls != 1 {
+		t.Fatalf("requests/refreshes/ready = %d/%d/%d, want 4/0/1", requests.Load(), links.refreshes.Load(), readyCalls)
 	}
 }

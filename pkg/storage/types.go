@@ -69,8 +69,8 @@ type Entry struct {
 	// current durable queue row. It is never serialized.
 	MainReimportIncarnation string `msgpack:"-" json:"-"`
 
-	// OutputName pins the local torrent output component independently of its
-	// display title. Empty means legacy name-derived layout; never auto-rename.
+	// OutputName pins the local output component independently of its display
+	// title. Empty means legacy name-derived layout; never auto-rename.
 	OutputName string `msgpack:"output_name,omitempty" json:"output_name,omitempty"`
 
 	Protocol         config.Protocol `msgpack:"protocol" json:"protocol"`                   // torrent or nzb

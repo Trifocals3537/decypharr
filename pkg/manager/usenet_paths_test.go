@@ -10,9 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -72,6 +74,51 @@ func TestUsenetEntryPathsAcceptEmptyCategoryAtConfiguredRoot(t *testing.T) {
 	}
 	if want := filepath.Join(root, "Release"); downloadPath != want {
 		t.Fatalf("downloadPath = %q, want %q", downloadPath, want)
+	}
+}
+
+func TestUsenetEntryPathsCompactOversizedNZBName(t *testing.T) {
+	root := t.TempDir()
+	name := "My Status as an Assassin Obviously Exceeds the Heros S01E01 The Assassin Easts Bread 1080p CR WEB-DL DUAL AAC2.0 H 264-VARYG (Ansatsusha de Aru Ore no Status ga Yuusha yori mo Akiraka ni Tsuyoi no da ga, Dual-Audio, Multi-Subs) [1+9] - My.Status.as.an.As.nzb"
+	if len(name) <= safepath.PortableIdentifierMaxBytes {
+		t.Fatalf("live regression fixture is only %d bytes", len(name))
+	}
+	savePath, firstPath, err := usenetEntryPaths(root, "sonarr", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondPath, err := usenetEntryPaths(root, "sonarr", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPath != secondPath {
+		t.Fatalf("compacted path is not deterministic: %q != %q", firstPath, secondPath)
+	}
+	component := filepath.Base(firstPath)
+	if len(component) > safepath.PortableIdentifierMaxBytes {
+		t.Fatalf("release component length = %d, want <= %d", len(component), safepath.PortableIdentifierMaxBytes)
+	}
+	if !strings.HasSuffix(component, ".nzb") {
+		t.Fatalf("release component %q did not preserve .nzb", component)
+	}
+	if strings.ContainsRune(component, utf8.RuneError) {
+		t.Fatalf("release component contains a broken UTF-8 rune: %q", component)
+	}
+
+	entry := normalNZBEntry(root)
+	entry.Name = name
+	entry.OriginalFilename = name
+	entry.SavePath = savePath
+	entry.OutputName = component
+	claimedPath, newlyClaimed, err := claimUsenetEntryDirectory(root, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !newlyClaimed || claimedPath != firstPath {
+		t.Fatalf("claim = (%q, %t), want (%q, true)", claimedPath, newlyClaimed, firstPath)
+	}
+	if info, err := os.Stat(claimedPath); err != nil || !info.IsDir() {
+		t.Fatalf("compacted release directory was not created: info=%v err=%v", info, err)
 	}
 }
 

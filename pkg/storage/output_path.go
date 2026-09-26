@@ -38,12 +38,13 @@ func NewTorrentOutputName(title, infoHash string) string {
 }
 
 // OutputComponent is the single source of truth for download/symlink/STRM
-// output, not for provider or mount display names. Missing output_name means a
+// output, not for provider or mount display names. New torrent and oversized
+// NZB records pin a safe component in OutputName. Missing output_name means a
 // legacy record: keep its exact old component, including leading whitespace.
 // Callers performing filesystem operations must still validate this component
 // and prove ownership; this method does not grant cleanup authority.
 func (e *Entry) OutputComponent() string {
-	if e.IsTorrent() && e.OutputName != "" {
+	if e.OutputName != "" {
 		return e.OutputName
 	}
 	return utils.RemoveExtension(e.Name)

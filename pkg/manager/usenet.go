@@ -132,6 +132,7 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 		InfoHash:         meta.ID,
 		Name:             meta.Name,
 		OriginalFilename: meta.Name,
+		OutputName:       filepath.Base(downloadPath),
 		Size:             meta.TotalSize,
 		Protocol:         config.ProtocolNZB,
 		Bytes:            meta.TotalSize,

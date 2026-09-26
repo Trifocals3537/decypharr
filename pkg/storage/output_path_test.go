@@ -46,13 +46,13 @@ func TestOutputNameRoundTripPreservesDisplayAndLegacyPaths(t *testing.T) {
 			}
 			got := ProtoToEntry(&pb)
 			wantComponent := " Legacy"
-			if protocol == config.ProtocolTorrent && output != "" {
+			if output != "" {
 				wantComponent = output
 			}
 			if got.Name != entry.Name || got.OutputName != output || got.DownloadPath() != filepath.Join("downloads", wantComponent) {
 				t.Fatalf("round trip changed identity or legacy layout: %#v", got)
 			}
-			if protocol == config.ProtocolTorrent && output != "" {
+			if output != "" {
 				got.Name = "Changed provider title"
 				if got.DownloadPath() != entry.DownloadPath() {
 					t.Fatal("display-name update moved pinned output")

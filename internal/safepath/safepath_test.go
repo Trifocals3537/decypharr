@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestValidateIdentifier(t *testing.T) {
@@ -69,6 +71,80 @@ func TestPortableNameKeyIsCaseInsensitive(t *testing.T) {
 	}
 	if first != second {
 		t.Fatalf("PortableNameKey values differ: %q != %q", first, second)
+	}
+}
+
+func TestCompactIdentifierLeavesValidNameUnchanged(t *testing.T) {
+	t.Parallel()
+	name := "Pokémon.S20E01.Whosawhatsit.mkv"
+	got, err := CompactIdentifier(name, PortableIdentifierMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != name {
+		t.Fatalf("CompactIdentifier() = %q, want unchanged %q", got, name)
+	}
+}
+
+func TestCompactIdentifierPreservesExtensionAndIsDeterministic(t *testing.T) {
+	t.Parallel()
+	name := strings.Repeat("Very.Long.Release.Name.", 20) + "Pokémon.nzb"
+	first, err := CompactIdentifier(name, PortableIdentifierMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompactIdentifier(name, PortableIdentifierMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("compaction is not deterministic: %q != %q", first, second)
+	}
+	if len(first) > PortableIdentifierMaxBytes {
+		t.Fatalf("compacted length = %d, want <= %d", len(first), PortableIdentifierMaxBytes)
+	}
+	if !strings.HasSuffix(first, ".nzb") {
+		t.Fatalf("compacted name %q did not preserve .nzb", first)
+	}
+	if !strings.HasPrefix(first, "Very.Long.Release.Name.") {
+		t.Fatalf("compacted name %q did not preserve readable prefix", first)
+	}
+	if !utf8.ValidString(first) {
+		t.Fatalf("compacted name is not valid UTF-8: %q", first)
+	}
+	if err := ValidateIdentifier(first); err != nil {
+		t.Fatalf("compacted identifier is not portable: %v", err)
+	}
+}
+
+func TestCompactIdentifierSeparatesSamePrefixNames(t *testing.T) {
+	t.Parallel()
+	prefix := strings.Repeat("same-readable-prefix-", 20)
+	first, err := CompactIdentifier(prefix+"first.nzb", PortableIdentifierMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompactIdentifier(prefix+"second.nzb", PortableIdentifierMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("different oversized names compacted to the same identifier %q", first)
+	}
+}
+
+func TestCompactIdentifierRejectsUnsafeSuffixBeforeShortening(t *testing.T) {
+	t.Parallel()
+	prefix := strings.Repeat("safe", PortableIdentifierMaxBytes)
+	for _, value := range []string{
+		prefix + "/outside.nzb",
+		prefix + `\outside.nzb`,
+		prefix + "\x00outside.nzb",
+		prefix + "\noutside.nzb",
+	} {
+		if _, err := CompactIdentifier(value, PortableIdentifierMaxBytes); err == nil {
+			t.Fatalf("CompactIdentifier(%q) accepted unsafe input", value)
+		}
 	}
 }
 

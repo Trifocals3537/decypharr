@@ -73,6 +73,10 @@ func usenetEntryPaths(downloadRoot, category, name string) (savePath, downloadPa
 	if err := safepath.ValidateIdentifier(entryName); err != nil {
 		return "", "", fmt.Errorf("invalid NZB name: %w", err)
 	}
+	entryName, err = safepath.CompactIdentifier(entryName, safepath.PortableIdentifierMaxBytes)
+	if err != nil {
+		return "", "", fmt.Errorf("compact NZB name: %w", err)
+	}
 	if isReservedUsenetPrivateName(entryName) {
 		return "", "", fmt.Errorf("NZB name %q is reserved for internal ownership state", entryName)
 	}

@@ -3,12 +3,24 @@
 package safepath
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+)
+
+const (
+	// PortableIdentifierMaxBytes is a conservative component limit that is
+	// accepted by the filesystems Decypharr supports. Counting UTF-8 bytes is
+	// also conservative for Windows UTF-16 component limits.
+	PortableIdentifierMaxBytes      = 255
+	compactIdentifierDigestHexBytes = sha256.Size * 2
+	compactIdentifierMaxExt         = 16
 )
 
 // ValidateRoot returns an absolute, cleaned root after rejecting locations
@@ -113,6 +125,72 @@ func ValidateIdentifier(value string) error {
 		return fmt.Errorf("path identifier %q is a reserved Windows device name", value)
 	}
 	return nil
+}
+
+// CompactIdentifier returns a deterministic, portable filesystem component.
+// The original value is validated before any shortening so traversal,
+// separators, control characters, reserved device names, and other unsafe
+// input cannot be hidden beyond the retained prefix. Values already within the
+// limit are returned unchanged. Oversized values retain a readable UTF-8
+// prefix and short extension plus the full SHA-256 digest of the original.
+func CompactIdentifier(value string, maxBytes int) (string, error) {
+	if err := ValidateIdentifier(value); err != nil {
+		return "", err
+	}
+	if maxBytes <= 0 {
+		return "", fmt.Errorf("identifier byte limit must be positive")
+	}
+	if len(value) <= maxBytes {
+		return value, nil
+	}
+
+	extension := filepath.Ext(value)
+	if len(extension) > compactIdentifierMaxExt {
+		extension = ""
+	}
+	digest := sha256.Sum256([]byte(value))
+	suffix := "~" + hex.EncodeToString(digest[:])
+	prefixBudget := maxBytes - 1 - compactIdentifierDigestHexBytes - len(extension)
+	if prefixBudget < 1 {
+		return "", fmt.Errorf(
+			"identifier byte limit %d is too small for collision-safe compaction",
+			maxBytes,
+		)
+	}
+
+	prefix := value[:utf8PrefixBytes(value, prefixBudget)]
+	prefix = strings.TrimRight(prefix, " .")
+	if prefix == "" {
+		prefix = "item"
+		if len(prefix) > prefixBudget {
+			return "", fmt.Errorf(
+				"identifier byte limit %d is too small for a portable compacted prefix",
+				maxBytes,
+			)
+		}
+	}
+	compacted := prefix + suffix + extension
+	if len(compacted) > maxBytes {
+		return "", fmt.Errorf("compacted identifier exceeds %d-byte limit", maxBytes)
+	}
+	if err := ValidateIdentifier(compacted); err != nil {
+		return "", fmt.Errorf("compacted identifier is invalid: %w", err)
+	}
+	return compacted, nil
+}
+
+func utf8PrefixBytes(value string, maxBytes int) int {
+	if maxBytes <= 0 {
+		return 0
+	}
+	if len(value) <= maxBytes {
+		return len(value)
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return end
 }
 
 // PortableNameKey returns the case-insensitive Windows-equivalent key for a

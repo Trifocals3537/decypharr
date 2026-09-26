@@ -420,6 +420,22 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, v, http.StatusOK)
 }
 
+func (s *Server) handleLiveness(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	utils.JSONResponse(w, map[string]string{"status": "live"}, http.StatusOK)
+}
+
+func (s *Server) handleReadiness(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	status := s.manager.ReadinessStatus()
+	code := http.StatusOK
+	if !status.Ready {
+		code = http.StatusServiceUnavailable
+		w.Header().Set("Retry-After", "5")
+	}
+	utils.JSONResponse(w, status, code)
+}
+
 func (s *Server) handleRunMountCacheCleanup(w http.ResponseWriter, r *http.Request) {
 	mountMgr := s.manager.MountManager()
 	if mountMgr == nil || !mountMgr.IsReady() {

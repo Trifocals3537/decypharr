@@ -20,6 +20,8 @@ func (s *Server) WebRoutes() http.Handler {
 	r.Handle("/images/*", http.StripPrefix(s.urlBase+"images/", http.FileServer(http.FS(imagesFS))))
 
 	// Public routes - no auth needed
+	r.Get("/live", s.handleLiveness)
+	r.Get("/ready", s.handleReadiness)
 	r.Get("/version", s.handleGetVersion)
 	r.Get("/login", s.LoginHandler)
 	r.Post("/login", s.LoginHandler)

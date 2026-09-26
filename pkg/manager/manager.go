@@ -45,6 +45,7 @@ type Manager struct {
 	logger          zerolog.Logger
 	ready           chan struct{}
 	readyOnce       sync.Once
+	lifecycle       atomic.Pointer[lifecycleSnapshot]
 	streamClient    *http.Client
 	streamWait      func(context.Context, time.Duration) error
 	cdnTraffic      *cdntraffic.Governor
@@ -258,6 +259,7 @@ func New() *Manager {
 
 func (m *Manager) resetLifecycle() {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.setLifecyclePhase(LifecyclePhaseInitializing, "manager is initializing")
 	m.backgroundMu.Lock()
 	m.backgroundStopping = false
 	m.backgroundMu.Unlock()
@@ -688,10 +690,13 @@ func (m *Manager) migrate(ctx context.Context) {
 
 // Start starts the manager and all its components
 func (m *Manager) Start(ctx context.Context) error {
+	m.setLifecyclePhase(LifecyclePhaseStarting, "manager services are starting")
 	if m.initializationErr != nil {
+		m.setLifecyclePhase(LifecyclePhaseFailed, "manager initialization failed")
 		return m.initializationErr
 	}
 	if m.jobQueue == nil {
+		m.setLifecyclePhase(LifecyclePhaseFailed, "active download queue is unavailable")
 		return fmt.Errorf("active download queue is not initialized")
 	}
 	m.startTime = time.Now()
@@ -735,29 +740,36 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Start workers
 	if err := m.StartWorker(m.ctx); err != nil {
+		m.setLifecyclePhase(LifecyclePhaseFailed, "manager workers failed to start")
 		return fmt.Errorf("failed to start manager worker: %w", err)
 	}
-
-	// Close ready channel once, safe for multiple calls
-	m.readyOnce.Do(func() {
-		close(m.ready)
-	})
 
 	// Start the mount manager if set
 	// This also start thr mounting process
 	if m.mountManager != nil {
+		m.setLifecyclePhase(LifecyclePhaseMounting, "media mount is starting")
 		if err := m.mountManager.Start(ctx); err != nil {
-			// If mount manager fails to start, we log the error but continue running the manager
-			m.logger.Error().Err(err).Msg("Failed to start mount manager, continuing without mounting")
-			return nil
+			m.setLifecyclePhase(LifecyclePhaseFailed, "media mount failed to start")
+			return fmt.Errorf("failed to start mount manager: %w", err)
+		}
+		if err := waitForMountReady(ctx, m.mountManager, defaultMountReadyTimeout, defaultMountReadyPollInterval); err != nil {
+			m.setLifecyclePhase(LifecyclePhaseFailed, "media mount did not become ready")
+			return fmt.Errorf("media mount readiness: %w", err)
 		}
 	}
+
+	m.setLifecyclePhase(LifecyclePhaseReady, "media data path is ready")
+	// Publish readiness only after the configured mount has proved ready.
+	m.readyOnce.Do(func() {
+		close(m.ready)
+	})
 
 	return nil
 }
 
 // Stop stops the manager and cleans up all resources
 func (m *Manager) Stop() error {
+	m.setLifecyclePhase(LifecyclePhaseStopping, "manager is stopping")
 	m.logger.Info().Msg("Stopping manager")
 	var shutdownErr error
 
@@ -856,6 +868,7 @@ func (m *Manager) Stop() error {
 	}
 
 	m.logger.Info().Msg("Manager stopped successfully")
+	m.setLifecyclePhase(LifecyclePhaseStopped, "manager is stopped")
 	return nil
 }
 

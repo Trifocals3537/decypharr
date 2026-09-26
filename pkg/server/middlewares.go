@@ -150,6 +150,8 @@ func (s *Server) setupRedirectMiddleware(next http.Handler) http.Handler {
 			strings.HasPrefix(path, "/api/config") ||
 			strings.HasPrefix(path, "/assets") ||
 			strings.HasPrefix(path, "/images") ||
+			path == "/live" ||
+			path == "/ready" ||
 			path == "/version" {
 			next.ServeHTTP(w, r)
 			return

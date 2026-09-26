@@ -84,7 +84,7 @@ ENV DECYPHARR_BIND_ADDRESS=0.0.0.0
 EXPOSE 8282
 VOLUME ["/app"]
 
-HEALTHCHECK --interval=10s --retries=10 CMD ["/usr/bin/healthcheck", "--config", "/app"]
+HEALTHCHECK --interval=10s --timeout=35s --start-period=120s --retries=10 CMD ["/usr/bin/healthcheck", "--config", "/app"]
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/usr/bin/decypharr", "--config", "/app"]

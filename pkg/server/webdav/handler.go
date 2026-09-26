@@ -41,15 +41,12 @@ func NewHandler(mgr *manager.Manager) *Handler {
 
 func (h *Handler) readinessMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-h.manager.IsReady():
-			// WebDAV is ready, proceed
+		if h.manager.DataReady() {
 			next.ServeHTTP(w, r)
-		default:
-			// WebDAV is still initializing
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "WebDAV service is initializing, please try again shortly", http.StatusServiceUnavailable)
+			return
 		}
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "WebDAV service is initializing, please try again shortly", http.StatusServiceUnavailable)
 	})
 }
 

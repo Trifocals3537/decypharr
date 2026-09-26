@@ -402,9 +402,11 @@ func (m *Manager) stopMount(ctx context.Context) {
 	}
 }
 
-// IsReady returns true if the RC server is ready
+// IsReady returns true only when both the RC control plane and the filesystem
+// mount are ready. An available RC server without a mounted data path must not
+// satisfy application readiness.
 func (m *Manager) IsReady() bool {
-	return m.serverReady.Load()
+	return m.serverReady.Load() && m.IsMounted()
 }
 
 // Refresh refreshes directories in the VFS cache

@@ -32,6 +32,11 @@ func Start(ctx context.Context) error {
 	utils.StartGlobalCachedTime()
 	defer utils.StopGlobalCachedTime()
 
+	recoveredRestart, err := config.PrepareRestartStartup()
+	if err != nil {
+		return fmt.Errorf("prepare configuration restart: %w", err)
+	}
+
 	if umaskStr := os.Getenv("UMASK"); umaskStr != "" {
 		umask, err := strconv.ParseInt(umaskStr, 8, 32)
 		if err != nil {
@@ -57,6 +62,10 @@ func Start(ctx context.Context) error {
 			return err
 		}
 		_log := logger.Default()
+		if recoveredRestart {
+			_log.Warn().Msg("Restored the last-known-good configuration after an interrupted restart")
+			recoveredRestart = false
+		}
 
 		// ascii banner
 		fmt.Printf(`
@@ -80,6 +89,9 @@ func Start(ctx context.Context) error {
 		svcCtx, cancelSvc := context.WithCancel(ctx)
 
 		resetFunc := func() error {
+			if err := config.MarkRestartApplying(); err != nil {
+				return fmt.Errorf("prepare restart rollback: %w", err)
+			}
 			config.Reset()
 			// Stop manager to reset ready channel and cleanup resources
 			if err := mgr.Reset(); err != nil {
@@ -104,6 +116,16 @@ func Start(ctx context.Context) error {
 		go func(ctx context.Context) {
 			serviceDone <- startServices(ctx, mgr, srv)
 		}(svcCtx)
+		restartCommitErr := make(chan error, 1)
+		go func(ready <-chan struct{}) {
+			select {
+			case <-ready:
+				if err := config.CommitRestart(); err != nil {
+					restartCommitErr <- err
+				}
+			case <-svcCtx.Done():
+			}
+		}(mgr.IsReady())
 
 		select {
 		case <-ctx.Done():
@@ -124,7 +146,11 @@ func Start(ctx context.Context) error {
 			_log.Info().Msg("Restarting Decypharr...")
 			restarted, err := finishRestart(ctx, serviceDone, resetFunc, shutdownFunc)
 			if err != nil {
-				return fmt.Errorf("restart aborted: %w", err)
+				_, rollbackErr := config.RollbackApplyingRestart()
+				return errors.Join(
+					fmt.Errorf("restart aborted: %w", err),
+					wrapRestartRollbackError(rollbackErr),
+				)
 			}
 			if !restarted {
 				return nil
@@ -139,15 +165,33 @@ func Start(ctx context.Context) error {
 				// still unwinding. Let the process supervisor restart from a
 				// clean address space instead of closing shared resources
 				// underneath those handlers.
-				return err
+				_, rollbackErr := config.RollbackApplyingRestart()
+				return errors.Join(err, wrapRestartRollbackError(rollbackErr))
 			}
 			shutdownFunc()
 			if ctx.Err() != nil {
 				return nil
 			}
 			return errServicesStopped
+
+		case err := <-restartCommitErr:
+			cancelSvc()
+			serviceErr := <-serviceDone
+			_, rollbackErr := config.RollbackApplyingRestart()
+			return errors.Join(
+				fmt.Errorf("commit configuration restart: %w", err),
+				serviceErr,
+				wrapRestartRollbackError(rollbackErr),
+			)
 		}
 	}
+}
+
+func wrapRestartRollbackError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("restore last-known-good configuration: %w", err)
 }
 
 func validateDeploymentConfig(cfg *config.Config) error {

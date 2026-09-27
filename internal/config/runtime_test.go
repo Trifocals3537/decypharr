@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,6 +95,12 @@ func TestUpdateAfterColdChangePreservesDesiredState(t *testing.T) {
 	if Get().BindAddress == "192.0.2.20" {
 		t.Fatal("cold listener change was published early")
 	}
+	if err := MarkRestartApplying(); err != nil {
+		t.Fatal(err)
+	}
+	if err := CommitRestart(); err != nil {
+		t.Fatal(err)
+	}
 	Reset()
 	if got := Get().BindAddress; got != "192.0.2.20" {
 		t.Fatalf("pending BindAddress was lost: %q", got)
@@ -177,6 +184,7 @@ func TestUpdateRollsBackAuthWhenMainConfigCannotCommit(t *testing.T) {
 	}
 
 	if _, err := Update(func(draft *Config) error {
+		draft.BindAddress = "192.0.2.99"
 		draft.Auth.APIToken = "must-not-commit"
 		return nil
 	}); err == nil {
@@ -192,6 +200,9 @@ func TestUpdateRollsBackAuthWhenMainConfigCannotCommit(t *testing.T) {
 	}
 	if Get().Auth.APIToken == "must-not-commit" {
 		t.Fatal("failed update was published")
+	}
+	if _, err := os.Stat(restartTransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed update retained restart transaction: %v", err)
 	}
 }
 

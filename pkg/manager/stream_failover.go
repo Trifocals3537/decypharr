@@ -293,23 +293,17 @@ func streamPreferenceKey(entry *storage.Entry, filename string) string {
 	return entry.InfoHash + "\x00" + filename
 }
 
-func (m *Manager) updateActiveStreamProvider(entryName, filename, provider string) {
-	if m == nil || m.activeStreams == nil || provider == "" {
+func (m *Manager) updateActiveStreamProvider(streamID, provider string) {
+	if m == nil || m.activeStreams == nil || streamID == "" || provider == "" {
 		return
 	}
-	m.activeStreams.Range(func(streamID string, stream *ActiveStream) bool {
-		if stream == nil || stream.EntryName != entryName || stream.FileName != filename || stream.Debrid == provider {
-			return true
+	m.activeStreams.Compute(streamID, func(current *ActiveStream, loaded bool) (*ActiveStream, xsync.ComputeOp) {
+		if !loaded || current == nil || current.Debrid == provider {
+			return current, xsync.CancelOp
 		}
-		m.activeStreams.Compute(streamID, func(current *ActiveStream, loaded bool) (*ActiveStream, xsync.ComputeOp) {
-			if !loaded || current == nil || current.EntryName != entryName || current.FileName != filename || current.Debrid == provider {
-				return current, xsync.CancelOp
-			}
-			updated := *current
-			updated.Debrid = provider
-			updated.LastActive = time.Now().Unix()
-			return &updated, xsync.UpdateOp
-		})
-		return true
+		updated := *current
+		updated.Debrid = provider
+		updated.LastActive = time.Now().Unix()
+		return &updated, xsync.UpdateOp
 	})
 }

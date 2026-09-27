@@ -33,9 +33,10 @@ func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w
 	if streamID != "" {
 		defer h.manager.UntrackStream(streamID)
 	}
+	streamCtx := manager.WithActiveStreamID(r.Context(), streamID)
 
 	headersWritten := false
-	err = h.manager.Stream(r.Context(), entry, info.Name(), start, end, w, func(meta *manager.StreamMetadata) error {
+	err = h.manager.Stream(streamCtx, entry, info.Name(), start, end, w, func(meta *manager.StreamMetadata) error {
 		if err := h.handleSuccessfulResponse(w, meta, start, end); err != nil {
 			return err
 		}

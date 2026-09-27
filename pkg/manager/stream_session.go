@@ -558,11 +558,13 @@ func (m *Manager) OpenStream(
 	offset int64,
 	client string,
 ) (StreamReader, error) {
+	streamID := m.TrackStream(entry, filename, client)
+	ctx = WithActiveStreamID(ctx, streamID)
 	session, err := m.openStreamUntracked(ctx, entry, filename, offset, client, StreamSessionOptions{})
 	if err != nil {
+		m.UntrackStream(streamID)
 		return nil, err
 	}
-	streamID := m.TrackStream(entry, filename, client)
 	session.onClose = func() { m.UntrackStream(streamID) }
 	return session, nil
 }

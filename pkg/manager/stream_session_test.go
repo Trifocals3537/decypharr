@@ -537,14 +537,19 @@ func TestTrackStreamKeepsConcurrentSameFileConsumersSeparate(t *testing.T) {
 		t.Fatalf("active streams = %d, want 2", got)
 	}
 
+	mgr.updateActiveStreamProvider(first, "fallback")
+	streams := mgr.GetActiveStreams()
+	providers := make(map[string]string, len(streams))
+	for _, stream := range streams {
+		providers[stream.ID] = stream.Debrid
+	}
+	if len(streams) != 2 || providers[first] != "fallback" || providers[second] != "primary" {
+		t.Fatalf("active stream providers = %+v, want only first consumer on fallback", providers)
+	}
+
 	mgr.UntrackStream(first)
 	if got := mgr.GetActiveStreamsCount(); got != 1 {
 		t.Fatalf("active streams after first close = %d, want 1", got)
-	}
-	mgr.updateActiveStreamProvider(entry.Name, "video.mkv", "fallback")
-	streams := mgr.GetActiveStreams()
-	if len(streams) != 1 || streams[0].ID != second || streams[0].Debrid != "fallback" {
-		t.Fatalf("remaining stream = %+v, want second consumer on fallback", streams)
 	}
 
 	mgr.UntrackStream(second)

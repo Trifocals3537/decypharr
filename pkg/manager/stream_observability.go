@@ -9,6 +9,7 @@ import (
 )
 
 type streamRequestContextKey struct{}
+type activeStreamContextKey struct{}
 
 type streamRequestError struct {
 	id  string
@@ -37,6 +38,27 @@ func streamRequestID(ctx context.Context) string {
 	return id
 }
 
+// WithActiveStreamID associates a tracked consumer with work performed for
+// that consumer. Provider handoffs can then update only the affected active
+// stream instead of every client reading the same file.
+func WithActiveStreamID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, activeStreamContextKey{}, id)
+}
+
+func activeStreamID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(activeStreamContextKey{}).(string)
+	return id
+}
+
 func wrapStreamRequestError(id string, err error) error {
 	if err == nil || id == "" {
 		return err
@@ -59,7 +81,7 @@ func wrapStreamRequestError(id string, err error) error {
 		}
 	}
 	var existing interface{ RequestID() string }
-	if errors.As(err, &existing) {
+	if errors.As(err, &existing) && existing.RequestID() != "" {
 		return err
 	}
 	return streamRequestError{id: id, err: err}
@@ -88,6 +110,12 @@ func DiagnoseStreamFailure(err error) StreamFailureDiagnostic {
 		diagnostic.RequestID = correlated.RequestID()
 	}
 	diagnostic.Status, diagnostic.Retryable = StreamErrorHTTPStatus(err)
+	var statusCarrier interface{ HTTPStatus() int }
+	if errors.As(err, &statusCarrier) {
+		if status := statusCarrier.HTTPStatus(); status >= 400 && status <= 599 {
+			diagnostic.Status = status
+		}
+	}
 
 	switch {
 	case errors.Is(err, context.Canceled):

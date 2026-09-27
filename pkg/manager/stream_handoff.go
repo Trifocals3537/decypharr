@@ -97,7 +97,7 @@ func (m *Manager) handoffHTTPStream(
 		if current.err() == nil {
 			m.streamHandoffSuccesses.Add(1)
 			m.markStreamFileCircuitSuccess(original, filename, candidate.provider)
-			m.markStreamProviderReady(original, filename, candidate)
+			m.markStreamProviderReady(ctx, original, filename, candidate)
 			m.logger.Info().
 				Str("event", "stream.handoff").
 				Str("outcome", "succeeded").

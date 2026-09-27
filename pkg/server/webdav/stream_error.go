@@ -9,9 +9,15 @@ import (
 )
 
 func normalizeStreamError(err error, headersWritten bool) *customerror.Error {
+	var correlated interface{ RequestID() string }
+	requestID := ""
+	if errors.As(err, &correlated) {
+		requestID = correlated.RequestID()
+	}
 	var existing *customerror.Error
 	if errors.As(err, &existing) {
 		existing.HeadersWritten = headersWritten
+		existing.WithRequestID(requestID)
 		return existing
 	}
 
@@ -23,6 +29,7 @@ func normalizeStreamError(err error, headersWritten bool) *customerror.Error {
 		code = "stream.invalid_range"
 	}
 	streamErr := customerror.NewError(err, status, code, customerror.IsSilentError(err), headersWritten)
+	streamErr.WithRequestID(requestID)
 	if retryable {
 		streamErr.Retryable()
 	}

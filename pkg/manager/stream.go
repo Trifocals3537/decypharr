@@ -200,7 +200,7 @@ func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename str
 // TrackStream registers an active stream for observability and returns the stream ID.
 // Call UntrackStream with the returned ID when streaming completes.
 func (m *Manager) TrackStream(entry *storage.Entry, filename, client string) string {
-	if entry == nil {
+	if m == nil || m.activeStreams == nil || entry == nil {
 		return ""
 	}
 	file, ok := entry.Files[filename]
@@ -547,7 +547,7 @@ func (m *Manager) streamHTTPFromCandidate(
 			}
 		}
 
-		m.markStreamProviderReady(original, filename, candidate)
+		m.markStreamProviderReady(ctx, original, filename, candidate)
 
 		if onReady != nil {
 			if readyErr := onReady(meta); readyErr != nil {
@@ -625,7 +625,7 @@ func (m *Manager) streamHTTPFromCandidate(
 	}
 }
 
-func (m *Manager) markStreamProviderReady(original *storage.Entry, filename string, candidate streamCandidate) {
+func (m *Manager) markStreamProviderReady(ctx context.Context, original *storage.Entry, filename string, candidate streamCandidate) {
 	if original == nil {
 		return
 	}
@@ -638,7 +638,7 @@ func (m *Manager) markStreamProviderReady(original *storage.Entry, filename stri
 			Msg("Stream provider recovered")
 	}
 	m.rememberStreamProvider(original, filename, candidate.provider)
-	m.updateActiveStreamProvider(original.Name, filename, candidate.provider)
+	m.updateActiveStreamProvider(activeStreamID(ctx), candidate.provider)
 	if candidate.provider == "" || strings.EqualFold(candidate.provider, original.ActiveProvider) {
 		return
 	}

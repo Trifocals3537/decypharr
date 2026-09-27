@@ -81,8 +81,14 @@ func (h *Handler) handleIdentityStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if linkErr != nil {
-			h.logger.Rate(infohash+"/"+fileID).Warn().Err(linkErr).
-				Msgf("STRM redirect failed; proxying %s", file.Name)
+			diagnostic := manager.DiagnoseStreamFailure(linkErr)
+			h.logger.Rate(infohash+"/"+fileID).Warn().
+				Str("event", "stream.redirect_fallback").
+				Str("outcome", "proxying").
+				Str("failure_class", diagnostic.Class).
+				Int("status", diagnostic.Status).
+				Str("file", file.Name).
+				Msg("STRM redirect failed; proxying through Decypharr")
 		}
 	}
 
@@ -149,16 +155,40 @@ func (h *Handler) writeStreamError(logKey string, err error, w http.ResponseWrit
 			}
 			http.Error(w, http.StatusText(status), status)
 		}
-		if h.logger != nil {
-			h.logger.Rate(logKey).Error().Err(err).Msgf("Error streaming file: %s", logKey)
-		}
+		h.logStreamFailure(logKey, err, streamErr)
 		return
 	}
 	if customerror.IsSilentError(err) {
 		return
 	}
 	if h.logger != nil {
-		h.logger.Rate(logKey).Error().Err(err).Msgf("Error streaming file: %s", logKey)
+		h.logStreamFailure(logKey, err, nil)
 	}
 	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+}
+
+func (h *Handler) logStreamFailure(logKey string, err error, streamErr *customerror.Error) {
+	if h == nil || h.logger == nil {
+		return
+	}
+	diagnostic := manager.DiagnoseStreamFailure(err)
+	code := "server.internal_error"
+	headersWritten := false
+	if streamErr != nil {
+		if streamErr.Code != "" {
+			code = streamErr.Code
+		}
+		headersWritten = streamErr.HeadersWritten
+	}
+	h.logger.Rate(logKey).Error().
+		Str("event", "stream.request_failed").
+		Str("outcome", "failed").
+		Str("stream_request_id", diagnostic.RequestID).
+		Str("path", logKey).
+		Str("failure_class", diagnostic.Class).
+		Str("code", code).
+		Int("status", diagnostic.Status).
+		Bool("retryable", diagnostic.Retryable).
+		Bool("headers_written", headersWritten).
+		Msg("Media stream request failed")
 }

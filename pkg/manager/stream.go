@@ -53,8 +53,10 @@ type ActiveStream struct {
 // registerStream registers an active stream for observability.
 // Returns the stream ID so the caller can remove it when streaming completes.
 func (m *Manager) registerStream(entryName, fileName string, fileSize int64, source, debrid, client string) string {
-	// Use deterministic ID to ensure a single entry per file
-	streamID := entryName + ":" + fileName
+	// Each consumer gets its own identity. A deterministic file key caused two
+	// clients playing the same file to overwrite each other, and the first close
+	// then removed the remaining live stream from observability.
+	streamID := fmt.Sprintf("s%016x", m.activeStreamSequence.Add(1))
 	now := utils.NowUnix()
 
 	stream := &ActiveStream{
@@ -97,9 +99,10 @@ func (m *Manager) GetActiveStreamsCount() int {
 }
 
 type StreamError struct {
-	Err       error
-	Retryable bool
-	LinkError bool // true if we should try a new link
+	Err             error
+	Retryable       bool
+	LinkError       bool // true if we should try a new link
+	StreamRequestID string
 }
 
 func (e StreamError) Error() string {
@@ -112,6 +115,10 @@ func (e StreamError) Unwrap() error {
 
 func (e StreamError) IsRetryable() bool {
 	return e.Retryable
+}
+
+func (e StreamError) RequestID() string {
+	return e.StreamRequestID
 }
 
 // StreamMetadata describes the headers/status for a streaming response before data flows.
@@ -160,7 +167,12 @@ func isConnectionError(err error) bool {
 
 // Stream streams a file from an entry to the provided writer within the specified byte range.
 // client identifies the caller (e.g., User-Agent for WebDAV, "DFS" for DFS mount).
-func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename string, start, end int64, writer io.Writer, onReady StreamReadyFunc, client string) error {
+func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename string, start, end int64, writer io.Writer, onReady StreamReadyFunc, client string) (resultErr error) {
+	ctx, requestID := m.beginStreamRequest(ctx)
+	defer func() {
+		resultErr = wrapStreamRequestError(requestID, resultErr)
+	}()
+
 	if writer == nil {
 		return fmt.Errorf("writer is nil")
 	}
@@ -358,6 +370,7 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 		m.logger.Debug().
 			Str("event", "stream.provider_failover").
 			Str("outcome", "retrying").
+			Str("stream_request_id", streamRequestID(ctx)).
 			Str("failed_provider", providerLabel).
 			Str("next_provider", nextProvider).
 			Str("failure_class", weather.Class).

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -296,13 +297,19 @@ func (m *Manager) updateActiveStreamProvider(entryName, filename, provider strin
 	if m == nil || m.activeStreams == nil || provider == "" {
 		return
 	}
-	streamID := entryName + ":" + filename
-	stream, ok := m.activeStreams.Load(streamID)
-	if !ok || stream == nil || stream.Debrid == provider {
-		return
-	}
-	updated := *stream
-	updated.Debrid = provider
-	updated.LastActive = time.Now().Unix()
-	m.activeStreams.Store(streamID, &updated)
+	m.activeStreams.Range(func(streamID string, stream *ActiveStream) bool {
+		if stream == nil || stream.EntryName != entryName || stream.FileName != filename || stream.Debrid == provider {
+			return true
+		}
+		m.activeStreams.Compute(streamID, func(current *ActiveStream, loaded bool) (*ActiveStream, xsync.ComputeOp) {
+			if !loaded || current == nil || current.EntryName != entryName || current.FileName != filename || current.Debrid == provider {
+				return current, xsync.CancelOp
+			}
+			updated := *current
+			updated.Debrid = provider
+			updated.LastActive = time.Now().Unix()
+			return &updated, xsync.UpdateOp
+		})
+		return true
+	})
 }

@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -101,6 +103,36 @@ func TestWriteStreamErrorPreservesProviderRetryAfter(t *testing.T) {
 	handler.writeStreamError("movie", streamErr, response)
 	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "91" {
 		t.Fatalf("response = status %d Retry-After %q", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
+func TestWriteStreamErrorLogsOnlySecretSafeDiagnostics(t *testing.T) {
+	var logs bytes.Buffer
+	handler := &Handler{logger: logger.NewRateLimitedLogger(
+		logger.WithLogger(zerolog.New(&logs)),
+	)}
+	secret := "https://cdn.example/media?token=do-not-log"
+	providerErr := manager.StreamError{
+		Err:       link.NewRetryableError(errors.New(secret), "503"),
+		Retryable: true,
+	}
+	response := httptest.NewRecorder()
+	handler.writeStreamError("Movie/video.mkv", normalizeStreamError(providerErr, false), response)
+
+	logged := logs.String()
+	if strings.Contains(logged, secret) || strings.Contains(logged, "do-not-log") {
+		t.Fatalf("stream log exposed provider secret: %s", logged)
+	}
+	for _, field := range []string{
+		`"event":"stream.request_failed"`,
+		`"failure_class":"upstream_status"`,
+		`"code":"stream.provider_unavailable"`,
+		`"status":503`,
+		`"retryable":true`,
+	} {
+		if !strings.Contains(logged, field) {
+			t.Fatalf("stream log %q missing %s", logged, field)
+		}
 	}
 }
 

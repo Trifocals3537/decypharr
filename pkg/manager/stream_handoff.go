@@ -64,6 +64,7 @@ func (m *Manager) handoffHTTPStream(
 			m.logger.Debug().
 				Str("event", "stream.handoff").
 				Str("outcome", "link_failed").
+				Str("stream_request_id", streamRequestID(ctx)).
 				Str("failed_provider", failedCandidate.provider).
 				Str("provider", candidate.provider).
 				Str("file", filename).
@@ -100,6 +101,7 @@ func (m *Manager) handoffHTTPStream(
 			m.logger.Info().
 				Str("event", "stream.handoff").
 				Str("outcome", "succeeded").
+				Str("stream_request_id", streamRequestID(ctx)).
 				Str("failed_provider", failedCandidate.provider).
 				Str("provider", candidate.provider).
 				Str("file", filename).
@@ -124,6 +126,7 @@ func (m *Manager) handoffHTTPStream(
 		m.logger.Debug().
 			Str("event", "stream.handoff").
 			Str("outcome", "failed").
+			Str("stream_request_id", streamRequestID(ctx)).
 			Str("provider", candidate.provider).
 			Str("file", filename).
 			Int64("bytes_delivered", current.written).

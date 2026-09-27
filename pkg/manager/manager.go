@@ -121,7 +121,9 @@ type Manager struct {
 	debridSpeedTestResults *xsync.Map[string, debridTypes.SpeedTestResult]
 
 	// Active streams tracking
-	activeStreams *xsync.Map[string, *ActiveStream]
+	activeStreams         *xsync.Map[string, *ActiveStream]
+	activeStreamSequence  atomic.Uint64
+	streamRequestSequence atomic.Uint64
 
 	// Successful pre-byte failovers are remembered briefly so range-heavy
 	// playback does not retry a known-bad primary on every seek. Counters are

@@ -116,6 +116,32 @@ func Update(edit func(*Config) error) (UpdateResult, error) {
 	if err := edit(draft); err != nil {
 		return UpdateResult{}, err
 	}
+	// Normalize before deciding whether the update is hot. This also makes the
+	// rollback capsule's desired digest match the document Save will persist.
+	if err := draft.setDefaultsForPath(GetMainPath(), false); err != nil {
+		return UpdateResult{}, err
+	}
+	published, err := Clone(draft)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	restartRequired := current.RequiresRestart(published)
+	var restartPrepared *restartPreparation
+	if restartRequired {
+		restartPrepared, err = prepareRestartTransaction(current, published)
+		if err != nil {
+			return UpdateResult{}, err
+		}
+	}
+	abortRestart := func(updateErr error) error {
+		if restartPrepared == nil {
+			return updateErr
+		}
+		if abortErr := restartPrepared.Rollback(); abortErr != nil {
+			return errors.Join(updateErr, fmt.Errorf("remove prepared restart rollback: %w", abortErr))
+		}
+		return updateErr
+	}
 
 	authChanged := !reflect.DeepEqual(base.Auth, draft.Auth)
 	var previousAuth []byte
@@ -128,10 +154,10 @@ func Update(edit func(*Config) error) (UpdateResult, error) {
 		case errors.Is(err, os.ErrNotExist):
 			err = nil
 		default:
-			return UpdateResult{}, fmt.Errorf("read existing authentication before update: %w", err)
+			return UpdateResult{}, abortRestart(fmt.Errorf("read existing authentication before update: %w", err))
 		}
 		if err := draft.saveAuth(draft.Auth); err != nil {
-			return UpdateResult{}, fmt.Errorf("persist authentication update: %w", err)
+			return UpdateResult{}, abortRestart(fmt.Errorf("persist authentication update: %w", err))
 		}
 	}
 
@@ -139,17 +165,12 @@ func Update(edit func(*Config) error) (UpdateResult, error) {
 		if authChanged {
 			rollbackErr := restoreAuthFile(draft.AuthFile(), previousAuth, previousAuthExists)
 			if rollbackErr != nil {
-				return UpdateResult{}, errors.Join(err, fmt.Errorf("roll back authentication update: %w", rollbackErr))
+				return UpdateResult{}, abortRestart(errors.Join(err, fmt.Errorf("roll back authentication update: %w", rollbackErr)))
 			}
 		}
-		return UpdateResult{}, err
+		return UpdateResult{}, abortRestart(err)
 	}
 
-	published, err := Clone(draft)
-	if err != nil {
-		return UpdateResult{}, err
-	}
-	restartRequired := current.RequiresRestart(published)
 	desiredConfig.Store(published)
 	active := current
 	if !restartRequired {

@@ -59,13 +59,7 @@ func (s *SABnzbd) categoryContext(next http.Handler) http.Handler {
 			return
 		}
 
-		category := r.URL.Query().Get("category")
-		if category == "" {
-			category = r.URL.Query().Get("cat")
-		}
-		if category == "" {
-			category = r.FormValue("category")
-		}
+		category := r.FormValue("category")
 		if category == "" {
 			category = r.FormValue("cat")
 		}
@@ -92,18 +86,11 @@ func getCategory(ctx context.Context) string {
 // modeContext extracts the mode parameter from the request
 func (s *SABnzbd) modeContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mode := r.URL.Query().Get("mode")
-		if mode == "" {
-			// Check form data
-			_ = r.ParseForm()
-			mode = r.Form.Get("mode")
-		}
-
-		// Extract category for Arr integration
-		category := r.URL.Query().Get("cat")
-		if category == "" {
-			category = r.Form.Get("cat")
-		}
+		// categoryContext has already parsed the request through the bounded
+		// form helpers, so FormValue can safely support both query parameters
+		// and the POST form fields used by SAB-compatible clients.
+		mode := r.FormValue("mode")
+		category := getCategory(r.Context())
 
 		// Keep the Arr admitted by authContext. Replacing it here used to
 		// discard configured provider selection and download policy after
@@ -126,8 +113,8 @@ func (s *SABnzbd) modeContext(next http.Handler) http.Handler {
 // Only a valid host and token will be added to the context/config. The rest are manual
 func (s *SABnzbd) authContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.URL.Query().Get("ma_username")
-		token := r.URL.Query().Get("ma_password")
+		host := r.FormValue("ma_username")
+		token := r.FormValue("ma_password")
 		category := getCategory(r.Context())
 		a, err := s.authenticate(category, host, token)
 		if err != nil {

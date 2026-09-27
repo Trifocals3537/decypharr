@@ -299,6 +299,12 @@ func removeMetadataFile(root, target string) error {
 	// validation Lstat while another root-relative removal is in flight.
 	unlock := lockMetadataRemoval(target)
 	defer unlock()
+	return removeMetadataFileLocked(root, target)
+}
+
+// removeMetadataFileLocked performs the complete security validation and
+// durable removal while its caller holds the target's metadata removal lock.
+func removeMetadataFileLocked(root, target string) error {
 	absoluteRoot, leaf, err := metadataDirectLeaf(root, target)
 	if err != nil {
 		return err

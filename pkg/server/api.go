@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
@@ -757,6 +758,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Only update dependent live state after the snapshot is durable and
 		// published. Cold updates are applied by the replacement process.
+		if err := logger.SetLevel(result.Active.LogLevel); err != nil {
+			s.logger.Error().Err(err).Msg("Failed to apply log level after live update")
+		}
 		s.manager.Arr().SyncFromConfig(result.Active.Arrs)
 		if strmChanged && s.manager.Strm() != nil {
 			s.manager.Strm().SweepAsync("config_change")

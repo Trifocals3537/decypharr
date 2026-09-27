@@ -54,8 +54,11 @@ func TestProbeDownloadUsesCredentialFreeBoundedRange(t *testing.T) {
 	if bytesRead != 4096 {
 		t.Fatalf("bytesRead = %d, want 4096", bytesRead)
 	}
-	if duration <= 0 {
-		t.Fatalf("duration = %s, want positive duration", duration)
+	// A loopback request can complete within one clock tick on Windows, where
+	// time.Since may legitimately report zero. The production speed calculation
+	// already treats that as an unmeasurable sample rather than dividing by zero.
+	if duration < 0 {
+		t.Fatalf("duration = %s, want non-negative duration", duration)
 	}
 }
 

@@ -374,6 +374,12 @@ func LoadForValidation(path string) (*Config, error) {
 }
 
 func (c *Config) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {
+	case "", "trace", "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("unsupported log level %q", c.LogLevel)
+	}
+
 	if err := validateDebrids(c.Debrids); err != nil {
 		return err
 	}
@@ -840,6 +846,10 @@ func clearHotFields(c *Config) {
 	// (main app, qbit, sabnzbd, and webdav), so they apply without a restart.
 	c.UseAuth = false
 	c.EnableWebdavAuth = false
+
+	// The logger core owns a process-wide atomic level filter, so existing
+	// component loggers observe changes without being rebuilt.
+	c.LogLevel = ""
 
 	// Arr state has an explicit post-publish synchronization hook in the HTTP
 	// configuration handler.

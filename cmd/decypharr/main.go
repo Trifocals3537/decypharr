@@ -53,13 +53,19 @@ func Start(ctx context.Context) error {
 		}
 	}
 
-	mgr := manager.New()
+	var mgr *manager.Manager
 
 	// Create the logger path if it doesn't exist
 	for {
 		cfg := config.Get()
 		if err := validateDeploymentConfig(cfg); err != nil {
 			return err
+		}
+		if err := logger.SetLevel(cfg.LogLevel); err != nil {
+			return fmt.Errorf("configure log level: %w", err)
+		}
+		if mgr == nil {
+			mgr = manager.New()
 		}
 		_log := logger.Default()
 		if recoveredRestart {
@@ -93,6 +99,9 @@ func Start(ctx context.Context) error {
 				return fmt.Errorf("prepare restart rollback: %w", err)
 			}
 			config.Reset()
+			if err := logger.SetLevel(config.Get().LogLevel); err != nil {
+				return fmt.Errorf("apply restarted log level: %w", err)
+			}
 			// Stop manager to reset ready channel and cleanup resources
 			if err := mgr.Reset(); err != nil {
 				return err

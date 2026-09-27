@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -158,6 +159,25 @@ func TestSetDefaultsPreservesExplicitBindAddress(t *testing.T) {
 	}
 	if cfg.BindAddress != "0.0.0.0" {
 		t.Fatalf("BindAddress = %q, want explicit override", cfg.BindAddress)
+	}
+}
+
+func TestValidateLogLevel(t *testing.T) {
+	base := Config{
+		Debrids:        []Debrid{{Name: "primary", Provider: "realdebrid", APIKey: "test-key"}},
+		DownloadFolder: "/downloads",
+	}
+	for _, level := range []string{"", "trace", "DEBUG", "info", "warn", "warning", "error"} {
+		cfg := base
+		cfg.LogLevel = level
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() rejected log level %q: %v", level, err)
+		}
+	}
+
+	base.LogLevel = "verbose"
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported log level") {
+		t.Fatalf("Validate() error = %v, want unsupported log level", err)
 	}
 }
 

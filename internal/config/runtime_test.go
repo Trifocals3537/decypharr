@@ -51,6 +51,28 @@ func TestUpdatePublishesImmutableHotSnapshot(t *testing.T) {
 	}
 }
 
+func TestUpdatePublishesLogLevelWithoutRestart(t *testing.T) {
+	current := useRuntimeConfig(t)
+	want := "debug"
+	if current.LogLevel == want {
+		want = "warn"
+	}
+
+	result, err := Update(func(draft *Config) error {
+		draft.LogLevel = want
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RestartRequired {
+		t.Fatal("log-level update unexpectedly required a restart")
+	}
+	if got := Get().LogLevel; got != want {
+		t.Fatalf("active LogLevel = %q, want %q", got, want)
+	}
+}
+
 func TestUpdatePersistsColdConfigWithoutPublishing(t *testing.T) {
 	previous := useRuntimeConfig(t)
 	originalBind := previous.BindAddress

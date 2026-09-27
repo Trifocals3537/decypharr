@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -104,14 +106,62 @@ func TestWriteStreamErrorPreservesProviderRetryAfter(t *testing.T) {
 	}
 }
 
+func TestWriteStreamErrorLogsOnlySecretSafeDiagnostics(t *testing.T) {
+	var logs bytes.Buffer
+	handler := &Handler{logger: logger.NewRateLimitedLogger(
+		logger.WithLogger(zerolog.New(&logs)),
+	)}
+	secret := "https://cdn.example/media?token=do-not-log"
+	providerErr := manager.StreamError{
+		Err:             link.NewRetryableError(errors.New(secret), "503"),
+		Retryable:       true,
+		StreamRequestID: "r-secret-safe",
+	}
+	response := httptest.NewRecorder()
+	handler.writeStreamError("Movie/video.mkv", normalizeStreamError(providerErr, false), response)
+
+	logged := logs.String()
+	if strings.Contains(logged, secret) || strings.Contains(logged, "do-not-log") {
+		t.Fatalf("stream log exposed provider secret: %s", logged)
+	}
+	for _, field := range []string{
+		`"event":"stream.request_failed"`,
+		`"failure_class":"upstream_status"`,
+		`"code":"stream.provider_unavailable"`,
+		`"status":503`,
+		`"retryable":true`,
+		`"stream_request_id":"r-secret-safe"`,
+	} {
+		if !strings.Contains(logged, field) {
+			t.Fatalf("stream log %q missing %s", logged, field)
+		}
+	}
+}
+
 func TestNormalizeStreamErrorPreservesCustomStatusAndSilencesCancellation(t *testing.T) {
 	existing := customerror.NewArticleNotFoundError(errors.New("article missing"))
-	if got := normalizeStreamError(existing, false); got != existing || got.HTTPStatus() != http.StatusGone {
+	correlated := manager.StreamError{Err: existing, StreamRequestID: "r-article"}
+	if got := normalizeStreamError(correlated, false); got != existing || got.HTTPStatus() != http.StatusGone || got.RequestID() != "r-article" {
 		t.Fatalf("custom error was not preserved: %+v", got)
+	}
+	diagnostic := manager.DiagnoseStreamFailure(existing)
+	if diagnostic.RequestID != "r-article" || diagnostic.Status != http.StatusGone {
+		t.Fatalf("custom error diagnostic = %+v, want correlated HTTP 410", diagnostic)
+	}
+	var logs bytes.Buffer
+	handler := &Handler{logger: logger.NewRateLimitedLogger(
+		logger.WithLogger(zerolog.New(&logs)),
+	)}
+	response := httptest.NewRecorder()
+	handler.writeStreamError("episode", existing, response)
+	if response.Code != http.StatusGone ||
+		!strings.Contains(logs.String(), `"status":410`) ||
+		!strings.Contains(logs.String(), `"stream_request_id":"r-article"`) {
+		t.Fatalf("custom error response/log = %d/%s", response.Code, logs.String())
 	}
 
 	canceled := normalizeStreamError(context.Canceled, false)
-	response := httptest.NewRecorder()
+	response = httptest.NewRecorder()
 	(&Handler{}).writeStreamError("movie", canceled, response)
 	if response.Code != http.StatusOK || response.Body.Len() != 0 {
 		t.Fatalf("cancellation wrote response status/body = %d/%q", response.Code, response.Body.String())

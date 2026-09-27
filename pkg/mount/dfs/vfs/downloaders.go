@@ -200,8 +200,11 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 		streamID: "",
 	}
 	dls.openStream = func(streamCtx context.Context, offset int64) (manager.StreamReader, error) {
+		dls.mu.Lock()
+		streamID := dls.streamID
+		dls.mu.Unlock()
 		return mgr.OpenStreamUntrackedWithOptions(
-			streamCtx,
+			manager.WithActiveStreamID(streamCtx, streamID),
 			item.entry,
 			item.filename,
 			offset,

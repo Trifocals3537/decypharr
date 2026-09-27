@@ -464,7 +464,7 @@ func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.E
 
 		if entry.Bad {
 			// Entry is still bad
-			return emptyDownloadLink, fmt.Errorf("entry %s(%s) still bad after repair, un-repairable", entry.GetFolder(), dl.Link)
+			return emptyDownloadLink, fmt.Errorf("entry %s still bad after repair, un-repairable", entry.GetFolder())
 		}
 		// Bypass singleflight re-entry to avoid deadlock
 		return s.fetchAndValidate(ctx, entry, filename, repairAttempt+1, linkRefreshes)
@@ -579,7 +579,7 @@ func (s *Service) fetchLink(ctx context.Context, entry *storage.Entry, filename 
 
 		if entry.Bad {
 			// Entry is still bad
-			return emptyDownloadLink, fmt.Errorf("entry %s(%s) still bad after repair, un-repairable", entry.GetFolder(), downloadLink.Link)
+			return emptyDownloadLink, fmt.Errorf("entry %s still bad after repair, un-repairable", entry.GetFolder())
 		}
 		// Bypass singleflight re-entry to avoid deadlock
 		return s.fetchAndValidate(ctx, entry, filename, attempt+1, linkRefreshes)
@@ -667,7 +667,7 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 		return NewPermanentError(ErrEmptyLink, "empty_link")
 	}
 	if link.Empty() {
-		return NewPermanentError(fmt.Errorf("download url is empty for %s||%s", link.Filename, link.Link), "empty_link")
+		return NewPermanentError(fmt.Errorf("download URL is empty for %s", link.Filename), "empty_link")
 	}
 	ctx = s.withCDNIdentity(ctx, link)
 

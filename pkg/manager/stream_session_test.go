@@ -518,6 +518,46 @@ func TestOpenStreamTracksUntilClose(t *testing.T) {
 	}
 }
 
+func TestTrackStreamKeepsConcurrentSameFileConsumersSeparate(t *testing.T) {
+	mgr := &Manager{activeStreams: xsync.NewMap[string, *ActiveStream]()}
+	entry := &storage.Entry{
+		Name:           "movie",
+		ActiveProvider: "primary",
+		Files: map[string]*storage.File{
+			"video.mkv": {Name: "video.mkv", Size: 1024},
+		},
+	}
+
+	first := mgr.TrackStream(entry, "video.mkv", "Plex")
+	second := mgr.TrackStream(entry, "video.mkv", "Jellyfin")
+	if first == "" || second == "" || first == second {
+		t.Fatalf("stream IDs = %q and %q, want distinct non-empty IDs", first, second)
+	}
+	if got := mgr.GetActiveStreamsCount(); got != 2 {
+		t.Fatalf("active streams = %d, want 2", got)
+	}
+
+	mgr.updateActiveStreamProvider(first, "fallback")
+	streams := mgr.GetActiveStreams()
+	providers := make(map[string]string, len(streams))
+	for _, stream := range streams {
+		providers[stream.ID] = stream.Debrid
+	}
+	if len(streams) != 2 || providers[first] != "fallback" || providers[second] != "primary" {
+		t.Fatalf("active stream providers = %+v, want only first consumer on fallback", providers)
+	}
+
+	mgr.UntrackStream(first)
+	if got := mgr.GetActiveStreamsCount(); got != 1 {
+		t.Fatalf("active streams after first close = %d, want 1", got)
+	}
+
+	mgr.UntrackStream(second)
+	if got := mgr.GetActiveStreamsCount(); got != 0 {
+		t.Fatalf("active streams after both close = %d, want 0", got)
+	}
+}
+
 func TestOpenStreamValidatesEntryAndOffset(t *testing.T) {
 	mgr := &Manager{activeStreams: xsync.NewMap[string, *ActiveStream]()}
 	entry := &storage.Entry{

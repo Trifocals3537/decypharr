@@ -189,11 +189,14 @@ func TestStreamFailsOverBeforeReadyAndReusesSuccessfulPreference(t *testing.T) {
 	entry := streamFailoverEntry("primary", "fallback")
 	streamID := manager.TrackStream(entry, "video.mkv", "test")
 	defer manager.UntrackStream(streamID)
+	otherStreamID := manager.TrackStream(entry, "video.mkv", "other-client")
+	defer manager.UntrackStream(otherStreamID)
+	streamCtx := WithActiveStreamID(context.Background(), streamID)
 
 	for attempt := 0; attempt < 2; attempt++ {
 		var output bytes.Buffer
 		readyCalls := 0
-		if err := manager.Stream(context.Background(), entry, "video.mkv", 0, 3, &output, func(*StreamMetadata) error {
+		if err := manager.Stream(streamCtx, entry, "video.mkv", 0, 3, &output, func(*StreamMetadata) error {
 			readyCalls++
 			return nil
 		}, "test"); err != nil {
@@ -214,8 +217,12 @@ func TestStreamFailsOverBeforeReadyAndReusesSuccessfulPreference(t *testing.T) {
 		t.Fatalf("durable active provider changed to %q", entry.ActiveProvider)
 	}
 	active := manager.GetActiveStreams()
-	if len(active) != 1 || active[0].Debrid != "fallback" {
-		t.Fatalf("active stream provider = %+v, want fallback", active)
+	activeProviders := make(map[string]string, len(active))
+	for _, stream := range active {
+		activeProviders[stream.ID] = stream.Debrid
+	}
+	if len(active) != 2 || activeProviders[streamID] != "fallback" || activeProviders[otherStreamID] != "primary" {
+		t.Fatalf("active stream providers = %+v, want only initiating consumer on fallback", activeProviders)
 	}
 	stats := manager.StreamFailoverStats()
 	if stats.Attempts != 1 || stats.Successes != 2 || stats.PreferredHits != 1 || stats.Exhausted != 0 {

@@ -14,10 +14,29 @@ type Error struct {
 	err            error
 	silent         bool
 	statusCode     int
+	requestID      string
 	Code           string
 	HeadersWritten bool // True if response headers were already written (can't send error status)
 	retry          bool // True if the operation that caused the error is safe to retry
 	permanent      bool // True if the error is permanent and should not be retried
+}
+
+// RequestID returns the stream request correlation identifier, when one was
+// attached while the error crossed the streaming boundary.
+func (e *Error) RequestID() string {
+	if e == nil {
+		return ""
+	}
+	return e.requestID
+}
+
+// WithRequestID attaches stream correlation without exposing or rewriting the
+// wrapped provider error.
+func (e *Error) WithRequestID(id string) *Error {
+	if e != nil && e.requestID == "" {
+		e.requestID = id
+	}
+	return e
 }
 
 func (e *Error) Error() string {

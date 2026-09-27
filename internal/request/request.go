@@ -135,7 +135,8 @@ func WithTransport(transport *http.Transport) ClientOption {
 	}
 }
 
-// WithRetryableStatus adds status codes that should trigger a retry
+// WithRetryableStatus replaces the default status set with the provider's
+// explicit retry contract.
 func WithRetryableStatus(statusCodes ...int) ClientOption {
 	return func(c *Client) {
 		c.retryableStatus = make(map[int]struct{}) // reset the map
@@ -281,11 +282,12 @@ func (c *Client) Get(url string) (*http.Response, error) {
 	return c.Do(req)
 }
 
-// retryAfterBackoff extends DefaultBackoff with Retry-After header support.
-// When a 429 response carries a Retry-After header decypharr waits exactly as
-// long as the server requests instead of using jittered exponential backoff.
+// retryAfterBackoff extends DefaultBackoff with bounded Retry-After support.
+// Providers commonly return the header with 429 and 503 responses. Honor the
+// requested delay without allowing it to exceed the client's retry ceiling.
 func retryAfterBackoff(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
-	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+	if resp != nil && (resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode == http.StatusServiceUnavailable) {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
 				wait := time.Duration(secs) * time.Second
@@ -381,29 +383,26 @@ func New(options ...ClientOption) *Client {
 
 	// Custom retry policy based on retryable status codes
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-		if client.singleAttempt {
-			return false, nil
-		}
 		// Don't retry on context errors
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-
-		// First use the default retry policy for error handling
-		// This handles the case when resp is nil (network errors)
-		shouldRetry, defaultErr := retryablehttp.DefaultRetryPolicy(ctx, resp, err)
-		if defaultErr != nil {
-			return false, defaultErr
+		if client.singleAttempt {
+			return false, nil
 		}
-		if shouldRetry {
+
+		// Use the library policy only for transport failures. Applying it to
+		// provider responses would retry every 5xx and silently override the
+		// provider-specific status contract configured by each client.
+		if err != nil {
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+		}
+
+		if resp == nil {
+			return false, nil
+		}
+		if _, ok := client.retryableStatus[resp.StatusCode]; ok {
 			return true, nil
-		}
-
-		// Check for retryable status codes (only if resp is not nil)
-		if resp != nil {
-			if _, ok := client.retryableStatus[resp.StatusCode]; ok {
-				return true, nil
-			}
 		}
 
 		return false, nil

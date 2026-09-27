@@ -28,11 +28,11 @@ func VerifyAuth(username, password string) bool {
 	return err == nil
 }
 
-// SetAuthCredentials validates and persists a username and bcrypt password
-// hash while retaining the installation's existing session secret and API
-// token. The caller must Save the main configuration after all related changes
-// are ready so use_auth becomes durable.
-func (c *Config) SetAuthCredentials(username, password string) error {
+// ApplyAuthCredentials validates and updates a private configuration draft
+// while retaining the installation's existing session secret and API token.
+// Runtime callers should use it inside Update so auth.json and config.json are
+// committed together before the new snapshot is published.
+func (c *Config) ApplyAuthCredentials(username, password string) error {
 	username = strings.TrimSpace(username)
 	if err := ValidateAuthCredentials(username, password); err != nil {
 		return err
@@ -46,20 +46,16 @@ func (c *Config) SetAuthCredentials(username, password string) error {
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	auth, err := c.loadAuth()
-	if err != nil {
-		return err
+	if c.Auth == nil {
+		c.Auth = &Auth{}
 	}
-	auth.Username = username
-	auth.Password = string(hashedPassword)
-	auth.SessionVersion++
-	if auth.SessionVersion == 0 {
-		auth.SessionVersion = 1
+	c.Auth.Username = username
+	c.Auth.Password = string(hashedPassword)
+	c.Auth.SessionVersion++
+	if c.Auth.SessionVersion == 0 {
+		c.Auth.SessionVersion = 1
 	}
 	c.UseAuth = true
-	if err := c.SaveAuth(auth); err != nil {
-		return fmt.Errorf("save authentication: %w", err)
-	}
 	return nil
 }
 

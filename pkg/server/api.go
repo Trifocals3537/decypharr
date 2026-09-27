@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -683,8 +684,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentConfig := config.Get()
-	newConfig, err := decodeConfigUpdate(r.Method, r.Body, currentConfig)
+	body, err := readConfigRequest(r.Body)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to decode config update request")
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -694,68 +694,70 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Deprecation", "true")
 		w.Header().Set("Warning", `299 - "POST /api/config is deprecated; use PUT for replacement or PATCH for partial updates"`)
 	}
-	if err := restoreConfigSecrets(newConfig, currentConfig); err != nil {
-		s.logger.Warn().Err(err).Msg("Rejected configuration update with an unresolved secret placeholder")
-		http.Error(w, "Invalid configuration: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Basic validation
-	if newConfig.BindAddress == "" {
-		newConfig.BindAddress = config.DefaultBindAddress
-	}
-	if newConfig.Port == "" {
-		newConfig.Port = config.DefaultPort
-	}
-
-	// Preserve fields that shouldn't be overwritten by frontend
-	newConfig.Auth = currentConfig.GetAuth()
-	// The frontend config form doesn't include use_auth or enable_webdav_auth,
-	// so they would be zero-valued (false) in the decoded payload. Preserve
-	// them from the live config so auth isn't silently disabled on every save.
-	newConfig.UseAuth = currentConfig.UseAuth
-	newConfig.EnableWebdavAuth = currentConfig.EnableWebdavAuth
-
-	// Filter out empty or incomplete arrs
-	validArrs := make([]config.Arr, 0, len(newConfig.Arrs))
-	for _, a := range newConfig.Arrs {
-		if a.Name != "" && a.Host != "" && a.Token != "" {
-			validArrs = append(validArrs, a)
+	var clientErr error
+	result, err := config.Update(func(draft *config.Config) error {
+		newConfig, decodeErr := decodeConfigUpdate(r.Method, bytes.NewReader(body), draft)
+		if decodeErr != nil {
+			clientErr = decodeErr
+			return decodeErr
 		}
-	}
-	newConfig.Arrs = validArrs
+		if restoreErr := restoreConfigSecrets(newConfig, draft); restoreErr != nil {
+			clientErr = restoreErr
+			return restoreErr
+		}
 
-	if err := validateConfigUpdate(newConfig); err != nil {
-		s.logger.Warn().Err(err).Msg("Rejected unsafe configuration update")
-		http.Error(w, "Invalid configuration: "+err.Error(), http.StatusBadRequest)
-		return
-	}
+		if newConfig.BindAddress == "" {
+			newConfig.BindAddress = config.DefaultBindAddress
+		}
+		if newConfig.Port == "" {
+			newConfig.Port = config.DefaultPort
+		}
 
-	// Save the updated config. This also applies defaults to newConfig, so the
-	// restart comparison below sees a fully-normalized config on both sides.
-	if err := newConfig.Save(); err != nil {
+		// These fields are managed outside the settings form. Preserve the
+		// latest snapshot values so a concurrent auth change cannot be lost.
+		newConfig.Auth = draft.Auth
+		newConfig.UseAuth = draft.UseAuth
+		newConfig.EnableWebdavAuth = draft.EnableWebdavAuth
+
+		validArrs := make([]config.Arr, 0, len(newConfig.Arrs))
+		for _, a := range newConfig.Arrs {
+			if a.Name != "" && a.Host != "" && a.Token != "" {
+				validArrs = append(validArrs, a)
+			}
+		}
+		newConfig.Arrs = validArrs
+
+		if validateErr := validateConfigUpdate(newConfig); validateErr != nil {
+			clientErr = validateErr
+			return validateErr
+		}
+		*draft = *newConfig
+		return nil
+	})
+	if err != nil {
+		if clientErr != nil {
+			s.logger.Warn().Err(clientErr).Msg("Rejected configuration update")
+			http.Error(w, "Invalid configuration: "+clientErr.Error(), http.StatusBadRequest)
+			return
+		}
 		s.logger.Error().Err(err).Msg("Failed to save config")
 		http.Error(w, "Error saving config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	strmChanged := currentConfig.AppURL != newConfig.AppURL ||
-		!reflect.DeepEqual(currentConfig.Strm, newConfig.Strm)
 
-	// Only mutate live Arr state after the new configuration is durable.
-	s.manager.Arr().SyncFromConfig(newConfig.Arrs)
+	strmChanged := result.Previous.AppURL != result.Desired.AppURL ||
+		!reflect.DeepEqual(result.Previous.Strm, result.Desired.Strm)
 
-	// Only restart when a field that needs it actually changed (HTTP bind,
-	// debrid/usenet clients, or the mount). For everything else, apply the new
-	// config live so users aren't disrupted by a full restart on every save.
-	restarted := currentConfig.RequiresRestart(newConfig)
-	if restarted {
+	if result.RestartRequired {
 		// Reject any follow-up update until the new server instance is running.
 		// Otherwise a request in the restart window could merge against the old
 		// in-memory config and accidentally overwrite the just-saved document.
 		s.restartPending = true
 		go s.Restart()
 	} else {
-		currentConfig.ApplyRuntime(newConfig)
+		// Only update dependent live state after the snapshot is durable and
+		// published. Cold updates are applied by the replacement process.
+		s.manager.Arr().SyncFromConfig(result.Active.Arrs)
 		if strmChanged && s.manager.Strm() != nil {
 			s.manager.Strm().SweepAsync("config_change")
 		}
@@ -767,7 +769,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)
+	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": result.RestartRequired}, http.StatusOK)
 }
 
 func (s *Server) handleStrmRegenerate(w http.ResponseWriter, _ *http.Request) {
@@ -828,11 +830,18 @@ func (s *Server) handleUpdateRepairConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cfg := config.Get()
-	cfg.Repair = req
-	if err := cfg.Save(); err != nil {
+	result, err := config.Update(func(draft *config.Config) error {
+		draft.Repair = req
+		return nil
+	})
+	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to save repair config")
 		http.Error(w, "Failed to save config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if result.RestartRequired {
+		s.logger.Error().Msg("Repair-only update unexpectedly requires restart")
+		http.Error(w, "Repair settings were saved but require a restart", http.StatusConflict)
 		return
 	}
 
@@ -844,7 +853,7 @@ func (s *Server) handleUpdateRepairConfig(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	utils.JSONResponse(w, cfg.Repair, http.StatusOK)
+	utils.JSONResponse(w, result.Active.Repair, http.StatusOK)
 }
 
 func (s *Server) handleRepairStatus(w http.ResponseWriter, r *http.Request) {
@@ -1275,27 +1284,22 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Disable authentication
-		auth := cfg.GetAuth()
-		if auth == nil {
-			http.Error(w, "Authentication is not configured", http.StatusConflict)
-			return
-		}
-		cfg.UseAuth = false
-		auth.Username = ""
-		auth.Password = ""
-		auth.SessionVersion++
-		if auth.SessionVersion == 0 {
-			auth.SessionVersion = 1
-		}
-		if err := cfg.SaveAuth(auth); err != nil {
-			s.logger.Error().Err(err).Msg("Failed to save auth config")
-			http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
-			return
-		}
-		if err := cfg.Save(); err != nil {
+		_, err := config.Update(func(draft *config.Config) error {
+			if draft.Auth == nil {
+				return errors.New("authentication is not configured")
+			}
+			draft.UseAuth = false
+			draft.Auth.Username = ""
+			draft.Auth.Password = ""
+			draft.Auth.SessionVersion++
+			if draft.Auth.SessionVersion == 0 {
+				draft.Auth.SessionVersion = 1
+			}
+			return nil
+		})
+		if err != nil {
 			s.logger.Error().Err(err).Msg("Failed to save config")
-			http.Error(w, "Failed to save configuration", http.StatusInternalServerError)
+			http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
 			return
 		}
 
@@ -1314,16 +1318,12 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := cfg.SetAuthCredentials(req.Username, req.Password); err != nil {
+	_, err := config.Update(func(draft *config.Config) error {
+		return draft.ApplyAuthCredentials(req.Username, req.Password)
+	})
+	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to save authentication settings")
 		http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
-		return
-	}
-
-	// Save main config
-	if err := cfg.Save(); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to save config")
-		http.Error(w, "Failed to save configuration", http.StatusInternalServerError)
 		return
 	}
 

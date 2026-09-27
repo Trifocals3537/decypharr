@@ -46,13 +46,16 @@ func (s *Server) skipAuthHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBrowserMutation(w, r) {
 		return
 	}
-	cfg.UseAuth = false
-	if err := cfg.Save(); err != nil {
+	result, err := config.Update(func(draft *config.Config) error {
+		draft.UseAuth = false
+		return nil
+	})
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to save config")
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
+	http.Redirect(w, r, urlBasePath(result.Active.URLBase, ""), http.StatusSeeOther)
 }
 
 // isValidAPIToken checks if the request contains a valid API token
@@ -98,8 +101,7 @@ func (s *Server) generateAPIToken() (string, error) {
 
 // refreshAPIToken generates a new API token and saves it
 func (s *Server) refreshAPIToken() (string, error) {
-	auth := config.Get().GetAuth()
-	if auth == nil {
+	if config.Get().GetAuth() == nil {
 		return "", fmt.Errorf("authentication not configured")
 	}
 
@@ -109,11 +111,14 @@ func (s *Server) refreshAPIToken() (string, error) {
 		return "", err
 	}
 
-	// Update auth config
-	auth.APIToken = token
-
-	// Save auth config
-	if err := config.Get().SaveAuth(auth); err != nil {
+	_, err = config.Update(func(draft *config.Config) error {
+		if draft.Auth == nil {
+			return fmt.Errorf("authentication not configured")
+		}
+		draft.Auth.APIToken = token
+		return nil
+	})
+	if err != nil {
 		return "", err
 	}
 

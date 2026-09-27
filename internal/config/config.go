@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"sync"
 
 	json "github.com/bytedance/sonic"
 )
@@ -56,11 +55,7 @@ const (
 	MaxJobQueueCapacity     = 4096
 )
 
-var (
-	instance   *Config
-	once       sync.Once
-	configPath string
-)
+var configPath string
 
 // QBitTorrent is deprecated. Use Manager instead.
 // Kept for backward compatibility with existing configs.
@@ -417,25 +412,6 @@ func generateAPIToken() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-func SetConfigPath(path string) {
-	configPath = path
-}
-
-func GetMainPath() string {
-	return configPath
-}
-
-func Get() *Config {
-	once.Do(func() {
-		instance = &Config{} // Initialize instance first
-		if err := instance.loadConfig(); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "configuration Error: %v\n", err)
-			os.Exit(1)
-		}
-	})
-	return instance
-}
-
 func (c *Config) GetMinFileSize() int64 {
 	// 0 means no limit
 	if c.MinFileSize == "" {
@@ -475,7 +451,7 @@ func (c *Config) SecretKey() string {
 			panic(fmt.Errorf("generate session secret: %w", err))
 		}
 		auth.SessionSecret = secret
-		if err := c.SaveAuth(auth); err != nil {
+		if err := c.saveAuth(auth); err != nil {
 			panic(fmt.Errorf("persist session secret: %w", err))
 		}
 	}
@@ -517,14 +493,17 @@ func (c *Config) GetAuth() *Auth {
 	if !c.UseAuth {
 		return nil
 	}
-	auth, err := c.loadAuth()
-	if err != nil {
-		panic(err)
+	if c.Auth == nil {
+		return nil
 	}
-	return auth
+	// Never expose the auth object owned by an active snapshot. Returning a
+	// defensive copy prevents token refresh or request handlers from racing
+	// with readers by mutating credentials in place.
+	auth := *c.Auth
+	return &auth
 }
 
-func (c *Config) SaveAuth(auth *Auth) error {
+func (c *Config) saveAuth(auth *Auth) error {
 	c.Auth = auth
 	data, err := json.Marshal(auth)
 	if err != nil {
@@ -797,7 +776,7 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 			}
 		}
 		if authChanged {
-			if err := c.SaveAuth(c.Auth); err != nil {
+			if err := c.saveAuth(c.Auth); err != nil {
 				return fmt.Errorf("persist auth defaults: %w", err)
 			}
 		}
@@ -846,11 +825,6 @@ func (c *Config) Save() error {
 	return nil
 }
 
-func Reset() {
-	once = sync.Once{}
-	instance = nil
-}
-
 // clearHotFields zeroes every field that can be applied at runtime without a
 // full service restart. It is used by RequiresRestart so that only the
 // remaining ("cold") fields participate in the change comparison.
@@ -862,51 +836,25 @@ func clearHotFields(c *Config) {
 	// Auth lives in auth.json and is preserved separately by the caller.
 	c.Auth = nil
 
-	// AppURL is only read live (e.g. STRM URL generation in the downloader);
-	// it is never cached in a service struct, so it applies without a restart.
-	c.AppURL = ""
-
 	// Auth toggles are evaluated live per-request by every auth middleware
 	// (main app, qbit, sabnzbd, and webdav), so they apply without a restart.
 	c.UseAuth = false
 	c.EnableWebdavAuth = false
 
-	// Manager / processing settings — read live via config.Get() on the
-	// relevant code paths, or applied lazily on the next natural restart.
+	// Arr state has an explicit post-publish synchronization hook in the HTTP
+	// configuration handler.
 	c.Arrs = nil
-	c.AllowedExt = nil
-	c.AllowSamples = false
-	c.MinFileSize = ""
-	c.MaxFileSize = ""
-	c.RemoveStalledAfter = ""
-	c.NZBUserAgent = ""
-	c.Notifications = Notifications{}
-	c.DiscordWebhook = ""
-	c.CallbackURL = ""
-	c.DownloadFolder = ""
-	c.RefreshInterval = ""
-	c.MaxActiveDownloads = 0
-	c.JobQueueCapacity = 0
-	c.SkipPreCache = false
-	c.SkipMultiSeason = false
-	c.AlwaysRmTrackerUrls = false
+
+	// RelativeSymlinks is consulted when each new link is created and does not
+	// alter existing links or a long-lived worker.
 	c.RelativeSymlinks = false
-	c.Categories = nil
-	c.FolderNaming = ""
-	c.CustomFolders = nil
-	c.DefaultDownloadAction = ""
-	c.RefreshDirs = ""
-	c.Retries = 0
-	c.SkipAutoMove = false
+
+	// Repair owns an explicit ApplyConfig hook after publication.
 	c.Repair = RepairConfig{}
-	c.Strm = Strm{}
 
 	// Queue cleanup rules are read live via config.Get() inside CleanupQueue,
 	// so changes apply on the next cleanup cycle without a restart.
 	c.QueueCleanup = QueueCleanup{}
-
-	// Deprecated, migrated into Manager fields above.
-	c.QBitTorrent = QBitTorrent{}
 
 	// Usenet is mostly cold (providers, connection pool sizing, socket buffers,
 	// and the streaming buffer pool are all established at startup). But the
@@ -938,8 +886,8 @@ func clearHotFields(c *Config) {
 // RequiresRestart reports whether applying n on top of c needs a full service
 // restart (re-binding the HTTP listener, recreating debrid/usenet clients, or
 // re-mounting the filesystem). It returns false when only runtime-applicable
-// ("hot") fields changed, in which case the caller can use ApplyRuntime to
-// update the live config in place without tearing anything down.
+// ("hot") fields changed, in which case Update publishes a new immutable
+// snapshot without tearing anything down.
 //
 // Both configs are compared after their defaults have been applied (see
 // setDefaults / Save), so callers should persist n before calling this.
@@ -948,18 +896,6 @@ func (c *Config) RequiresRestart(n *Config) bool {
 	clearHotFields(&a)
 	clearHotFields(&b)
 	return !reflect.DeepEqual(a, b)
-}
-
-// ApplyRuntime copies n into the live config in place, preserving the in-memory
-// Auth pointer. Because every holder of the *Config singleton shares this
-// struct, the updated values become visible everywhere without a restart.
-//
-// Only call this when RequiresRestart(n) is false: the cold fields are then
-// identical between c and n, so this effectively updates just the hot fields.
-func (c *Config) ApplyRuntime(n *Config) {
-	auth := c.Auth
-	*c = *n
-	c.Auth = auth
 }
 
 func (c *Config) createConfig() error {
@@ -976,6 +912,16 @@ func (c *Config) createConfig() error {
 }
 
 func (c *Config) SetupComplete() error {
+	return c.Validate()
+}
+
+// ValidateNormalized applies non-secret defaults to a private draft before
+// validating it. It does not write either configuration file or generate new
+// credentials, so callers can reject a bad draft before Update commits it.
+func (c *Config) ValidateNormalized() error {
+	if err := c.setDefaultsForPath(GetMainPath(), false); err != nil {
+		return err
+	}
 	return c.Validate()
 }
 

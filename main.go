@@ -150,7 +150,7 @@ func validatePprofListenAddress(address string) error {
 	return nil
 }
 
-func configureAuthFromTerminal(cfg *config.Config, username string) error {
+func configureAuthFromTerminal(_ *config.Config, username string) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return fmt.Errorf(
 			"standard input is not a terminal; run --set-auth interactively",
@@ -176,10 +176,9 @@ func configureAuthFromTerminal(cfg *config.Config, username string) error {
 		return fmt.Errorf("passwords do not match")
 	}
 
-	if err := cfg.SetAuthCredentials(username, string(password)); err != nil {
-		return err
-	}
-	if err := cfg.Save(); err != nil {
+	if _, err := config.Update(func(draft *config.Config) error {
+		return draft.ApplyAuthCredentials(username, string(password))
+	}); err != nil {
 		return fmt.Errorf("save authentication setting: %w", err)
 	}
 	return nil

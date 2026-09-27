@@ -140,13 +140,12 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := cfg.SetAuthCredentials(username, password); err != nil {
+	result, err := config.Update(func(draft *config.Config) error {
+		return draft.ApplyAuthCredentials(username, password)
+	})
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to save registration credentials")
 		http.Error(w, "Error saving credentials", http.StatusInternalServerError)
-		return
-	}
-	if err := cfg.Save(); err != nil {
-		http.Error(w, "Error saving authentication setting", http.StatusInternalServerError)
 		return
 	}
 
@@ -158,7 +157,7 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
+	http.Redirect(w, r, urlBasePath(result.Active.URLBase, ""), http.StatusSeeOther)
 }
 
 func registrationAllowed(cfg *config.Config) bool {

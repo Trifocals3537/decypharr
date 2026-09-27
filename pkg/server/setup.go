@@ -152,7 +152,8 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 1: Handle Authentication
+	// Validate every step before changing either configuration file. This keeps
+	// setup atomic: a late folder/provider error cannot leave auth half-applied.
 	if req.Auth.SkipAuth {
 		if !isLoopbackBindAddress(cfg.BindAddress) {
 			s.sendSetupError(
@@ -162,13 +163,9 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 			)
 			return
 		}
-		cfg.UseAuth = false
 	} else if req.Auth.Username != "" && req.Auth.Password != "" {
-		if err := cfg.SetAuthCredentials(
-			req.Auth.Username,
-			req.Auth.Password,
-		); err != nil {
-			s.sendSetupError(w, "Failed to save authentication", err)
+		if err := config.ValidateAuthCredentials(req.Auth.Username, req.Auth.Password); err != nil {
+			s.sendSetupError(w, "Invalid authentication settings", err)
 			return
 		}
 	} else {
@@ -180,64 +177,16 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2: Handle Debrid Provider (optional)
-	if hasDebrid {
-		if !config.IsSupportedDebridProvider(req.Debrid.Provider) {
-			s.sendSetupError(w, "Invalid debrid provider", nil)
-			return
-		}
-
-		debrid := config.Debrid{
-			Provider:         req.Debrid.Provider,
-			Name:             req.Debrid.Provider,
-			APIKey:           req.Debrid.APIKey,
-			DownloadAPIKeys:  []string{req.Debrid.APIKey},
-			DownloadUncached: false,
-			RateLimit:        config.DefaultRateLimit,
-		}
-
-		if len(cfg.Debrids) == 0 {
-			cfg.Debrids = []config.Debrid{debrid}
-		} else {
-			cfg.Debrids[0] = debrid
-		}
-	} else {
-		cfg.Debrids = nil
+	if hasDebrid && !config.IsSupportedDebridProvider(req.Debrid.Provider) {
+		s.sendSetupError(w, "Invalid debrid provider", nil)
+		return
 	}
 
-	// Step 3: Handle Usenet Provider (optional)
-	if hasUsenet {
-		if req.Usenet.Port < 1 || req.Usenet.Port > 65535 {
-			s.sendSetupError(w, "Usenet port must be between 1 and 65535", nil)
-			return
-		}
-
-		providerMax := req.Usenet.MaxConnections
-		if providerMax <= 0 {
-			providerMax = 30
-		}
-
-		readerConnections := req.Usenet.ReaderConnections
-		if readerConnections <= 0 {
-			readerConnections = 15
-		}
-
-		cfg.Usenet.Providers = []config.UsenetProvider{{
-			Host:           req.Usenet.Host,
-			Port:           req.Usenet.Port,
-			Username:       req.Usenet.Username,
-			Password:       req.Usenet.Password,
-			MaxConnections: providerMax,
-			SSL:            req.Usenet.SSL,
-			Priority:       1,
-		}}
-		cfg.Usenet.MaxConnections = readerConnections
-		cfg.Usenet.ProcessingMaxConnections = readerConnections
-	} else {
-		cfg.Usenet.Providers = nil
+	if hasUsenet && (req.Usenet.Port < 1 || req.Usenet.Port > 65535) {
+		s.sendSetupError(w, "Usenet port must be between 1 and 65535", nil)
+		return
 	}
 
-	// Step 4: Handle Download Folder
 	if req.Download.DownloadFolder == "" {
 		s.sendSetupError(w, "Download folder is required", nil)
 		return
@@ -249,61 +198,99 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg.DownloadFolder = req.Download.DownloadFolder
-
-	// Set Manager defaults if not set
-	if len(cfg.Categories) == 0 {
-		cfg.Categories = []string{"sonarr", "radarr"}
-	}
-	if cfg.MaxActiveDownloads == 0 {
-		cfg.MaxActiveDownloads = 5
-	}
-	cfg.Mount.Type = config.MountType(req.Mount.MountType)
-
-	switch req.Mount.MountType {
-	case "dfs":
-		cfg.Mount.MountPath = req.Mount.MountPath
-
-		// Create cache dir
+	if req.Mount.MountType == "dfs" {
 		if err := os.MkdirAll(req.Mount.CacheDir, 0755); err != nil {
 			s.sendSetupError(w, "Failed to create cache directory", err)
 			return
 		}
-
-		cfg.Mount.DFS.CacheDir = req.Mount.CacheDir
-
-		// Set sensible DFS defaults
-		if cfg.Mount.DFS.ChunkSize == "" {
-			cfg.Mount.DFS.ChunkSize = "8MB"
-		}
-		if cfg.Mount.DFS.ReadAheadSize == "" {
-			cfg.Mount.DFS.ReadAheadSize = "32MB"
-		}
-		if cfg.Mount.DFS.CacheExpiry == "" {
-			cfg.Mount.DFS.CacheExpiry = "24h"
-		}
-	case "rclone":
-		cfg.Mount.MountPath = req.Mount.MountPath
-
-		if req.Mount.CacheDir != "" {
-			cfg.Mount.Rclone.CacheDir = req.Mount.CacheDir
-		}
-
-		// Set sensible Rclone defaults
-		if cfg.Mount.Rclone.VfsCacheMode == "" {
-			cfg.Mount.Rclone.VfsCacheMode = "full"
-		}
-		if cfg.Mount.Rclone.DirCacheTime == "" {
-			cfg.Mount.Rclone.DirCacheTime = "5m"
-		}
 	}
 
-	if err := cfg.Save(); err != nil {
+	result, err := config.Update(func(draft *config.Config) error {
+		if req.Auth.SkipAuth {
+			draft.UseAuth = false
+		} else if err := draft.ApplyAuthCredentials(req.Auth.Username, req.Auth.Password); err != nil {
+			return err
+		}
+
+		if hasDebrid {
+			debrid := config.Debrid{
+				Provider:         req.Debrid.Provider,
+				Name:             req.Debrid.Provider,
+				APIKey:           req.Debrid.APIKey,
+				DownloadAPIKeys:  []string{req.Debrid.APIKey},
+				DownloadUncached: false,
+				RateLimit:        config.DefaultRateLimit,
+			}
+			if len(draft.Debrids) == 0 {
+				draft.Debrids = []config.Debrid{debrid}
+			} else {
+				draft.Debrids[0] = debrid
+			}
+		} else {
+			draft.Debrids = nil
+		}
+
+		if hasUsenet {
+			providerMax := req.Usenet.MaxConnections
+			if providerMax <= 0 {
+				providerMax = 30
+			}
+			readerConnections := req.Usenet.ReaderConnections
+			if readerConnections <= 0 {
+				readerConnections = 15
+			}
+			draft.Usenet.Providers = []config.UsenetProvider{{
+				Host: req.Usenet.Host, Port: req.Usenet.Port,
+				Username: req.Usenet.Username, Password: req.Usenet.Password,
+				MaxConnections: providerMax, SSL: req.Usenet.SSL, Priority: 1,
+			}}
+			draft.Usenet.MaxConnections = readerConnections
+			draft.Usenet.ProcessingMaxConnections = readerConnections
+		} else {
+			draft.Usenet.Providers = nil
+		}
+
+		draft.DownloadFolder = req.Download.DownloadFolder
+		if len(draft.Categories) == 0 {
+			draft.Categories = []string{"sonarr", "radarr"}
+		}
+		if draft.MaxActiveDownloads == 0 {
+			draft.MaxActiveDownloads = 5
+		}
+		draft.Mount.Type = config.MountType(req.Mount.MountType)
+		switch req.Mount.MountType {
+		case "dfs":
+			draft.Mount.MountPath = req.Mount.MountPath
+			draft.Mount.DFS.CacheDir = req.Mount.CacheDir
+			if draft.Mount.DFS.ChunkSize == "" {
+				draft.Mount.DFS.ChunkSize = "8MB"
+			}
+			if draft.Mount.DFS.ReadAheadSize == "" {
+				draft.Mount.DFS.ReadAheadSize = "32MB"
+			}
+			if draft.Mount.DFS.CacheExpiry == "" {
+				draft.Mount.DFS.CacheExpiry = "24h"
+			}
+		case "rclone":
+			draft.Mount.MountPath = req.Mount.MountPath
+			if req.Mount.CacheDir != "" {
+				draft.Mount.Rclone.CacheDir = req.Mount.CacheDir
+			}
+			if draft.Mount.Rclone.VfsCacheMode == "" {
+				draft.Mount.Rclone.VfsCacheMode = "full"
+			}
+			if draft.Mount.Rclone.DirCacheTime == "" {
+				draft.Mount.Rclone.DirCacheTime = "5m"
+			}
+		}
+		return draft.ValidateNormalized()
+	})
+	if err != nil {
 		s.sendSetupError(w, "Failed to save configuration", err)
 		return
 	}
 
-	if err := cfg.SetupComplete(); err != nil {
+	if err := result.Desired.SetupComplete(); err != nil {
 		s.sendSetupError(w, "Setup completion validation failed", err)
 		return
 	}

@@ -161,7 +161,7 @@ func TestSecretKeyFailsWhenNewSecretCannotBePersisted(t *testing.T) {
 	}
 }
 
-func TestSetAuthCredentialsValidatesAndPreservesInstallSecrets(t *testing.T) {
+func TestApplyAuthCredentialsValidatesAndPreservesInstallSecrets(t *testing.T) {
 	configDir := useTemporaryConfigPath(t)
 	cfg := &Config{
 		Auth: &Auth{
@@ -170,11 +170,14 @@ func TestSetAuthCredentialsValidatesAndPreservesInstallSecrets(t *testing.T) {
 		},
 	}
 
-	if err := cfg.SetAuthCredentials(" admin ", "secret-password"); err != nil {
-		t.Fatalf("SetAuthCredentials() error = %v", err)
+	if err := cfg.ApplyAuthCredentials(" admin ", "secret-password"); err != nil {
+		t.Fatalf("ApplyAuthCredentials() error = %v", err)
+	}
+	if err := cfg.saveAuth(cfg.Auth); err != nil {
+		t.Fatalf("saveAuth() error = %v", err)
 	}
 	if !cfg.UseAuth {
-		t.Fatal("SetAuthCredentials() did not enable authentication")
+		t.Fatal("ApplyAuthCredentials() did not enable authentication")
 	}
 	if cfg.Auth.Username != "admin" {
 		t.Fatalf("username = %q, want trimmed username", cfg.Auth.Username)

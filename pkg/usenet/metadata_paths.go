@@ -7,10 +7,59 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/decypharr/internal/safepath"
 )
+
+type metadataRemovalLock struct {
+	mutex sync.Mutex
+	refs  int
+}
+
+var metadataRemovalLocks = struct {
+	sync.Mutex
+	leaves map[string]*metadataRemovalLock
+}{
+	leaves: make(map[string]*metadataRemovalLock),
+}
+
+// lockMetadataRemoval serializes deletion of one exact metadata leaf. Windows
+// can reject concurrent root-relative Lstat/Remove operations with a sharing
+// violation even after another caller has successfully deleted the file.
+// Keeping the lock leaf-scoped avoids serializing unrelated NZB cleanup, and
+// reference counting prevents an unbounded registry of completed downloads.
+func lockMetadataRemoval(target string) func() {
+	key, err := filepath.Abs(target)
+	if err != nil {
+		key = target
+	}
+	key = filepath.Clean(key)
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+
+	metadataRemovalLocks.Lock()
+	lock := metadataRemovalLocks.leaves[key]
+	if lock == nil {
+		lock = &metadataRemovalLock{}
+		metadataRemovalLocks.leaves[key] = lock
+	}
+	lock.refs++
+	metadataRemovalLocks.Unlock()
+
+	lock.mutex.Lock()
+	return func() {
+		lock.mutex.Unlock()
+		metadataRemovalLocks.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(metadataRemovalLocks.leaves, key)
+		}
+		metadataRemovalLocks.Unlock()
+	}
+}
 
 type metadataFileSuffix string
 
@@ -246,6 +295,16 @@ func statMetadataFile(root, target string) (os.FileInfo, error) {
 // removeMetadataFile durably removes an exact leaf, including retrying an
 // already-absent leaf. Root validation and sync/close failures remain errors.
 func removeMetadataFile(root, target string) error {
+	// Lock before validating the target because Windows can also reject the
+	// validation Lstat while another root-relative removal is in flight.
+	unlock := lockMetadataRemoval(target)
+	defer unlock()
+	return removeMetadataFileLocked(root, target)
+}
+
+// removeMetadataFileLocked performs the complete security validation and
+// durable removal while its caller holds the target's metadata removal lock.
+func removeMetadataFileLocked(root, target string) error {
 	absoluteRoot, leaf, err := metadataDirectLeaf(root, target)
 	if err != nil {
 		return err

@@ -1305,11 +1305,19 @@ func ValidateStagedNZBAt(metadataRoot, id, persistedPath string) error {
 // beneath metadataRoot. It is exported for queue cleanup paths that do not own
 // a Usenet instance but must enforce the same ID binding.
 func RemoveStagedNZBAt(metadataRoot, id, persistedPath string) error {
+	if persistedPath == "" {
+		return nil
+	}
+	// Hold the leaf lock across the ID-bound persisted-path validation and the
+	// removal itself. On Windows, a concurrent root-relative removal can make
+	// even the validation Lstat fail with a sharing violation.
+	unlock := lockMetadataRemoval(persistedPath)
+	defer unlock()
 	path, err := validatePersistedMetadataPath(metadataRoot, id, persistedPath, nzbStagedSuffix)
 	if err != nil {
 		return err
 	}
-	return removeMetadataFileIfExists(metadataRoot, path)
+	return removeMetadataFileLocked(metadataRoot, path)
 }
 
 func (u *Usenet) markAsProcessing(nzb *storage.NZB) error {

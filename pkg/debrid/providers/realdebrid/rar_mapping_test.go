@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/debrid/common/rar"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/common/rar"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func storedRARFile(path string, offset, size int64) *rar.File {

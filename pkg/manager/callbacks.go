@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func (m *Manager) RemoveFromProvider(providerEntry *storage.ProviderEntry) error {

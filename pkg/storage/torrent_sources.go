@@ -1,14 +1,17 @@
 package storage
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 const (
@@ -48,22 +51,43 @@ func (s *Storage) torrentSourcePath(infoHash string) (string, error) {
 	return filepath.Join(s.torrentSourceDir(), infoHash+torrentSourceSuffix), nil
 }
 
-func (s *Storage) ensureTorrentSourceDir() error {
-	dir := s.torrentSourceDir()
-	if err := os.MkdirAll(dir, torrentSourceDirMode); err != nil {
-		return fmt.Errorf("create torrent source directory: %w", err)
-	}
-	info, err := os.Lstat(dir)
+func (s *Storage) openTorrentSourceRoot(create bool) (*os.Root, error) {
+	baseRoot, _, err := safepath.OpenRoot(s.dir)
 	if err != nil {
-		return fmt.Errorf("inspect torrent source directory: %w", err)
+		return nil, fmt.Errorf("open storage root: %w", err)
+	}
+	defer baseRoot.Close()
+
+	info, statErr := baseRoot.Lstat(torrentSourceDirName)
+	if os.IsNotExist(statErr) && create {
+		if err := baseRoot.Mkdir(torrentSourceDirName, torrentSourceDirMode); err != nil {
+			return nil, fmt.Errorf("create torrent source directory: %w", err)
+		}
+		info, statErr = baseRoot.Lstat(torrentSourceDirName)
+	}
+	if statErr != nil {
+		return nil, fmt.Errorf("inspect torrent source directory: %w", statErr)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("torrent source path is not a private directory")
+		return nil, fmt.Errorf("torrent source path is not a private directory")
 	}
-	if err := os.Chmod(dir, torrentSourceDirMode); err != nil {
-		return fmt.Errorf("secure torrent source directory: %w", err)
+
+	rooted, err := baseRoot.OpenRoot(torrentSourceDirName)
+	if err != nil {
+		return nil, fmt.Errorf("open torrent source directory: %w", err)
 	}
-	return nil
+	openedInfo, err := rooted.Stat(".")
+	if err != nil || !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
+		_ = rooted.Close()
+		return nil, fmt.Errorf("torrent source directory changed while opening")
+	}
+	if create {
+		if err := rooted.Chmod(".", torrentSourceDirMode); err != nil {
+			_ = rooted.Close()
+			return nil, fmt.Errorf("secure torrent source directory: %w", err)
+		}
+	}
+	return rooted, nil
 }
 
 // SaveTorrentSource validates and durably stores the exact torrent source used
@@ -91,15 +115,14 @@ func (s *Storage) SaveTorrentSource(infoHash string, data []byte) error {
 	s.torrentSourcesMu.Lock()
 	defer s.torrentSourcesMu.Unlock()
 
-	if err := s.ensureTorrentSourceDir(); err != nil {
-		return err
-	}
-	path, err := s.torrentSourcePath(infoHash)
+	rooted, err := s.openTorrentSourceRoot(true)
 	if err != nil {
 		return err
 	}
+	defer rooted.Close()
+	name := infoHash + torrentSourceSuffix
 	var previousSize int64
-	if info, statErr := os.Lstat(path); statErr == nil {
+	if info, statErr := rooted.Lstat(name); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return fmt.Errorf("existing torrent source is not a regular file")
 		}
@@ -122,7 +145,7 @@ func (s *Storage) SaveTorrentSource(infoHash string, data []byte) error {
 		return fmt.Errorf("torrent source store exceeds %d bytes", torrentSourceStoreMaxBytes)
 	}
 
-	if err := atomicWriteTorrentSource(path, data); err != nil {
+	if err := atomicWriteTorrentSource(rooted, name, data); err != nil {
 		return fmt.Errorf("persist torrent source: %w", err)
 	}
 	s.torrentSourceBytes = projectedSize
@@ -137,15 +160,16 @@ func (s *Storage) LoadTorrentSource(infoHash string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	path, err := s.torrentSourcePath(infoHash)
-	if err != nil {
-		return nil, err
-	}
-
 	s.torrentSourcesMu.Lock()
 	defer s.torrentSourcesMu.Unlock()
 
-	info, err := os.Lstat(path)
+	rooted, err := s.openTorrentSourceRoot(false)
+	if err != nil {
+		return nil, err
+	}
+	defer rooted.Close()
+	name := infoHash + torrentSourceSuffix
+	info, err := rooted.Lstat(name)
 	if err != nil {
 		return nil, fmt.Errorf("inspect torrent source: %w", err)
 	}
@@ -156,7 +180,7 @@ func (s *Storage) LoadTorrentSource(infoHash string) ([]byte, error) {
 		return nil, fmt.Errorf("torrent source size is outside the allowed range")
 	}
 
-	file, err := os.Open(path)
+	file, err := rooted.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("open torrent source: %w", err)
 	}
@@ -197,13 +221,26 @@ func (s *Storage) PruneTorrentSources() error {
 }
 
 func (s *Storage) pruneTorrentSourcesLocked(keepInfoHash string) (int64, error) {
-	dir := s.torrentSourceDir()
-	entries, err := os.ReadDir(dir)
+	rooted, err := s.openTorrentSourceRoot(false)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
 	if err != nil {
+		return 0, err
+	}
+	defer rooted.Close()
+
+	directory, err := rooted.Open(".")
+	if err != nil {
 		return 0, fmt.Errorf("list torrent sources: %w", err)
+	}
+	entries, readErr := directory.ReadDir(torrentSourceMaxFiles + 1)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return 0, fmt.Errorf("list torrent sources: %w", errors.Join(readErr, closeErr))
+	}
+	if closeErr != nil {
+		return 0, fmt.Errorf("close torrent source directory: %w", closeErr)
 	}
 	if len(entries) > torrentSourceMaxFiles {
 		return 0, fmt.Errorf("torrent source store exceeds %d directory entries", torrentSourceMaxFiles)
@@ -213,13 +250,15 @@ func (s *Storage) pruneTorrentSourcesLocked(keepInfoHash string) (int64, error) 
 	changed := false
 	for _, entry := range entries {
 		name := entry.Name()
-		path := filepath.Join(dir, name)
-		info, infoErr := entry.Info()
+		info, infoErr := rooted.Lstat(name)
 		if infoErr != nil {
 			return 0, fmt.Errorf("inspect torrent source entry: %w", infoErr)
 		}
-		if strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp-") {
-			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return 0, fmt.Errorf("torrent source entry is a symlink")
+		}
+		if isTorrentSourceTempName(name) {
+			if removeErr := rooted.Remove(name); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 				return 0, fmt.Errorf("remove incomplete torrent source: %w", removeErr)
 			}
 			changed = true
@@ -233,7 +272,7 @@ func (s *Storage) pruneTorrentSourcesLocked(keepInfoHash string) (int64, error) 
 		}
 		if validSourceName && hashName != keepInfoHash &&
 			!s.entries.Exists(hashName) && !s.queue.Exists(hashName) {
-			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			if removeErr := rooted.Remove(name); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 				return 0, fmt.Errorf("remove orphaned torrent source: %w", removeErr)
 			}
 			changed = true
@@ -247,31 +286,60 @@ func (s *Storage) pruneTorrentSourcesLocked(keepInfoHash string) (int64, error) 
 		}
 	}
 	if changed {
-		if err := syncTorrentSourceDirectory(dir); err != nil {
+		if err := syncTorrentSourceDirectory(rooted); err != nil {
 			return 0, fmt.Errorf("sync pruned torrent sources: %w", err)
 		}
 	}
 	return total, nil
 }
 
-func atomicWriteTorrentSource(path string, data []byte) (err error) {
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+func isTorrentSourceTempName(name string) bool {
+	if !strings.HasPrefix(name, ".") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(name, "."), torrentSourceSuffix+".tmp-")
+	if len(parts) != 2 || len(parts[1]) != 32 {
+		return false
+	}
+	if _, err := normalizeTorrentSourceHash(parts[0]); err != nil {
+		return false
+	}
+	_, err := hex.DecodeString(parts[1])
+	return err == nil
+}
+
+func newTorrentSourceTempName(destination string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate torrent source temporary name: %w", err)
+	}
+	return "." + destination + ".tmp-" + hex.EncodeToString(random[:]), nil
+}
+
+func atomicWriteTorrentSource(rooted *os.Root, destination string, data []byte) (err error) {
+	tempName, err := newTorrentSourceTempName(destination)
 	if err != nil {
 		return err
 	}
-	tempPath := temp.Name()
+	temp, err := rooted.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, torrentSourceMode)
+	if err != nil {
+		return err
+	}
 	defer func() {
 		_ = temp.Close()
 		if err != nil {
-			_ = os.Remove(tempPath)
+			_ = rooted.Remove(tempName)
 		}
 	}()
 
 	if err = temp.Chmod(torrentSourceMode); err != nil {
 		return err
 	}
-	if _, err = temp.Write(data); err != nil {
+	if written, writeErr := temp.Write(data); writeErr != nil {
+		err = writeErr
+		return err
+	} else if written != len(data) {
+		err = io.ErrShortWrite
 		return err
 	}
 	if err = temp.Sync(); err != nil {
@@ -280,8 +348,8 @@ func atomicWriteTorrentSource(path string, data []byte) (err error) {
 	if err = temp.Close(); err != nil {
 		return err
 	}
-	if err = replaceTorrentSource(tempPath, path); err != nil {
+	if err = replaceTorrentSource(rooted, tempName, destination); err != nil {
 		return err
 	}
-	return syncTorrentSourceDirectory(dir)
+	return syncTorrentSourceDirectory(rooted)
 }

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	json "github.com/bytedance/sonic"
-	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestRegistrationAllowedOnlyForUnconfiguredLoopbackAuth(t *testing.T) {
@@ -151,7 +151,7 @@ func TestRemoteInitialSetupCannotSkipAuthentication(t *testing.T) {
 		strings.NewReader(`{
 			"auth":{"skip_auth":true},
 			"debrid":{"provider":"realdebrid","api_key":"test-key"},
-			"download":{"download_folder":"/tmp/decypharr-test"},
+			"download":{"download_folder":"/tmp/tessarr-test"},
 			"mount":{"mount_type":"none"}
 		}`),
 	)

@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/request"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	json "github.com/bytedance/sonic"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/request"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 func TestDoGetRejectsTrailingJSON(t *testing.T) {

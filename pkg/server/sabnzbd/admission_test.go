@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestSABAdmissionErrorStatus(t *testing.T) {

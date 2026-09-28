@@ -16,14 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/retry"
+	"github.com/Trifocals3537/tessarr/internal/tlsconfig"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/retry"
-	"github.com/sirrobot01/decypharr/internal/tlsconfig"
-	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // ProviderPool manages connections for a single provider using a LIFO stack
@@ -234,6 +234,13 @@ func NewClient(cfg *config.Config) (*Client, error) {
 
 	pools := make(map[string]*ProviderPool)
 	for _, p := range providers {
+		if p.MaxConnections < 1 || p.MaxConnections > config.UsenetConnectionLimit {
+			return nil, fmt.Errorf(
+				"provider %q max_connections must be between 1 and %d",
+				p.Host,
+				config.UsenetConnectionLimit,
+			)
+		}
 		pp := &ProviderPool{
 			conns:  make([]*connectionEntry, 0, p.MaxConnections),
 			slots:  make(chan struct{}, p.MaxConnections),

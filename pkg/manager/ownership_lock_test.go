@@ -35,3 +35,39 @@ func TestOwnershipRootKeepsMutationPinnedAfterPathReplacement(t *testing.T) {
 		t.Fatal("ownership close did not report the replaced visible root")
 	}
 }
+
+func TestCompatibleOwnershipRootContendsWithLegacyLock(t *testing.T) {
+	root := t.TempDir()
+	legacy, _, err := acquireOwnershipRoot(root, ".legacy-owner.lock", true, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if compatible, _, err := acquireCompatibleOwnershipRoot(
+		root,
+		[]string{".legacy-owner.lock", ".current-owner.lock"},
+		true,
+		50*time.Millisecond,
+		time.Millisecond,
+	); err == nil {
+		_ = compatible.close()
+		t.Fatal("compatible ownership lock ignored the legacy lock")
+	}
+	if err := legacy.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	compatible, _, err := acquireCompatibleOwnershipRoot(
+		root,
+		[]string{".legacy-owner.lock", ".current-owner.lock"},
+		true,
+		time.Second,
+		time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("compatible ownership lock failed after legacy release: %v", err)
+	}
+	if err := compatible.close(); err != nil {
+		t.Fatal(err)
+	}
+}

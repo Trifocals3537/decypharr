@@ -99,3 +99,31 @@ func TestManagerSchedulerPreventsOverlappingJobRuns(t *testing.T) {
 		t.Fatalf("singleton job run count = %d, want 2", got)
 	}
 }
+
+func TestManagerSchedulerTagRemovesEveryGlobalJob(t *testing.T) {
+	scheduler, err := newManagerScheduler(time.UTC, managerSchedulerTag)
+	if err != nil {
+		t.Fatalf("newManagerScheduler() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := scheduler.Shutdown(); err != nil {
+			t.Errorf("scheduler.Shutdown() error = %v", err)
+		}
+	})
+
+	for range 3 {
+		if _, err := scheduler.NewJob(
+			gocron.DurationJob(time.Hour),
+			gocron.NewTask(func() {}),
+		); err != nil {
+			t.Fatalf("scheduler.NewJob() error = %v", err)
+		}
+	}
+	if got := len(scheduler.Jobs()); got != 3 {
+		t.Fatalf("scheduler job count = %d, want 3", got)
+	}
+	scheduler.RemoveByTags(managerSchedulerTag)
+	if got := len(scheduler.Jobs()); got != 0 {
+		t.Fatalf("scheduler job count after tag removal = %d, want 0", got)
+	}
+}

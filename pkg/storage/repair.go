@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 	json "github.com/bytedance/sonic"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
 )
 
 // RepairStrategy controls how the probe groups files for a single entry.

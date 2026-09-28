@@ -16,8 +16,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/sirrobot01/decypharr/cmd/decypharr"
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/cmd/tessarr"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logsafe"
 	"golang.org/x/term"
 )
 
@@ -26,10 +27,16 @@ const defaultPprofAddress = "127.0.0.1:6060"
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("FATAL: Recovered from panic in main: %v\n", r)
+			log.Printf("FATAL: Recovered from panic in main: %s\n", logsafe.Text(fmt.Sprint(r)))
 			debug.PrintStack()
 		}
 	}()
+	if len(os.Args) > 1 && os.Args[1] == "migrate-from-decypharr" {
+		if err := runLegacyMigration(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			log.Fatalf("state migration failed: %s", logsafe.Text(err.Error()))
+		}
+		return
+	}
 
 	var configPath string
 	var pprofAddr string
@@ -62,7 +69,7 @@ func main() {
 			// If we can't get the user home directory, fallback to current directory
 			defaultDir = "."
 		}
-		defaultConfigDir := filepath.Join(defaultDir, ".decypharr")
+		defaultConfigDir := filepath.Join(defaultDir, ".tessarr")
 		configPath = defaultConfigDir
 	}
 
@@ -73,13 +80,13 @@ func main() {
 	if checkConfig {
 		cfg, err := config.LoadForValidation(configPath)
 		if err != nil {
-			log.Fatalf("Decypharr configuration check failed: %v", err)
+			log.Fatalf("Tessarr configuration check failed: %s", logsafe.Text(err.Error()))
 		}
 		if err := cfg.Validate(); err != nil {
-			log.Fatalf("Decypharr configuration check failed: %v", err)
+			log.Fatalf("Tessarr configuration check failed: %s", logsafe.Text(err.Error()))
 		}
 		if err := cfg.ValidateDeployment(); err != nil {
-			log.Fatalf("Decypharr deployment safety check failed: %v", err)
+			log.Fatalf("Tessarr deployment safety check failed: %s", logsafe.Text(err.Error()))
 		}
 		if len(cfg.AllowedClientCIDRs) == 0 &&
 			!config.IsLoopbackBindAddress(cfg.BindAddress) {
@@ -88,25 +95,25 @@ func main() {
 			)
 		}
 		fmt.Printf(
-			"Decypharr configuration is valid: %s\n",
-			filepath.Join(configPath, "config.json"),
+			"Tessarr configuration is valid: %s\n",
+			logsafe.Text(filepath.Join(configPath, "config.json")),
 		)
 		return
 	}
 
 	if err := config.SetConfigPath(configPath); err != nil {
-		log.Fatal("Invalid Decypharr data path")
+		log.Fatal("Invalid Tessarr data path")
 	}
 	cfg := config.Get()
 
 	if setAuthUsername != "" {
 		if err := configureAuthFromTerminal(cfg, setAuthUsername); err != nil {
-			log.Fatalf("Decypharr authentication setup failed: %v", err)
+			log.Fatalf("Tessarr authentication setup failed: %s", logsafe.Text(err.Error()))
 		}
 		fmt.Printf(
 			"Authentication enabled for %q in %s\n",
 			strings.TrimSpace(setAuthUsername),
-			configPath,
+			logsafe.Text(configPath),
 		)
 		return
 	}
@@ -118,12 +125,12 @@ func main() {
 	// Start pprof server if enabled
 	if pprofAddr != "" && enablePprof {
 		if err := validatePprofListenAddress(pprofAddr); err != nil {
-			log.Fatalf("refusing unsafe pprof listener: %v", err)
+			log.Fatalf("refusing unsafe pprof listener: %s", logsafe.Text(err.Error()))
 		}
 		go func() {
-			log.Printf("Starting pprof server on %s", pprofAddr)
+			log.Printf("Starting pprof server on %s", logsafe.Text(pprofAddr))
 			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-				log.Printf("pprof server error: %v", err)
+				log.Printf("pprof server error: %s", logsafe.Text(err.Error()))
 			}
 		}()
 	}
@@ -132,8 +139,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := decypharr.Start(ctx); err != nil {
-		log.Fatal(err)
+	if err := tessarr.Start(ctx); err != nil {
+		log.Fatalf("Tessarr stopped with an error: %s", logsafe.Text(err.Error()))
 	}
 }
 

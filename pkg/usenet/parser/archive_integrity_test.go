@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/Tensai75/nzbparser"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	streamreader "github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	streamreader "github.com/Trifocals3537/tessarr/pkg/usenet/fs/reader"
 )
 
 func integrityRAR4Block(kind byte, flags uint16, data []byte) []byte {

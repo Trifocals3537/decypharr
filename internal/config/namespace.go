@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // Built-in names in the root virtual filesystem. Provider instance names and

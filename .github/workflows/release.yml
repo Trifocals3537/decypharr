@@ -9,12 +9,13 @@ permissions:
   contents: read
 
 env:
-  GHCR_IMAGE: ghcr.io/trifocals3537/decypharr
-  LDFLAGS_PKG: github.com/sirrobot01/decypharr/pkg/version
+  GHCR_IMAGE: ghcr.io/trifocals3537/tessarr
+  LDFLAGS_PKG: github.com/Trifocals3537/tessarr/pkg/version
 
 jobs:
   prepare:
     name: Prepare release metadata
+    if: github.repository == 'Trifocals3537/tessarr'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}
@@ -97,7 +98,7 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X ${LDFLAGS_PKG}.Version=${VERSION} -X ${LDFLAGS_PKG}.Channel=${CHANNEL}" \
-            -o dist/decypharr
+            -o dist/tessarr
 
       - name: Verify architecture and glibc baseline
         env:
@@ -105,11 +106,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          file dist/decypharr
-          file dist/decypharr | grep -F "${EXPECTED_MACHINE}"
+          file dist/tessarr
+          file dist/tessarr | grep -F "${EXPECTED_MACHINE}"
 
           max_glibc="$(
-            readelf --version-info dist/decypharr |
+            readelf --version-info dist/tessarr |
               grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' |
               sort -Vu |
               tail -n 1 || true
@@ -136,29 +137,29 @@ jobs:
             bash -euc '
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libfuse2
-              /work/decypharr --help
-              install -d -m 0700 /tmp/decypharr-config
+              /work/tessarr --help
+              install -d -m 0700 /tmp/tessarr-config
               printf "%s\n" \
                 "{\"debrids\":[{\"name\":\"realdebrid\",\"api_key\":\"test-key\"}],\"download_folder\":\"/tmp/download\"}" \
-                > /tmp/decypharr-config/config.json
-              chmod 0644 /tmp/decypharr-config/config.json
-              /work/decypharr --config /tmp/decypharr-config --check-config
-              test "$(stat -c %a /tmp/decypharr-config/config.json)" = 644
+                > /tmp/tessarr-config/config.json
+              chmod 0644 /tmp/tessarr-config/config.json
+              /work/tessarr --config /tmp/tessarr-config --check-config
+              test "$(stat -c %a /tmp/tessarr-config/config.json)" = 644
             '
 
       - name: Package
         run: |
           set -euo pipefail
-          install -m 0644 packaging/systemd/decypharr.service dist/decypharr.service
+          install -m 0644 packaging/systemd/tessarr.service dist/tessarr.service
           install -m 0644 LICENSE dist/LICENSE
-          tar czf "dist/decypharr_Linux_${{ matrix.label }}.tar.gz" \
-            -C dist decypharr decypharr.service LICENSE
+          tar czf "dist/tessarr_Linux_${{ matrix.label }}.tar.gz" \
+            -C dist tessarr tessarr.service LICENSE
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: linux-${{ matrix.arch }}
-          path: dist/decypharr_Linux_*.tar.gz
+          path: dist/tessarr_Linux_*.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -188,24 +189,24 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X ${LDFLAGS_PKG}.Version=${VERSION} -X ${LDFLAGS_PKG}.Channel=${CHANNEL}" \
-            -o dist/decypharr.exe
+            -o dist/tessarr.exe
           install -m 0644 LICENSE dist/LICENSE
 
       - name: Verify architecture
         run: |
           set -euo pipefail
-          file dist/decypharr.exe
-          file dist/decypharr.exe | grep -F "x86-64"
+          file dist/tessarr.exe
+          file dist/tessarr.exe | grep -F "x86-64"
 
       - name: Package
         working-directory: dist
-        run: zip decypharr_Windows_x86_64.zip decypharr.exe LICENSE
+        run: zip tessarr_Windows_x86_64.zip tessarr.exe LICENSE
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-amd64
-          path: dist/decypharr_Windows_x86_64.zip
+          path: dist/tessarr_Windows_x86_64.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -250,7 +251,7 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X ${LDFLAGS_PKG}.Version=${VERSION} -X ${LDFLAGS_PKG}.Channel=${CHANNEL}" \
-            -o dist/decypharr
+            -o dist/tessarr
           install -m 0644 LICENSE dist/LICENSE
 
       - name: Verify architecture and command line
@@ -258,20 +259,20 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.expected_arch }}
         run: |
           set -euo pipefail
-          file dist/decypharr
-          test "$(lipo -archs dist/decypharr)" = "${EXPECTED_ARCH}"
-          ./dist/decypharr --help
+          file dist/tessarr
+          test "$(lipo -archs dist/tessarr)" = "${EXPECTED_ARCH}"
+          ./dist/tessarr --help
 
       - name: Package
         run: >-
-          tar czf "dist/decypharr_Darwin_${{ matrix.label }}.tar.gz"
-          -C dist decypharr LICENSE
+          tar czf "dist/tessarr_Darwin_${{ matrix.label }}.tar.gz"
+          -C dist tessarr LICENSE
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: darwin-${{ matrix.arch }}
-          path: dist/decypharr_Darwin_*.tar.gz
+          path: dist/tessarr_Darwin_*.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -361,7 +362,7 @@ jobs:
           set -euo pipefail
 
           release_args=(
-            --title "decypharr ${TAG}"
+            --title "tessarr ${TAG}"
             --generate-notes
             --verify-tag
           )

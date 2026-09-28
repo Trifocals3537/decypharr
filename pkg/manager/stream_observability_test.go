@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 )
 
 func TestDiagnoseStreamFailureCarriesCorrelationWithoutRawError(t *testing.T) {

@@ -14,18 +14,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/rclone"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/rclone"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/pkg/manager"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
-	FSName     = "decypharr:"
-	ConfigName = "decypharr"
+	FSName     = "tessarr:"
+	ConfigName = "tessarr"
 )
 
 // Manager handles the rclone RC server and provides mount operations

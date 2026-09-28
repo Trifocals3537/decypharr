@@ -181,6 +181,29 @@ func TestValidateLogLevel(t *testing.T) {
 	}
 }
 
+func TestValidateURLBase(t *testing.T) {
+	for _, value := range []string{"", "/", "/tessarr/", "/media/ui/"} {
+		if err := validateURLBase(value); err != nil {
+			t.Fatalf("validateURLBase(%q) error = %v", value, err)
+		}
+	}
+
+	for _, value := range []string{
+		"https://example.com/",
+		"//example.com/",
+		"/tessarr?next=evil",
+		"/tessarr#fragment",
+		"/tessarr\\admin/",
+		"/tessarr\r\nX-Test: injected/",
+		"/tessarr/%0d%0aX-Test:%20injected/",
+		"/tessarr/../admin/",
+	} {
+		if err := validateURLBase(value); err == nil {
+			t.Fatalf("validateURLBase(%q) accepted unsafe value", value)
+		}
+	}
+}
+
 func TestValidateDeploymentRejectsUnprotectedRemoteServices(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -302,7 +325,7 @@ func TestSetDefaultsBoundsJobQueueCapacity(t *testing.T) {
 }
 
 func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
-	t.Setenv("DECYPHARR_JOB_QUEUE_CAPACITY", "73")
+	t.Setenv("TESSARR_JOB_QUEUE_CAPACITY", "73")
 	cfg := &Config{}
 	cfg.applyEnvOverrides()
 	if cfg.JobQueueCapacity != 73 {
@@ -311,7 +334,7 @@ func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
 }
 
 func TestRelativeSymlinksEnvironmentOverride(t *testing.T) {
-	t.Setenv("DECYPHARR_RELATIVE_SYMLINKS", "true")
+	t.Setenv("TESSARR_RELATIVE_SYMLINKS", "true")
 	cfg := &Config{}
 	cfg.applyEnvOverrides()
 	if !cfg.RelativeSymlinks {
@@ -326,7 +349,7 @@ func TestFirstLoadAppliesBindAddressEnvironmentOverride(t *testing.T) {
 	t.Cleanup(func() {
 		SetConfigPath(previousPath)
 	})
-	t.Setenv("DECYPHARR_BIND_ADDRESS", "0.0.0.0")
+	t.Setenv("TESSARR_BIND_ADDRESS", "0.0.0.0")
 
 	cfg := &Config{}
 	if err := cfg.loadConfig(); err != nil {

@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestTorrentFileLayoutsPreserveUnambiguousNestedDuplicateBasenames(t *testing.T) {
@@ -271,6 +271,52 @@ func TestClaimTorrentEntryDirectoryWritesDurableOwnerAndRollsBackOnSyncFailure(t
 	}
 }
 
+func TestClaimTorrentEntryDirectoryAcceptsLegacyOwnerMarker(t *testing.T) {
+	root := t.TempDir()
+	entry := torrentOwnershipTestEntry(root, "legacy-marker-owner", config.DownloadActionDownload)
+	path, newlyClaimed, err := claimTorrentEntryDirectory(root, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !newlyClaimed {
+		t.Fatal("initial torrent claim was not reported as new")
+	}
+	if err := os.Rename(
+		filepath.Join(path, torrentOwnerMarkerName),
+		filepath.Join(path, legacyTorrentOwnerMarkerName),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	retryPath, newlyClaimed, err := claimTorrentEntryDirectory(root, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatalf("legacy owner marker was not accepted: %v", err)
+	}
+	if newlyClaimed || retryPath != path {
+		t.Fatalf("legacy marker retry = (%q, %t), want (%q, false)", retryPath, newlyClaimed, path)
+	}
+	assertTorrentTestContents(t, filepath.Join(path, legacyTorrentOwnerMarkerName), "legacy-marker-owner\n")
+	if _, err := os.Lstat(filepath.Join(path, torrentOwnerMarkerName)); !os.IsNotExist(err) {
+		t.Fatalf("retry rewrote the legacy marker: %v", err)
+	}
+}
+
+func TestTorrentOwnerMarkerAliasesMustAgree(t *testing.T) {
+	root := t.TempDir()
+	entry := torrentOwnershipTestEntry(root, "marker-conflict-owner", config.DownloadActionDownload)
+	path, _, err := claimTorrentEntryDirectory(root, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, legacyTorrentOwnerMarkerName), []byte("different-owner\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := claimTorrentEntryDirectory(root, entry, torrentLegacyProof{}); err == nil ||
+		!strings.Contains(err.Error(), "markers disagree") {
+		t.Fatalf("conflicting torrent ownership markers error = %v", err)
+	}
+}
+
 func TestClaimTorrentEntryDirectoryConservativelyAdoptsExactLegacySymlinks(t *testing.T) {
 	root := t.TempDir()
 	mount := t.TempDir()
@@ -370,6 +416,45 @@ func TestRemoveOwnedTorrentDirectoryRequiresMarkerAndRecoversQuarantine(t *testi
 	}
 	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(ownedPath), torrentQuarantinePrefix+"*")); err != nil || len(matches) != 0 {
 		t.Fatalf("quarantine remnants = %v, error=%v", matches, err)
+	}
+}
+
+func TestRemoveOwnedTorrentDirectoryRecoversLegacyQuarantine(t *testing.T) {
+	root := t.TempDir()
+	entry := torrentOwnershipTestEntry(root, "legacy-quarantine-owner", config.DownloadActionDownload)
+	ownedPath, _, err := claimTorrentEntryDirectory(root, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownedPath, "payload"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(root, ownedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyQuarantine := filepath.Join(
+		filepath.Dir(ownedPath),
+		legacyTorrentQuarantinePrefix+strings.TrimPrefix(
+			torrentQuarantinePrefixForEntry("legacy-quarantine-owner", relative),
+			torrentQuarantinePrefix,
+		)+"crash",
+	)
+	if err := os.Rename(ownedPath, legacyQuarantine); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(legacyQuarantine, torrentOwnerMarkerName),
+		filepath.Join(legacyQuarantine, legacyTorrentOwnerMarkerName),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeOwnedTorrentEntryDirectory(root, entry); err != nil {
+		t.Fatalf("legacy torrent quarantine recovery failed: %v", err)
+	}
+	if _, err := os.Lstat(legacyQuarantine); !os.IsNotExist(err) {
+		t.Fatalf("legacy torrent quarantine remained: %v", err)
 	}
 }
 
@@ -495,6 +580,44 @@ func TestOwnedTorrentPartRejectsHardlinkedRecovery(t *testing.T) {
 		t.Fatal("hardlinked recovered partial file was accepted")
 	}
 	assertTorrentTestContents(t, outside, "da")
+}
+
+func TestOwnedTorrentPartResumesLegacyPartial(t *testing.T) {
+	root := t.TempDir()
+	entry := torrentOwnershipTestEntry(root, "legacy-part-owner", config.DownloadActionDownload)
+	if _, _, err := claimTorrentEntryDirectory(root, entry, torrentLegacyProof{}); err != nil {
+		t.Fatal(err)
+	}
+	part, err := openOwnedTorrentPart(root, entry, "movie.mkv", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.file.Write([]byte("ab")); err != nil {
+		t.Fatal(err)
+	}
+	currentPath := part.partAbsolutePath
+	if err := part.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(
+		filepath.Dir(currentPath),
+		strings.Replace(filepath.Base(currentPath), torrentPartialPrefix, legacyTorrentPartialPrefix, 1),
+	)
+	if err := os.Rename(currentPath, legacyPath); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := openOwnedTorrentPart(root, entry, "movie.mkv", 4)
+	if err != nil {
+		t.Fatalf("legacy torrent partial was not resumed: %v", err)
+	}
+	defer recovered.Close()
+	if recovered.partAbsolutePath != legacyPath {
+		t.Fatalf("resumed partial = %q, want %q", recovered.partAbsolutePath, legacyPath)
+	}
+	if size, err := recovered.Size(); err != nil || size != 2 {
+		t.Fatalf("legacy partial size = %d, error=%v", size, err)
+	}
 }
 
 func TestOwnedTorrentPartRecoversPublishedCrashHardLinks(t *testing.T) {

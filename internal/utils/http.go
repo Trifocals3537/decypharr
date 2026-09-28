@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/tlsconfig"
+	"github.com/Trifocals3537/tessarr/internal/tlsconfig"
 	"go.uber.org/ratelimit"
 )
 

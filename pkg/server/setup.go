@@ -6,9 +6,9 @@ import (
 
 	json "github.com/bytedance/sonic"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 // SetupState tracks the current setup wizard state
@@ -49,7 +49,7 @@ func (s *Server) SetupHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 
 	if err := cfg.SetupComplete(); err == nil {
-		http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
+		redirectLocal(w, cfg.URLBase, "", http.StatusSeeOther)
 		return
 	}
 	if !s.requireSetupAccess(w, r) {

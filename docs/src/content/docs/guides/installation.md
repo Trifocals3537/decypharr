@@ -1,12 +1,12 @@
 ---
 title: Installation
-description: Install Decypharr as a native Linux service or with Docker.
+description: Install Tessarr as a native Linux service or with Docker.
 ---
 
 ## Native Linux (Recommended)
 
 Download the archive for your architecture from this fork's
-[GitHub Releases](https://github.com/Trifocals3537/decypharr/releases).
+[GitHub Releases](https://github.com/Trifocals3537/tessarr/releases).
 Linux hosts need FUSE support and a compatible FUSE runtime (commonly
 `libfuse2` on Ubuntu and Debian). Install rclone only if you plan to use the
 rclone mount backend.
@@ -14,13 +14,13 @@ rclone mount backend.
 ```bash
 # Verify the downloaded archive against SHA256SUMS, then extract it.
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf decypharr_Linux_x86_64.tar.gz
+tar -xzf tessarr_Linux_x86_64.tar.gz
 
-install -Dm755 decypharr ~/.local/bin/decypharr
-mkdir -p ~/.decypharr
+install -Dm755 tessarr ~/.local/bin/tessarr
+mkdir -p ~/.tessarr
 
 # First launch: creates config.json and starts the setup wizard.
-~/.local/bin/decypharr --config ~/.decypharr
+~/.local/bin/tessarr --config ~/.tessarr
 ```
 
 Native installs listen on `127.0.0.1:8282` by default so the unauthenticated
@@ -33,7 +33,7 @@ ssh -L 8282:127.0.0.1:8282 user@seedbox
 
 Then visit `http://127.0.0.1:8282`. For permanent remote access, prefer a
 trusted reverse proxy. Set `bind_address` explicitly only when you intend to
-listen on another interface. Decypharr refuses to start when authentication
+listen on another interface. Tessarr refuses to start when authentication
 is disabled on a non-loopback listener because the UI, APIs, and provider
 configuration could otherwise be exposed over plain HTTP.
 
@@ -41,7 +41,7 @@ configuration could otherwise be exposed over plain HTTP.
 
 A native shared-seedbox installation uses one HTTP listener for the Web UI,
 qBittorrent-compatible API, SABnzbd-compatible API, and WebDAV routes. When
-the Arr applications are on the same host, bind Decypharr to `127.0.0.1`,
+the Arr applications are on the same host, bind Tessarr to `127.0.0.1`,
 point those clients to `127.0.0.1`, and use an SSH tunnel for the UI; this
 requires no public assigned port. If remote clients need direct access, only
 one assigned inbound application port is required. Real-Debrid and TorBox use
@@ -66,7 +66,7 @@ existing configuration uses a non-loopback address, set credentials
 interactively on the host before starting the new binary:
 
 ```bash
-~/.local/bin/decypharr --config ~/.decypharr --set-auth admin
+~/.local/bin/tessarr --config ~/.tessarr --set-auth admin
 ```
 
 The password is read twice without echo and is never placed in shell history
@@ -80,11 +80,11 @@ unencrypted port directly to the Internet.
 
 Tailscale Serve is a good fit when a shared host has no supported TLS reverse
 proxy for custom applications. It terminates private HTTPS inside the tailnet
-and proxies to Decypharr's existing HTTP listener, so it does not require
-Docker or another public port. Keep Decypharr authentication enabled as a
+and proxies to Tessarr's existing HTTP listener, so it does not require
+Docker or another public port. Keep Tessarr authentication enabled as a
 second layer; do not use Tailscale Funnel.
 
-Bind Decypharr to the account's private address and restrict the listener to
+Bind Tessarr to the account's private address and restrict the listener to
 that same source address:
 
 ```json
@@ -108,7 +108,7 @@ continues to admit local automation clients and the local Tailscale proxy.
 
 For a named Tailscale Service:
 
-1. In the Tailscale admin console, define `svc:decypharr` with endpoint
+1. In the Tailscale admin console, define `svc:tessarr` with endpoint
    `tcp:443` and grant only the intended users or devices access.
 2. Confirm the seedbox node has a tag-based identity and Tailscale 1.86 or
    later.
@@ -117,20 +117,20 @@ For a named Tailscale Service:
 
    ```bash
    ~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve \
-     --service=svc:decypharr --https=443 http://192.0.2.10:8282
+     --service=svc:tessarr --https=443 http://192.0.2.10:8282
    ```
 
 4. Approve the service host if the tailnet does not auto-approve it.
-5. Verify the named `https://decypharr.<tailnet>.ts.net` URL reaches the
-   Decypharr login, both Arr clients still pass their tests, and the public
+5. Verify the named `https://tessarr.<tailnet>.ts.net` URL reaches the
+   Tessarr login, both Arr clients still pass their tests, and the public
    host cannot connect to the assigned application port.
 
 Named services run in the background by default and resume with the Tailscale
 daemon. To roll back only this mapping, first drain it, then clear it:
 
 ```bash
-~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve drain svc:decypharr
-~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve clear svc:decypharr
+~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve drain svc:tessarr
+~/.local/bin/tailscale --socket=/path/to/tailscaled.sock serve clear svc:tessarr
 ```
 
 See the official
@@ -139,7 +139,7 @@ for service definition, approval, and access grants.
 
 Before replacing an existing seedbox binary:
 
-1. Run `decypharr --config PATH --check-config`.
+1. Run `tessarr --config PATH --check-config`.
 2. Inspect the effective supervisor command and any overrides so you replace
    the binary it actually executes, not merely a similarly named file.
 3. Confirm `bind_address`, `port`, and `use_auth` in the effective
@@ -171,7 +171,7 @@ network boundary. Normal startup and configuration updates enforce the same
 deployment-safety checks:
 
 ```bash
-~/.local/bin/decypharr --config ~/.decypharr --check-config
+~/.local/bin/tessarr --config ~/.tessarr --check-config
 ```
 
 ### Run as a user service
@@ -182,14 +182,14 @@ host's FUSE prerequisites have been installed.
 
 ```bash
 mkdir -p ~/.config/systemd/user
-install -m 0644 decypharr.service ~/.config/systemd/user/decypharr.service
+install -m 0644 tessarr.service ~/.config/systemd/user/tessarr.service
 
 systemctl --user daemon-reload
-systemctl --user enable --now decypharr
-systemctl --user status decypharr
+systemctl --user enable --now tessarr
+systemctl --user status tessarr
 ```
 
-The supplied unit uses `~/.decypharr`, matching the application's native
+The supplied unit uses `~/.tessarr`, matching the application's native
 default. Before relying on a user service after logout, check whether lingering
 is enabled:
 
@@ -204,14 +204,14 @@ supervisord, s6, or another process supervisor. As a basic non-restarting
 fallback:
 
 ```bash
-nohup ~/.local/bin/decypharr --config ~/.decypharr \
-  >> ~/.decypharr/decypharr.log 2>&1 &
+nohup ~/.local/bin/tessarr --config ~/.tessarr \
+  >> ~/.tessarr/tessarr.log 2>&1 &
 ```
 
 Logs for the systemd service are available with:
 
 ```bash
-journalctl --user -u decypharr -f
+journalctl --user -u tessarr -f
 ```
 
 ## Docker (Alternative)
@@ -222,9 +222,9 @@ Create a `docker-compose.yml`:
 
 ```yaml
 services:
-  decypharr:
-    image: ghcr.io/trifocals3537/decypharr:beta
-    container_name: decypharr
+  tessarr:
+    image: ghcr.io/trifocals3537/tessarr:beta
+    container_name: tessarr
     ports:
       - "8282:8282"
     volumes:
@@ -250,7 +250,7 @@ Access at `http://localhost:8282`
 ### Media server containers
 
 Docker bind mounts default to `rprivate`. That is unsafe for a long-running
-Plex, Jellyfin, or Emby container consuming a FUSE mount that Decypharr may
+Plex, Jellyfin, or Emby container consuming a FUSE mount that Tessarr may
 replace during an update or restart: the host sees the new mount, but the media
 container can retain the disconnected old one.
 
@@ -264,25 +264,25 @@ services:
     image: jellyfin/jellyfin:latest
     volumes:
       - type: bind
-        source: /mnt/decypharr
-        target: /mnt/decypharr
+        source: /mnt/tessarr
+        target: /mnt/tessarr
         read_only: true
         bind:
           propagation: rslave
 ```
 
 The source path must be a bind mount on a Linux host whose parent supports
-mount propagation. Keep the Decypharr side `rshared`, as shown above. After
+mount propagation. Keep the Tessarr side `rshared`, as shown above. After
 changing propagation, recreate the media container once and verify the result:
 
 ```bash
 docker compose up -d --force-recreate jellyfin
 docker inspect jellyfin --format '{{range .Mounts}}{{.Destination}} {{.Propagation}}{{println}}{{end}}'
-docker exec jellyfin stat /mnt/decypharr
+docker exec jellyfin stat /mnt/tessarr
 ```
 
 If a managed host does not let you change the media container's bind
-propagation, restart that media-server application after every Decypharr
+propagation, restart that media-server application after every Tessarr
 unmount/remount. Restarting playback alone cannot replace the container's stale
 mount reference.
 
@@ -290,7 +290,7 @@ mount reference.
 
 ```bash
 docker run -d \
-  --name=decypharr \
+  --name=tessarr \
   -p 8282:8282 \
   -v ./config:/app \
   -v ./downloads:/downloads \
@@ -301,7 +301,7 @@ docker run -d \
     --device /dev/fuse:/dev/fuse:rwm \
     --cap-add SYS_ADMIN \
     --security-opt apparmor:unconfined \
-  ghcr.io/trifocals3537/decypharr:beta
+  ghcr.io/trifocals3537/tessarr:beta
 ```
 
 The container image explicitly listens on `0.0.0.0`; publish only the ports you
@@ -309,8 +309,8 @@ intend to expose.
 
 ## Managed (ElfHosted)
 
-Prefer not to self-host? A managed Decypharr instance is available
-via [ElfHosted](https://store.elfhosted.com/product/decypharr/?utm_source=github&utm_medium=docs&utm_campaign=decypharr-docs),
+Prefer not to self-host? A managed Tessarr instance is available
+via [ElfHosted](https://store.elfhosted.com/product/tessarr/?utm_source=github&utm_medium=docs&utm_campaign=tessarr-docs),
 preconfigured alongside Sonarr/Radarr and connected to your debrid provider. Includes a 7-day trial.
 
 ## Next Steps

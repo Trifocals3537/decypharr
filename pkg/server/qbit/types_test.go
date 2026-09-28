@@ -3,7 +3,7 @@ package qbit
 import (
 	"testing"
 
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestConvertToQBitTorrentTorrentCalculatesETA(t *testing.T) {

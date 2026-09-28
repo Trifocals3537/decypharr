@@ -11,7 +11,7 @@ import (
 
 	json "github.com/bytedance/sonic"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 // DiscordEmbed represents a Discord embed object
@@ -109,23 +109,23 @@ func (d *DiscordNotifier) getColor(status string) int {
 func (d *DiscordNotifier) getHeader(event config.NotificationEvent) string {
 	switch event {
 	case config.EventDownloadComplete:
-		return "[Decypharr] Download Completed"
+		return "[Tessarr] Download Completed"
 	case config.EventDownloadFailed:
-		return "[Decypharr] Download Failed"
+		return "[Tessarr] Download Failed"
 	case config.EventRepairPending:
-		return "[Decypharr] Repair Completed, Awaiting action"
+		return "[Tessarr] Repair Completed, Awaiting action"
 	case config.EventRepairComplete:
-		return "[Decypharr] Repair Complete"
+		return "[Tessarr] Repair Complete"
 	case config.EventRepairFailed:
-		return "[Decypharr] Repair Failed"
+		return "[Tessarr] Repair Failed"
 	case config.EventRepairCancelled:
-		return "[Decypharr] Repair Cancelled"
+		return "[Tessarr] Repair Cancelled"
 	default:
 		// Split the event string and capitalize the first letter of each word
 		evs := strings.Split(string(event), "_")
 		for i, ev := range evs {
 			evs[i] = strings.ToTitle(ev)
 		}
-		return "[Decypharr] " + strings.Join(evs, " ")
+		return "[Tessarr] " + strings.Join(evs, " ")
 	}
 }

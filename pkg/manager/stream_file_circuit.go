@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (

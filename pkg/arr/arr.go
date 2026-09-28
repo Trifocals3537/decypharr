@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/request"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 	json "github.com/bytedance/sonic"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/request"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
@@ -65,8 +65,8 @@ type Arr struct {
 	Type             Type   `json:"type"`
 	SkipRepair       bool   `json:"skip_repair"`
 	DownloadUncached *bool  `json:"download_uncached,omitempty"` // Tri-state: nil = inherit provider policy, true = allow uncached, false = cached-only
-	SelectedDebrid   string `json:"selected_debrid,omitempty"`    // The debrid service selected for this arr
-	Source           Source `json:"source,omitempty"`              // The source of the arr, e.g. "auto", "manual". Auto means it was automatically detected from the arr
+	SelectedDebrid   string `json:"selected_debrid,omitempty"`   // The debrid service selected for this arr
+	Source           Source `json:"source,omitempty"`            // The source of the arr, e.g. "auto", "manual". Auto means it was automatically detected from the arr
 }
 
 func New(name, host, token string, skipRepair bool, downloadUncached *bool, selectedDebrid, source string) *Arr {

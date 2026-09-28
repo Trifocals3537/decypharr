@@ -6,9 +6,9 @@ import (
 	"sort"
 
 	"github.com/Tensai75/nzbparser"
-	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/sourcegraph/conc/iter"
 )
 

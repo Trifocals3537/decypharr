@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 var cacheWarmTestRoot string
 
 func TestMain(m *testing.M) {
-	root, err := os.MkdirTemp("", "decypharr-dfs-cache-warm-*")
+	root, err := os.MkdirTemp("", "tessarr-dfs-cache-warm-*")
 	if err != nil {
 		panic(err)
 	}

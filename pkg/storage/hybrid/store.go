@@ -27,8 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/logger"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/logger"
 )
 
 // Common errors

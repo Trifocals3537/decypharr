@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package storage;
 
-option go_package = "github.com/sirrobot01/decypharr/pkg/storage";
+option go_package = "github.com/Trifocals3537/tessarr/pkg/storage";
 
 // ============================================================================
 // File and Provider Types

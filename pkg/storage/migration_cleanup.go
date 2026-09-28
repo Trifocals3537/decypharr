@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 )
 
 var ErrMigrationCleanupNotFound = errors.New("migration cleanup intent not found")

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
 )
 
 type watchedNZBReconciliationState uint8

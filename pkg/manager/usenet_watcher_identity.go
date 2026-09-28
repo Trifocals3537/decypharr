@@ -7,14 +7,16 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
 	"github.com/google/uuid"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
 const (
+	// Keep the original domain forever: it is part of the persisted UUID
+	// algorithm, not a display name. Changing it would duplicate accepted NZBs.
 	watchedNZBIdentityDomain = "decypharr/watched-nzb/v1"
 	watchedNZBProvider       = "usenet"
 	watchedNZBCategory       = "uncategorized"
@@ -23,7 +25,7 @@ const (
 var errWatchedNZBStateAmbiguous = errors.New("watched NZB state is ambiguous")
 
 // watchedNZBIdentity is stable across retries and process restarts. Its UUIDv8
-// version nibble keeps the deterministic namespace disjoint from Decypharr's
+// version nibble keeps the deterministic namespace disjoint from Tessarr's
 // ordinary random UUIDv4 import IDs.
 type watchedNZBIdentity struct {
 	ID            string

@@ -16,9 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	nntpyenc "github.com/Trifocals3537/tessarr/internal/nntp/yenc"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/rs/zerolog"
-	nntpyenc "github.com/sirrobot01/decypharr/internal/nntp/yenc"
-	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // Note: Timeout values are defined in TimeoutConfig (client.go).

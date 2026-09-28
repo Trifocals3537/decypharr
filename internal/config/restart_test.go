@@ -101,12 +101,12 @@ func TestRequiresRestartIgnoresInactiveMountSettings(t *testing.T) {
 			name: "dfs ignores rclone settings",
 			current: Mount{
 				Type:      MountTypeDFS,
-				MountPath: "/mnt/decypharr",
+				MountPath: "/mnt/tessarr",
 				DFS:       DFS{CacheDir: "/cache/dfs"},
 			},
 			updated: Mount{
 				Type:      MountTypeDFS,
-				MountPath: "/mnt/decypharr",
+				MountPath: "/mnt/tessarr",
 				DFS:       DFS{CacheDir: "/cache/dfs"},
 				Rclone:    Rclone{CacheDir: "/unused/rclone"},
 			},
@@ -127,12 +127,12 @@ func TestRequiresRestartIgnoresInactiveMountSettings(t *testing.T) {
 func TestRequiresRestartDetectsActiveMountChanges(t *testing.T) {
 	current := &Config{Mount: Mount{
 		Type:      MountTypeDFS,
-		MountPath: "/mnt/decypharr",
+		MountPath: "/mnt/tessarr",
 		DFS:       DFS{CacheDir: "/cache/one"},
 	}}
 	updated := &Config{Mount: Mount{
 		Type:      MountTypeDFS,
-		MountPath: "/mnt/decypharr",
+		MountPath: "/mnt/tessarr",
 		DFS:       DFS{CacheDir: "/cache/two"},
 	}}
 

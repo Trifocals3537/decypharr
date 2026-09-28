@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
 )
 
 // ErrTerminalProviderTorrent identifies an explicit provider-reported transfer

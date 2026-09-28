@@ -3,11 +3,11 @@ package manager
 import (
 	"context"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/go-co-op/gocron/v2"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 // runInitialCalls performs any initial calls of worker functions
@@ -225,7 +225,7 @@ func (m *Manager) addQueueProcessorJob(ctx context.Context) error {
 
 func (m *Manager) StartWorker(ctx context.Context) error {
 	// Stop any existing jobs before starting new ones
-	m.scheduler.RemoveByTags("decypharr")
+	m.scheduler.RemoveByTags(managerSchedulerTag)
 
 	// Call the initial calls
 	m.runInitialCalls(ctx)

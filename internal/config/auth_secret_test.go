@@ -11,7 +11,7 @@ import (
 )
 
 func TestSecretKeyGeneratesAndPersistsPerInstallSecret(t *testing.T) {
-	t.Setenv("DECYPHARR_SECRET_KEY", "")
+	t.Setenv("TESSARR_SECRET_KEY", "")
 
 	oldConfigPath := configPath
 	configPath = t.TempDir()
@@ -44,7 +44,7 @@ func TestSecretKeyGeneratesAndPersistsPerInstallSecret(t *testing.T) {
 }
 
 func TestSecretKeyHonorsEnvironmentOverride(t *testing.T) {
-	t.Setenv("DECYPHARR_SECRET_KEY", "operator-provided-secret")
+	t.Setenv("TESSARR_SECRET_KEY", "operator-provided-secret")
 
 	cfg := &Config{}
 	if got := cfg.SecretKey(); got != "operator-provided-secret" {

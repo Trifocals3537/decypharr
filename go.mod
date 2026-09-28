@@ -1,4 +1,4 @@
-module github.com/sirrobot01/decypharr
+module github.com/Trifocals3537/tessarr
 
 go 1.26.6
 

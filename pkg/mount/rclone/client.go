@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/retry"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/retry"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 // mountWithRetry attempts to mount with retry logic using avast/retry-go
@@ -63,8 +63,8 @@ func (m *Manager) performMount(ctx context.Context) error {
 		"AllowNonEmpty": true,
 		"AllowOther":    true,
 		"DebugFUSE":     false,
-		"DeviceName":    "decypharr",
-		"VolumeName":    "decypharr",
+		"DeviceName":    "tessarr",
+		"VolumeName":    "tessarr",
 	}
 
 	if cfg.Rclone.AsyncRead != nil {

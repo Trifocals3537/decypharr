@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -17,17 +18,17 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
-	torrentOwnerMarkerName      = ".decypharr-torrent-owner-v1"
-	torrentOwnershipLockName    = ".decypharr-torrent-ownership.lock"
-	torrentQuarantinePrefix     = ".decypharr-torrent-quarantine-"
-	torrentPartialPrefix        = ".decypharr-torrent-part-"
+	torrentOwnerMarkerName      = ".tessarr-torrent-owner-v1"
+	torrentOwnershipLockName    = ".tessarr-torrent-ownership.lock"
+	torrentQuarantinePrefix     = ".tessarr-torrent-quarantine-"
+	torrentPartialPrefix        = ".tessarr-torrent-part-"
 	torrentOwnerMarkerMaxBytes  = 256
 	torrentOwnershipMaxEntries  = 100_000
 	torrentOwnershipReadBatch   = 256
@@ -49,6 +50,8 @@ var (
 	torrentAfterQuarantineVerified func(quarantineRelative string) error
 	torrentAfterMarkerLstat        func(root *os.Root) error
 )
+
+var torrentOwnerMarkerNames = []string{torrentOwnerMarkerName, legacyTorrentOwnerMarkerName}
 
 type torrentFileLayout struct {
 	file     *storage.File
@@ -122,9 +125,13 @@ func removeTorrentFilenameExtension(name string) string {
 func isReservedTorrentPrivateName(name string) bool {
 	lower := strings.ToLower(name)
 	return lower == torrentOwnerMarkerName ||
+		lower == legacyTorrentOwnerMarkerName ||
 		lower == torrentOwnershipLockName ||
+		lower == legacyTorrentOwnershipLockName ||
 		strings.HasPrefix(lower, torrentQuarantinePrefix) ||
-		strings.HasPrefix(lower, torrentPartialPrefix)
+		strings.HasPrefix(lower, legacyTorrentQuarantinePrefix) ||
+		strings.HasPrefix(lower, torrentPartialPrefix) ||
+		strings.HasPrefix(lower, legacyTorrentPartialPrefix)
 }
 
 // torrentEntryFileLayouts preserves safe nested provider paths. Both slash
@@ -639,6 +646,29 @@ func openOwnedTorrentPart(downloadRoot string, entry *storage.Entry, relative st
 	digest := sha256.Sum256([]byte(portableTorrentRelativeKey(relative)))
 	partName := torrentPartialPrefix + hex.EncodeToString(digest[:16])
 	partRelative := filepath.Join(filepath.Dir(relative), partName)
+	legacyPartRelative := filepath.Join(
+		filepath.Dir(relative),
+		legacyTorrentPartialPrefix+hex.EncodeToString(digest[:16]),
+	)
+	if _, currentErr := root.Lstat(partRelative); currentErr == nil {
+		if _, legacyErr := root.Lstat(legacyPartRelative); legacyErr == nil {
+			_ = root.Close()
+			return nil, fmt.Errorf("both Tessarr and legacy torrent partial files exist")
+		} else if !os.IsNotExist(legacyErr) {
+			_ = root.Close()
+			return nil, fmt.Errorf("inspect legacy torrent partial file: %w", legacyErr)
+		}
+	} else if os.IsNotExist(currentErr) {
+		if _, legacyErr := root.Lstat(legacyPartRelative); legacyErr == nil {
+			partRelative = legacyPartRelative
+		} else if !os.IsNotExist(legacyErr) {
+			_ = root.Close()
+			return nil, fmt.Errorf("inspect legacy torrent partial file: %w", legacyErr)
+		}
+	} else {
+		_ = root.Close()
+		return nil, fmt.Errorf("inspect torrent partial file: %w", currentErr)
+	}
 	file, err := root.OpenFile(partRelative, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	created := err == nil
 	if err != nil && !os.IsExist(err) {
@@ -1268,7 +1298,30 @@ func writeDurableTorrentMarker(root *os.Root, ownerID string) error {
 }
 
 func readTorrentOwnerMarker(root *os.Root) (string, error) {
-	before, err := root.Lstat(torrentOwnerMarkerName)
+	owner := ""
+	found := false
+	for _, name := range torrentOwnerMarkerNames {
+		markerOwner, err := readTorrentOwnerMarkerNamed(root, name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if found && markerOwner != owner {
+			return "", fmt.Errorf("torrent ownership markers disagree")
+		}
+		owner = markerOwner
+		found = true
+	}
+	if !found {
+		return "", os.ErrNotExist
+	}
+	return owner, nil
+}
+
+func readTorrentOwnerMarkerNamed(root *os.Root, name string) (string, error) {
+	before, err := root.Lstat(name)
 	if err != nil {
 		return "", err
 	}
@@ -1280,7 +1333,7 @@ func readTorrentOwnerMarker(root *os.Root) (string, error) {
 			return "", err
 		}
 	}
-	file, err := root.Open(torrentOwnerMarkerName)
+	file, err := root.Open(name)
 	if err != nil {
 		return "", err
 	}
@@ -1317,14 +1370,14 @@ func readTorrentOwnerMarker(root *os.Root) (string, error) {
 	if closeErr != nil {
 		return "", fmt.Errorf("close torrent ownership marker: %w", closeErr)
 	}
-	after, err := root.Lstat(torrentOwnerMarkerName)
+	after, err := root.Lstat(name)
 	if err != nil || !os.SameFile(opened, after) {
 		if err != nil {
 			return "", fmt.Errorf("reinspect torrent ownership marker: %w", err)
 		}
 		return "", fmt.Errorf("torrent ownership marker changed while reading")
 	}
-	pathLinkCount, err := rootedTorrentRegularFileLinkCount(root, torrentOwnerMarkerName, after)
+	pathLinkCount, err := rootedTorrentRegularFileLinkCount(root, name, after)
 	if err != nil {
 		return "", fmt.Errorf("reinspect torrent ownership marker path link count: %w", err)
 	}
@@ -1786,7 +1839,7 @@ func removeTorrentQuarantines(rooted *os.Root, quarantines []string, ownerID str
 		MaxEntries:       torrentOwnershipMaxEntries,
 		MaxDepth:         torrentOwnershipMaxDepth,
 		ReadBatch:        torrentOwnershipReadBatch,
-		PreserveTopLevel: []string{torrentOwnerMarkerName},
+		PreserveTopLevel: torrentOwnerMarkerNames,
 	}); err != nil {
 		_ = quarantineRoot.Close()
 		return fmt.Errorf("empty pinned torrent quarantine: %w", err)
@@ -1807,7 +1860,7 @@ func removeTorrentQuarantines(rooted *os.Root, quarantines []string, ownerID str
 		}
 		return fmt.Errorf("emptied torrent quarantine is owned by %q, not %q", markerOwner, ownerID)
 	}
-	if err := quarantineRoot.Remove(torrentOwnerMarkerName); err != nil {
+	if err := removeTorrentOwnerMarkers(quarantineRoot); err != nil {
 		_ = quarantineRoot.Close()
 		return fmt.Errorf("remove torrent quarantine ownership marker: %w", err)
 	}
@@ -1863,7 +1916,7 @@ func findTorrentQuarantines(rooted *os.Root, relativeEntry, ownerID string) ([]s
 		return nil, fmt.Errorf("open torrent release parent for quarantine scan: %w", err)
 	}
 	defer dir.Close()
-	prefix := torrentQuarantinePrefixForEntry(ownerID, relativeEntry)
+	prefixes := torrentQuarantinePrefixesForEntry(ownerID, relativeEntry)
 	quarantines := make([]string, 0, 1)
 	seen := 0
 	for {
@@ -1873,8 +1926,12 @@ func findTorrentQuarantines(rooted *os.Root, relativeEntry, ownerID string) ([]s
 			if seen > torrentOwnershipMaxEntries {
 				return nil, fmt.Errorf("torrent release parent exceeds bounded quarantine scan")
 			}
-			if strings.HasPrefix(strings.ToLower(entry.Name()), prefix) {
-				quarantines = append(quarantines, filepath.Join(parent, entry.Name()))
+			lowerName := strings.ToLower(entry.Name())
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(lowerName, prefix) {
+					quarantines = append(quarantines, filepath.Join(parent, entry.Name()))
+					break
+				}
 			}
 		}
 		if readErr == io.EOF {
@@ -1911,6 +1968,22 @@ func torrentQuarantinePrefixForEntry(ownerID, relativeEntry string) string {
 	return torrentQuarantinePrefix + hex.EncodeToString(digest[:16]) + "-"
 }
 
+func torrentQuarantinePrefixesForEntry(ownerID, relativeEntry string) []string {
+	digest := sha256.Sum256([]byte(ownerID + "\x00" + filepath.ToSlash(relativeEntry)))
+	suffix := hex.EncodeToString(digest[:16]) + "-"
+	return []string{torrentQuarantinePrefix + suffix, legacyTorrentQuarantinePrefix + suffix}
+}
+
+func removeTorrentOwnerMarkers(rooted *os.Root) error {
+	var removeErr error
+	for _, name := range torrentOwnerMarkerNames {
+		if err := rooted.Remove(name); err != nil && !os.IsNotExist(err) {
+			removeErr = errors.Join(removeErr, err)
+		}
+	}
+	return removeErr
+}
+
 func rejectPortableTorrentSiblingAlias(rooted *os.Root, parent, wanted string) error {
 	dir, err := rooted.Open(parent)
 	if err != nil {
@@ -1942,9 +2015,9 @@ func rejectPortableTorrentSiblingAlias(rooted *os.Root, parent, wanted string) e
 }
 
 func acquireTorrentOwnershipLock(downloadRoot string) (*ownershipRoot, error) {
-	ownership, _, err := acquireOwnershipRoot(
+	ownership, _, err := acquireCompatibleOwnershipRoot(
 		downloadRoot,
-		torrentOwnershipLockName,
+		[]string{legacyTorrentOwnershipLockName, torrentOwnershipLockName},
 		true,
 		torrentOwnershipLockTimeout,
 		25*time.Millisecond,

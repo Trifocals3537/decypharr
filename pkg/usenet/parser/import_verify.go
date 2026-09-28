@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/sirrobot01/decypharr/internal/crypto"
-	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/crypto"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 // verifyImportFile validates the logical map and actual sampled article bodies.

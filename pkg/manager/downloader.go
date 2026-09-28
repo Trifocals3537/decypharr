@@ -17,13 +17,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/cdntraffic"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/notifications"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/cdntraffic"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/notifications"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sourcegraph/conc/pool"
 )
 
@@ -1267,7 +1267,7 @@ func (d *Downloader) localDownloaderWithLink(ctx context.Context, downloadLink d
 	if err != nil {
 		return fmt.Errorf("invalid torrent download URL")
 	}
-	req.Header.Set("User-Agent", "Decypharr[QBitTorrent]")
+	req.Header.Set("User-Agent", "Tessarr[QBitTorrent]")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Encoding", "identity")
 	if rangeStart >= 0 {

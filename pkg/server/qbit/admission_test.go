@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestTorrentAddErrorStatus(t *testing.T) {
@@ -93,8 +93,8 @@ func TestWriteTorrentAddErrorExposesMachineReadableCode(t *testing.T) {
 
 	writeTorrentAddError(recorder, err, http.StatusConflict)
 
-	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "torrent_not_cached" {
-		t.Fatalf("X-Decypharr-Error-Code = %q, want torrent_not_cached", got)
+	if got := recorder.Header().Get("X-Tessarr-Error-Code"); got != "torrent_not_cached" {
+		t.Fatalf("X-Tessarr-Error-Code = %q, want torrent_not_cached", got)
 	}
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
@@ -110,8 +110,8 @@ func TestWriteTorrentAddErrorDoesNotMislabelMixedFailures(t *testing.T) {
 
 	writeTorrentAddError(recorder, err, http.StatusBadRequest)
 
-	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "" {
-		t.Fatalf("X-Decypharr-Error-Code = %q, want empty", got)
+	if got := recorder.Header().Get("X-Tessarr-Error-Code"); got != "" {
+		t.Fatalf("X-Tessarr-Error-Code = %q, want empty", got)
 	}
 }
 
@@ -124,8 +124,8 @@ func TestWriteTorrentAddErrorDoesNotMislabelMixedContentFailures(t *testing.T) {
 
 	writeTorrentAddError(recorder, err, http.StatusBadRequest)
 
-	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "" {
-		t.Fatalf("X-Decypharr-Error-Code = %q, want empty", got)
+	if got := recorder.Header().Get("X-Tessarr-Error-Code"); got != "" {
+		t.Fatalf("X-Tessarr-Error-Code = %q, want empty", got)
 	}
 }
 
@@ -135,8 +135,8 @@ func TestWriteTorrentAddErrorExposesContentRejectionCode(t *testing.T) {
 
 	writeTorrentAddError(recorder, err, http.StatusUnprocessableEntity)
 
-	if got := recorder.Header().Get("X-Decypharr-Error-Code"); got != "torrent_content_rejected" {
-		t.Fatalf("X-Decypharr-Error-Code = %q, want torrent_content_rejected", got)
+	if got := recorder.Header().Get("X-Tessarr-Error-Code"); got != "torrent_content_rejected" {
+		t.Fatalf("X-Tessarr-Error-Code = %q, want torrent_content_rejected", got)
 	}
 	if recorder.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnprocessableEntity)

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 	"github.com/rs/zerolog"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
 )
 
 func retryableStreamFailure() error {

@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 const (
@@ -16,7 +16,7 @@ const (
 
 // Strm configures an optional mountless media library. The export contains
 // signed .strm files whose URLs resolve stable entry/file identities through
-// Decypharr, so provider changes and refreshed CDN links do not invalidate the
+// Tessarr, so provider changes and refreshed CDN links do not invalidate the
 // library.
 type Strm struct {
 	Enabled            bool   `json:"enabled,omitempty"`

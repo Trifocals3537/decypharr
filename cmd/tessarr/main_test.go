@@ -1,4 +1,4 @@
-package decypharr
+package tessarr
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 type serviceFunc func(context.Context) error

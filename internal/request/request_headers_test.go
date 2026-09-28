@@ -12,7 +12,7 @@ func TestDoWithoutDefaultHeadersPreservesNonExcludedHeaders(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("Authorization = %q, want excluded default header omitted", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != "Decypharr-Test" {
+		if got := r.Header.Get("User-Agent"); got != "Tessarr-Test" {
 			t.Errorf("User-Agent = %q, want retained default header", got)
 		}
 		if got := r.Header.Get("Range"); got != "bytes=0-7" {
@@ -25,7 +25,7 @@ func TestDoWithoutDefaultHeadersPreservesNonExcludedHeaders(t *testing.T) {
 	client := New(
 		WithHeaders(map[string]string{
 			"Authorization": "Bearer secret",
-			"User-Agent":    "Decypharr-Test",
+			"User-Agent":    "Tessarr-Test",
 		}),
 		WithMaxRetries(0),
 	)

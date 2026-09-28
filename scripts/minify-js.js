@@ -28,7 +28,7 @@ const minifyOptions = {
     mangle: {
         toplevel: false,
         reserved: [
-            '$', 'jQuery', 'decypharrUtils', 'configManager', 'repairManager',
+            '$', 'jQuery', 'tessarrUtils', 'configManager', 'repairManager',
             'RepairManager', 'RepairUtils', 'ConfigManager', 'window', 'document'
         ]
     },

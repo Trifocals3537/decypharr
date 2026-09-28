@@ -3,7 +3,7 @@ package manager
 import (
 	"net/http"
 
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 )
 
 // StreamErrorHTTPStatus maps a stream failure that occurred before response

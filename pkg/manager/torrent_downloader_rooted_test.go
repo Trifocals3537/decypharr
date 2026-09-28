@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestTorrentDownloadResolvesEveryLinkBeforeCreatingAnyPartial(t *testing.T) {

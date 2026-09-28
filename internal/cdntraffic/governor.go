@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/providertraffic"
+	"github.com/Trifocals3537/tessarr/internal/providertraffic"
 )
 
 const (
@@ -29,7 +29,7 @@ const (
 
 // Options controls the governor. Zero values select production defaults.
 // The fields are exported primarily so deterministic tests can use short
-// recovery windows; Decypharr intentionally does not expose user settings yet.
+// recovery windows; Tessarr intentionally does not expose user settings yet.
 type Options struct {
 	DefaultLimit        int
 	TorBoxLimit         int // per stable download link

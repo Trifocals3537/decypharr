@@ -14,24 +14,24 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/cdntraffic"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/providertraffic"
+	"github.com/Trifocals3537/tessarr/internal/request"
+	"github.com/Trifocals3537/tessarr/internal/tlsconfig"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/notifications"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
+	"github.com/Trifocals3537/tessarr/pkg/version"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/cdntraffic"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/providertraffic"
-	"github.com/sirrobot01/decypharr/internal/request"
-	"github.com/sirrobot01/decypharr/internal/tlsconfig"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
-	"github.com/sirrobot01/decypharr/pkg/notifications"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet"
-	"github.com/sirrobot01/decypharr/pkg/version"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -376,6 +376,8 @@ func (m *Manager) waitForBackground() error {
 	}
 }
 
+const managerSchedulerTag = "tessarr-manager"
+
 func newManagerScheduler(location *time.Location, tag string) (gocron.Scheduler, error) {
 	options := []gocron.SchedulerOption{
 		gocron.WithGlobalJobOptions(
@@ -396,9 +398,9 @@ func newManagerScheduler(location *time.Location, tag string) (gocron.Scheduler,
 func (m *Manager) init() {
 	m.initializationErr = nil
 	cfg := config.Get()
-	scheduler, err := newManagerScheduler(time.Local, "decypharr-manager")
+	scheduler, err := newManagerScheduler(time.Local, managerSchedulerTag)
 	if err != nil {
-		scheduler, _ = newManagerScheduler(nil, "decypharr-manager")
+		scheduler, _ = newManagerScheduler(nil, managerSchedulerTag)
 	}
 
 	// Create CET scheduler for time-specific jobs
@@ -406,9 +408,9 @@ func (m *Manager) init() {
 	if err != nil {
 		cetLocation = time.UTC
 	}
-	cetScheduler, err := newManagerScheduler(cetLocation, "decypharr-cet")
+	cetScheduler, err := newManagerScheduler(cetLocation, "tessarr-cet")
 	if err != nil {
-		cetScheduler, _ = newManagerScheduler(nil, "decypharr-cet")
+		cetScheduler, _ = newManagerScheduler(nil, "tessarr-cet")
 	}
 
 	m.config = cfg
@@ -733,7 +735,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		if err := m.syncNZBs(m.ctx); err != nil && m.ctx.Err() == nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
 		}
-		if fixNZB := os.Getenv("DECYPHARR_FIX_NZB_SIZES"); fixNZB == "1" {
+		if fixNZB := os.Getenv("TESSARR_FIX_NZB_SIZES"); fixNZB == "1" {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
 			m.fixNZBFileSizes(m.ctx)
 		}

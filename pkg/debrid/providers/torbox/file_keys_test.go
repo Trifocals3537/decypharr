@@ -3,7 +3,7 @@ package torbox
 import (
 	"testing"
 
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func TestTorboxFilesByLogicalNamePreservesNestedDuplicateBasenames(t *testing.T) {

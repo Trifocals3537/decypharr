@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func secretConfigFixture() *config.Config {
@@ -131,6 +131,31 @@ func TestRestoreConfigSecretsPreservesConfiguredValuesAndAcceptsReplacements(t *
 	}
 	if candidate.Strm.Secret != "strm-signing-secret" {
 		t.Fatalf("STRM secret = %q, want configured value", candidate.Strm.Secret)
+	}
+}
+
+func TestRestoreConfigSecretsAcceptsPreCutoverPlaceholder(t *testing.T) {
+	current := secretConfigFixture()
+	candidate, err := redactedConfigSnapshot(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactConfigSecrets(candidate)
+	candidate.Debrids[0].APIKey = legacyRedactedConfigSecret
+	candidate.Debrids[0].DownloadAPIKeys = []string{legacyRedactedConfigSecret}
+	candidate.Arrs[0].Token = legacyRedactedConfigSecret
+	candidate.Usenet.Providers[0].Password = legacyRedactedConfigSecret
+	candidate.Strm.Secret = legacyRedactedConfigSecret
+
+	if err := restoreConfigSecrets(candidate, current); err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Debrids[0].APIKey != current.Debrids[0].APIKey ||
+		!slices.Equal(candidate.Debrids[0].DownloadAPIKeys, current.Debrids[0].DownloadAPIKeys) ||
+		candidate.Arrs[0].Token != current.Arrs[0].Token ||
+		candidate.Usenet.Providers[0].Password != current.Usenet.Providers[0].Password ||
+		candidate.Strm.Secret != current.Strm.Secret {
+		t.Fatalf("pre-cutover placeholders were not restored: %#v", candidate)
 	}
 }
 

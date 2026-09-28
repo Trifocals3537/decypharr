@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
 )
 
 const (

@@ -6,13 +6,13 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"google.golang.org/protobuf/proto"
 )
 
 func TestNewTorrentOutputNameIsPortableAndBounded(t *testing.T) {
-	for _, title := range []string{"Movie: Part Two.mkv", `Movie<>:"|?*`, "CON", "NUL.txt", " release.mkv ", "...", "", ".decypharr-torrent-part-private", strings.Repeat("电影e\u0301", 200)} {
+	for _, title := range []string{"Movie: Part Two.mkv", `Movie<>:"|?*`, "CON", "NUL.txt", " release.mkv ", "...", "", ".tessarr-torrent-part-private", strings.Repeat("电影e\u0301", 200)} {
 		name := NewTorrentOutputName(title, "aabbcc")
 		if err := safepath.ValidateIdentifier(name); err != nil {
 			t.Errorf("%q generated invalid component %q: %v", title, name, err)

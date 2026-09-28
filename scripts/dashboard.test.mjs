@@ -4,7 +4,7 @@ import test from 'node:test';
 await import('../pkg/server/assets/js/dashboard.js');
 
 function dashboardPrototype() {
-    return globalThis.DecypharrTorrentDashboard.prototype;
+    return globalThis.TessarrTorrentDashboard.prototype;
 }
 
 function renderProviderCell(torrent) {

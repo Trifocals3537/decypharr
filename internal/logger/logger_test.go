@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestSetLevelUpdatesExistingLogger(t *testing.T) {

@@ -5,12 +5,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func TestRequestOriginAllowed(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "http://decypharr.example/api/config", nil)
-	request.Header.Set("Origin", "http://decypharr.example")
+	request := httptest.NewRequest(http.MethodPost, "http://tessarr.example/api/config", nil)
+	request.Header.Set("Origin", "http://tessarr.example")
 	if !requestOriginAllowed(request, "") {
 		t.Fatal("matching request origin was rejected")
 	}
@@ -25,8 +25,8 @@ func TestRequestOriginAllowed(t *testing.T) {
 		t.Fatal("mutation without Origin or Referer was accepted")
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "http://decypharr.example:80/api/config", nil)
-	request.Header.Set("Origin", "http://decypharr.example")
+	request = httptest.NewRequest(http.MethodPost, "http://tessarr.example:80/api/config", nil)
+	request.Header.Set("Origin", "http://tessarr.example")
 	if !requestOriginAllowed(request, "") {
 		t.Fatal("equivalent default ports were treated as different origins")
 	}
@@ -39,9 +39,9 @@ func TestURLBaseRoutingHelpers(t *testing.T) {
 		want   string
 	}{
 		{base: "/", target: "login", want: "/login"},
-		{base: "/decypharr/", target: "login", want: "/decypharr/login"},
-		{base: "decypharr", target: "/settings", want: "/decypharr/settings"},
-		{base: "/decypharr/", target: "", want: "/decypharr/"},
+		{base: "/tessarr/", target: "login", want: "/tessarr/login"},
+		{base: "tessarr", target: "/settings", want: "/tessarr/settings"},
+		{base: "/tessarr/", target: "", want: "/tessarr/"},
 	}
 	for _, test := range tests {
 		if got := urlBasePath(test.base, test.target); got != test.want {
@@ -49,25 +49,61 @@ func TestURLBaseRoutingHelpers(t *testing.T) {
 		}
 	}
 
-	if got := pathWithoutURLBase("/decypharr/api/config", "/decypharr/"); got != "/api/config" {
+	if got := pathWithoutURLBase("/tessarr/api/config", "/tessarr/"); got != "/api/config" {
 		t.Fatalf("pathWithoutURLBase() = %q, want /api/config", got)
 	}
-	if got := pathWithoutURLBase("/decypharr", "/decypharr/"); got != "/" {
+	if got := pathWithoutURLBase("/tessarr", "/tessarr/"); got != "/" {
 		t.Fatalf("base root path = %q, want /", got)
 	}
 }
 
+func TestSafeLocalRedirectPathRejectsExternalAndHeaderValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		base   string
+		target string
+	}{
+		{name: "header injection", base: "/tessarr\r\nLocation: https://attacker.example"},
+		{name: "backslash", base: `/\\attacker.example`},
+		{name: "network path backslash", base: `/\attacker.example`},
+		{name: "query", base: "/tessarr?next=https://attacker.example"},
+		{name: "fragment", base: "/tessarr#attacker"},
+		{name: "target query", base: "/tessarr", target: "login?next=https://attacker.example"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got, err := safeLocalRedirectPath(test.base, test.target); err == nil {
+				t.Fatalf("safeLocalRedirectPath(%q, %q) = %q, want rejection", test.base, test.target, got)
+			}
+		})
+	}
+}
+
+func TestRedirectLocalWritesOnlyValidatedPath(t *testing.T) {
+	response := httptest.NewRecorder()
+	redirectLocal(response, "/tessarr/", "login", http.StatusSeeOther)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/tessarr/login" {
+		t.Fatalf("redirect response = (%d, %q)", response.Code, response.Header().Get("Location"))
+	}
+
+	response = httptest.NewRecorder()
+	redirectLocal(response, "/bad\r\nX-Test: injected", "login", http.StatusSeeOther)
+	if response.Code != http.StatusInternalServerError || response.Header().Get("Location") != "" {
+		t.Fatalf("unsafe redirect response = (%d, %q)", response.Code, response.Header().Get("Location"))
+	}
+}
+
 func TestAPIRequestDetectionHonorsURLBase(t *testing.T) {
-	server := &Server{urlBase: "/decypharr/"}
+	server := &Server{urlBase: "/tessarr/"}
 	for _, path := range []string{
-		"http://example.test/decypharr/api/config",
-		"http://example.test/decypharr/webhooks/tautulli",
+		"http://example.test/tessarr/api/config",
+		"http://example.test/tessarr/webhooks/tautulli",
 	} {
 		if !server.isAPIRequest(httptest.NewRequest(http.MethodGet, path, nil)) {
 			t.Fatalf("API path %q was not detected under URL base", path)
 		}
 	}
-	if server.isAPIRequest(httptest.NewRequest(http.MethodGet, "http://example.test/decypharr/settings", nil)) {
+	if server.isAPIRequest(httptest.NewRequest(http.MethodGet, "http://example.test/tessarr/settings", nil)) {
 		t.Fatal("settings page was detected as an API request")
 	}
 }
@@ -107,7 +143,7 @@ func TestSessionMutationRequiresSameOrigin(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "http://decypharr.example/api/config", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://tessarr.example/api/config", nil)
 	request.AddCookie(cookie)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -115,8 +151,8 @@ func TestSessionMutationRequiresSameOrigin(t *testing.T) {
 		t.Fatalf("missing-origin mutation status = %d, called = %v", response.Code, called)
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "http://decypharr.example/api/config", nil)
-	request.Header.Set("Origin", "http://decypharr.example")
+	request = httptest.NewRequest(http.MethodPost, "http://tessarr.example/api/config", nil)
+	request.Header.Set("Origin", "http://tessarr.example")
 	request.AddCookie(cookie)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -134,7 +170,7 @@ func TestDisabledAuthStillRejectsCrossSiteBrowserMutation(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "http://decypharr.example/api/config", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://tessarr.example/api/config", nil)
 	request.Header.Set("Origin", "https://attacker.example")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -144,7 +180,7 @@ func TestDisabledAuthStillRejectsCrossSiteBrowserMutation(t *testing.T) {
 
 	// Non-browser local automation remains compatible when authentication is
 	// deliberately disabled: it sends no Origin or Referer header.
-	request = httptest.NewRequest(http.MethodPost, "http://decypharr.example/api/config", nil)
+	request = httptest.NewRequest(http.MethodPost, "http://tessarr.example/api/config", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || !called {

@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 const testSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestFileURLRoundTripAndSignature(t *testing.T) {
-	base, err := url.Parse("https://media.example/decypharr")
+	base, err := url.Parse("https://media.example/tessarr")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,12 +34,12 @@ func TestFileURLRoundTripAndSignature(t *testing.T) {
 }
 
 func TestBaseURLUsesAppURLAndURLBase(t *testing.T) {
-	cfg := &config.Config{AppURL: "https://media.example", URLBase: "/decypharr"}
+	cfg := &config.Config{AppURL: "https://media.example", URLBase: "/tessarr"}
 	base, err := BaseURL(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := base.String(); got != "https://media.example/decypharr" {
+	if got := base.String(); got != "https://media.example/tessarr" {
 		t.Fatalf("BaseURL = %q", got)
 	}
 }

@@ -1482,7 +1482,7 @@ const file_pkg_storage_storage_proto_rawDesc = "" +
 	"\x0fstarted_at_unix\x18\x05 \x01(\x03R\rstartedAtUnix\x12&\n" +
 	"\x0fupdated_at_unix\x18\x06 \x01(\x03R\rupdatedAtUnix\x12\x1d\n" +
 	"\n" +
-	"error_list\x18\a \x03(\tR\terrorListB-Z+github.com/sirrobot01/decypharr/pkg/storageb\x06proto3"
+	"error_list\x18\a \x03(\tR\terrorListB.Z,github.com/Trifocals3537/tessarr/pkg/storageb\x06proto3"
 
 var (
 	file_pkg_storage_storage_proto_rawDescOnce sync.Once

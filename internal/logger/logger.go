@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
 	"golang.org/x/term"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -49,7 +49,7 @@ func GetLogPath() string {
 func getCore() *loggingCore {
 	coreOnce.Do(func() {
 		rotating := &lumberjack.Logger{
-			Filename:   filepath.Join(GetLogPath(), "decypharr.log"),
+			Filename:   filepath.Join(GetLogPath(), "tessarr.log"),
 			MaxSize:    10,
 			MaxAge:     15,
 			MaxBackups: 10,
@@ -171,7 +171,7 @@ func New(subsystem string) zerolog.Logger {
 
 func Default() zerolog.Logger {
 	defaultOnce.Do(func() {
-		defaultLog = New("decypharr")
+		defaultLog = New("tessarr")
 	})
 	return defaultLog
 }

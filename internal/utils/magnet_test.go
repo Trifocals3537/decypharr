@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/testutil"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/sirrobot01/decypharr/internal/testutil"
 )
 
 // checkMagnet is a helper function that verifies magnet properties

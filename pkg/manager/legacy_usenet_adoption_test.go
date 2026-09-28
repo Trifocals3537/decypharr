@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 const (
@@ -476,6 +476,29 @@ func TestLegacyUsenetAdoptionRecoversMarkerWithoutCheckpoint(t *testing.T) {
 		filepath.Join(fixture.root, usenetLegacyAdoptionCheckpointName),
 		usenetLegacyAdoptionCheckpointData,
 	)
+}
+
+func TestLegacyUsenetAdoptionRecognizesPredecessorCheckpoint(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(rootPath, legacyUsenetAdoptionCheckpointName),
+		[]byte(usenetLegacyAdoptionCheckpointData),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	exists, err := legacyUsenetCheckpointExists(rooted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("predecessor adoption checkpoint was not recognized")
+	}
 }
 
 func TestLegacyUsenetAdoptionPreexistingMarkerIsRevalidated(t *testing.T) {

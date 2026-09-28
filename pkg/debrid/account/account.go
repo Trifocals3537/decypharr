@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/request"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/sirrobot01/decypharr/internal/request"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 type Account struct {
@@ -94,7 +94,7 @@ func (a *Account) storeLink(dl types.DownloadLink) {
 	a.links.Store(slicedLink, dl)
 }
 
-// InvalidateLink evicts only Decypharr's cached URL. It deliberately does not
+// InvalidateLink evicts only Tessarr's cached URL. It deliberately does not
 // invoke a provider deletion endpoint because link refresh must never remove
 // the user's remote download or download-history record.
 func (a *Account) InvalidateLink(link types.DownloadLink) {

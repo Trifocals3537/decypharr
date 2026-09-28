@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/testutil"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/testutil"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 func testTorrentSource(t *testing.T) ([]byte, *utils.Magnet) {
@@ -135,5 +136,51 @@ func TestTorrentSourceStoreEnforcesTotalQuota(t *testing.T) {
 	defer func() { torrentSourceStoreMaxBytes = previousLimit }()
 	if err := store.SaveTorrentSource(magnet.InfoHash, data); err == nil {
 		t.Fatal("SaveTorrentSource() accepted data beyond the total quota")
+	}
+}
+
+func TestTorrentSourceStoreRejectsSymlinkedPrivateDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not consistently available on Windows")
+	}
+	data, magnet := testTorrentSource(t)
+	dbPath := t.TempDir()
+	store, err := NewStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dbPath, torrentSourceDirName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTorrentSource(magnet.InfoHash, data); err == nil {
+		t.Fatal("SaveTorrentSource() accepted a symlinked private directory")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("outside directory received files: %v", entries)
+	}
+}
+
+func TestTorrentSourceTemporaryNameRecognitionIsExact(t *testing.T) {
+	hash := "0123456789abcdef0123456789abcdef01234567"
+	valid := "." + hash + torrentSourceSuffix + ".tmp-0123456789abcdef0123456789abcdef"
+	if !isTorrentSourceTempName(valid) {
+		t.Fatalf("isTorrentSourceTempName(%q) = false", valid)
+	}
+	for _, name := range []string{
+		"notes.tmp-do-not-delete",
+		"." + hash + torrentSourceSuffix + ".tmp-short",
+		"." + strings.Repeat("g", 40) + torrentSourceSuffix + ".tmp-0123456789abcdef0123456789abcdef",
+		valid + ".extra",
+	} {
+		if isTorrentSourceTempName(name) {
+			t.Fatalf("isTorrentSourceTempName(%q) = true", name)
+		}
 	}
 }

@@ -21,7 +21,7 @@ Torbox is a supported Debrid provider.
 
 Get your API key from the Torbox dashboard.
 
-When an import supplies a `.torrent` file, Decypharr uploads that file directly
+When an import supplies a `.torrent` file, Tessarr uploads that file directly
 to TorBox instead of reducing it to a magnet. A validated private copy is kept
 for restart recovery and later repair; magnet-only imports continue to use the
 magnet endpoint. If tracker removal is enabled, announce URLs are removed from

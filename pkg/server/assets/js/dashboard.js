@@ -186,17 +186,17 @@ class TorrentDashboard {
             'copy-magnet': async () => {
                 try {
                     await navigator.clipboard.writeText(`magnet:?xt=urn:btih:${torrent.hash}`);
-                    window.decypharrUtils.createToast('Magnet link copied to clipboard');
+                    window.tessarrUtils.createToast('Magnet link copied to clipboard');
                 } catch (error) {
-                    window.decypharrUtils.createToast('Failed to copy magnet link', 'error');
+                    window.tessarrUtils.createToast('Failed to copy magnet link', 'error');
                 }
             },
             'copy-name': async () => {
                 try {
                     await navigator.clipboard.writeText(torrent.name);
-                    window.decypharrUtils.createToast('Torrent name copied to clipboard');
+                    window.tessarrUtils.createToast('Torrent name copied to clipboard');
                 } catch (error) {
-                    window.decypharrUtils.createToast('Failed to copy torrent name', 'error');
+                    window.tessarrUtils.createToast('Failed to copy torrent name', 'error');
                 }
             },
             'delete': async () => {
@@ -238,7 +238,7 @@ class TorrentDashboard {
                 params.set('state', this.state.selectedState);
             }
 
-            const response = await window.decypharrUtils.fetcher(`/api/torrents?${params}`);
+            const response = await window.tessarrUtils.fetcher(`/api/torrents?${params}`);
             if (!response.ok) throw new Error('Failed to fetch items');
 
             const data = await response.json();
@@ -251,7 +251,7 @@ class TorrentDashboard {
 
         } catch (error) {
             console.error('Error loading items:', error);
-            window.decypharrUtils.createToast(`Error loading items: ${error.message}`, 'error');
+            window.tessarrUtils.createToast(`Error loading items: ${error.message}`, 'error');
         } finally {
             this.refs.refreshBtn.disabled = false;
         }
@@ -488,16 +488,16 @@ class TorrentDashboard {
 
         try {
 			const url = `${window.urlBase}api/torrents/${encodeURIComponent(category)}/${encodeURIComponent(hash)}?removeFromDebrid=${removeFromDebrid}`;
-            const response = await window.decypharrUtils.fetcher(url, {method: 'DELETE'});
+            const response = await window.tessarrUtils.fetcher(url, {method: 'DELETE'});
 
             if (!response.ok) throw new Error('Failed to delete entry');
 
-            window.decypharrUtils.createToast('Item deleted successfully');
+            window.tessarrUtils.createToast('Item deleted successfully');
             this.state.selectedEntries.delete(hash);
             this.loadTorrents();
         } catch (error) {
             console.error('Error deleting torrent:', error);
-            window.decypharrUtils.createToast('Failed to delete entry', 'error');
+            window.tessarrUtils.createToast('Failed to delete entry', 'error');
         }
     }
 
@@ -512,16 +512,16 @@ class TorrentDashboard {
 				removeFromDebrid: String(removeFromDebrid)
 			});
 			const url = `${window.urlBase}api/torrents?${params}`;
-            const response = await window.decypharrUtils.fetcher(url, {method: 'DELETE'});
+            const response = await window.tessarrUtils.fetcher(url, {method: 'DELETE'});
 
             if (!response.ok) throw new Error('Failed to delete items');
 
-            window.decypharrUtils.createToast(`Deleted ${this.state.selectedEntries.size} items successfully`);
+            window.tessarrUtils.createToast(`Deleted ${this.state.selectedEntries.size} items successfully`);
             this.state.selectedEntries.clear();
             this.loadTorrents();
         } catch (error) {
             console.error('Error deleting items:', error);
-            window.decypharrUtils.createToast('Failed to delete items', 'error');
+            window.tessarrUtils.createToast('Failed to delete items', 'error');
         }
     }
 
@@ -564,4 +564,4 @@ class TorrentDashboard {
 
 // Keep the classic browser script testable without evaluating its source as
 // code. The name is intentionally specific to avoid colliding with host pages.
-globalThis.DecypharrTorrentDashboard = TorrentDashboard;
+globalThis.TessarrTorrentDashboard = TorrentDashboard;

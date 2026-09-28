@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/Tensai75/nzbparser"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const contentTestNZB = `<?xml version="1.0" encoding="UTF-8"?>

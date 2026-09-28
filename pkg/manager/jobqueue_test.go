@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestJobQueuePopClearsReferencesAndReusesStorage(t *testing.T) {

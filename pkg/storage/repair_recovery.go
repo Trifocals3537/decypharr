@@ -5,9 +5,9 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 	json "github.com/bytedance/sonic"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
 )
 
 type RecoveryState string

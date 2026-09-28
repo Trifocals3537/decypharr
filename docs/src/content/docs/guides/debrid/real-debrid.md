@@ -57,7 +57,7 @@ Rotate between multiple keys for higher throughput:
 
 ### Rate Limiting
 
-Decypharr automatically enforces Real Debrid's documented 250 API
+Tessarr automatically enforces Real Debrid's documented 250 API
 requests/minute limit once per API token. Main, repair, download-link, and retry
 traffic using the same token share that budget. A conservative short-burst limit
 also avoids sending the add-magnet bursts that Real Debrid can reject with
@@ -136,7 +136,7 @@ You can add multiple Real Debrid accounts:
 }
 ```
 
-Decypharr will use the first provider with available slots.
+Tessarr will use the first provider with available slots.
 
 ## Troubleshooting
 

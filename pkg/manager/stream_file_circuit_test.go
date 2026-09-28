@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func TestStreamFileCircuitUsesAdaptiveCooldownAndOneHalfOpenProbe(t *testing.T) {

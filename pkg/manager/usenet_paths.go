@@ -15,19 +15,21 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
-	usenetOwnerMarkerName     = ".decypharr-nzb-owner-v1"
-	usenetOwnershipLockName   = ".decypharr-nzb-ownership.lock"
-	usenetQuarantinePrefix    = ".decypharr-nzb-quarantine-"
+	usenetOwnerMarkerName     = ".tessarr-nzb-owner-v1"
+	usenetOwnershipLockName   = ".tessarr-nzb-ownership.lock"
+	usenetQuarantinePrefix    = ".tessarr-nzb-quarantine-"
 	usenetOwnerMarkerMaxBytes = 512
 	usenetDirectoryReadBatch  = 128
 	usenetDirectoryMaxEntries = 100_000
 )
+
+var usenetOwnerMarkerNames = []string{usenetOwnerMarkerName, legacyUsenetOwnerMarkerName}
 
 // usenetOwnershipMu makes portable-alias discovery plus creation atomic within
 // this process on case-sensitive filesystems. os.Root supplies the filesystem
@@ -369,9 +371,9 @@ func rollbackUsenetEntryClaim(downloadRoot string, entry *storage.Entry) error {
 }
 
 func acquireUsenetOwnershipLock(downloadRoot string, createRoot bool) (*ownershipRoot, bool, error) {
-	ownership, exists, err := acquireOwnershipRoot(
+	ownership, exists, err := acquireCompatibleOwnershipRoot(
 		downloadRoot,
-		usenetOwnershipLockName,
+		[]string{legacyUsenetOwnershipLockName, usenetOwnershipLockName},
 		createRoot,
 		usenetOwnershipLockTimeout,
 		usenetOwnershipRetryDelay,
@@ -561,7 +563,7 @@ func removeUsenetQuarantines(
 				MaxEntries:       usenetDirectoryMaxEntries,
 				MaxDepth:         64,
 				ReadBatch:        usenetDirectoryReadBatch,
-				PreserveTopLevel: []string{usenetOwnerMarkerName},
+				PreserveTopLevel: usenetOwnerMarkerNames,
 			},
 		); err != nil {
 			_ = quarantineRoot.Close()
@@ -583,7 +585,7 @@ func removeUsenetQuarantines(
 			}
 			return fmt.Errorf("emptied NZB quarantine %q is owned by %q, not %q", quarantineRelative, markerOwner, ownerID)
 		}
-		if err := quarantineRoot.Remove(usenetOwnerMarkerName); err != nil {
+		if err := removeUsenetOwnerMarkers(quarantineRoot); err != nil {
 			_ = quarantineRoot.Close()
 			return fmt.Errorf("remove NZB quarantine ownership marker %q: %w", quarantineRelative, err)
 		}
@@ -620,11 +622,15 @@ func findUsenetQuarantines(rooted *os.Root, relativeEntry, ownerID string) ([]st
 		}
 		return nil, fmt.Errorf("open NZB release parent for quarantine recovery: %w", err)
 	}
-	prefix := usenetQuarantinePrefixForEntry(ownerID, relativeEntry)
+	prefixes := usenetQuarantinePrefixesForEntry(ownerID, relativeEntry)
 	quarantines := make([]string, 0, 1)
 	readErr := scanBoundedUsenetDirectory(dir, func(existing os.DirEntry) (bool, error) {
-		if strings.HasPrefix(strings.ToLower(existing.Name()), prefix) {
-			quarantines = append(quarantines, filepath.Join(parentRelative, existing.Name()))
+		lowerName := strings.ToLower(existing.Name())
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(lowerName, prefix) {
+				quarantines = append(quarantines, filepath.Join(parentRelative, existing.Name()))
+				break
+			}
 		}
 		// Every caller rejects an ambiguous multiple-quarantine state, so two
 		// matches are sufficient proof and bound the retained result.
@@ -665,15 +671,44 @@ func usenetQuarantinePrefixForEntry(ownerID, relativeEntry string) string {
 	return usenetQuarantinePrefix + hex.EncodeToString(digest[:16]) + "-"
 }
 
+func usenetQuarantinePrefixesForEntry(ownerID, relativeEntry string) []string {
+	digest := sha256.Sum256([]byte(ownerID + "\x00" + filepath.ToSlash(relativeEntry)))
+	suffix := hex.EncodeToString(digest[:16]) + "-"
+	return []string{usenetQuarantinePrefix + suffix, legacyUsenetQuarantinePrefix + suffix}
+}
+
 func readUsenetOwnerMarker(entryRoot *os.Root) (string, error) {
-	info, err := entryRoot.Lstat(usenetOwnerMarkerName)
+	owner := ""
+	found := false
+	for _, name := range usenetOwnerMarkerNames {
+		markerOwner, err := readUsenetOwnerMarkerNamed(entryRoot, name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if found && markerOwner != owner {
+			return "", fmt.Errorf("NZB ownership markers disagree")
+		}
+		owner = markerOwner
+		found = true
+	}
+	if !found {
+		return "", os.ErrNotExist
+	}
+	return owner, nil
+}
+
+func readUsenetOwnerMarkerNamed(entryRoot *os.Root, name string) (string, error) {
+	info, err := entryRoot.Lstat(name)
 	if err != nil {
 		return "", err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("NZB ownership marker is not a regular file")
 	}
-	file, err := entryRoot.Open(usenetOwnerMarkerName)
+	file, err := entryRoot.Open(name)
 	if err != nil {
 		return "", err
 	}
@@ -698,19 +733,29 @@ func readUsenetOwnerMarker(entryRoot *os.Root) (string, error) {
 	return ownerID, nil
 }
 
+func removeUsenetOwnerMarkers(rooted *os.Root) error {
+	var removeErr error
+	for _, name := range usenetOwnerMarkerNames {
+		if err := rooted.Remove(name); err != nil && !os.IsNotExist(err) {
+			removeErr = errors.Join(removeErr, err)
+		}
+	}
+	return removeErr
+}
+
 func usenetDirectoryContainsOnlyMarker(entryRoot *os.Root, requireMarker bool) (bool, error) {
 	dir, err := entryRoot.Open(".")
 	if err != nil {
 		return false, fmt.Errorf("open NZB release directory for inspection: %w", err)
 	}
 	count := 0
-	markerFound := false
+	markerCount := 0
 	readErr := scanBoundedUsenetDirectory(dir, func(entry os.DirEntry) (bool, error) {
 		count++
-		if entry.Name() == usenetOwnerMarkerName {
-			markerFound = true
+		if isUsenetOwnerMarkerName(entry.Name()) {
+			markerCount++
 		}
-		return count > 1, nil
+		return count > len(usenetOwnerMarkerNames), nil
 	})
 	closeErr := dir.Close()
 	if readErr != nil {
@@ -720,7 +765,7 @@ func usenetDirectoryContainsOnlyMarker(entryRoot *os.Root, requireMarker bool) (
 		return false, fmt.Errorf("close NZB release directory inspection: %w", closeErr)
 	}
 	if requireMarker {
-		return count == 1 && markerFound, nil
+		return markerCount > 0 && count == markerCount, nil
 	}
 	return count == 0, nil
 }
@@ -800,9 +845,13 @@ func portableUsenetNameAlias(a, b string) bool {
 func isReservedUsenetPrivateName(name string) bool {
 	trimmed := strings.TrimRight(name, " .")
 	return portableUsenetNameAlias(trimmed, usenetOwnerMarkerName) ||
+		portableUsenetNameAlias(trimmed, legacyUsenetOwnerMarkerName) ||
 		portableUsenetNameAlias(trimmed, usenetOwnershipLockName) ||
+		portableUsenetNameAlias(trimmed, legacyUsenetOwnershipLockName) ||
 		portableUsenetNameAlias(trimmed, usenetLegacyAdoptionCheckpointName) ||
-		strings.HasPrefix(strings.ToLower(trimmed), usenetQuarantinePrefix)
+		portableUsenetNameAlias(trimmed, legacyUsenetAdoptionCheckpointName) ||
+		strings.HasPrefix(strings.ToLower(trimmed), usenetQuarantinePrefix) ||
+		strings.HasPrefix(strings.ToLower(trimmed), legacyUsenetQuarantinePrefix)
 }
 
 func canonicalUsenetOwnerID(infoHash string) (string, error) {

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/Trifocals3537/tessarr/internal/request"
 )
 
 const speedTestDownloadSize int64 = 1 << 20

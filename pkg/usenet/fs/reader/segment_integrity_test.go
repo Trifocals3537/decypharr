@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	appConfig "github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/rs/zerolog"
-	appConfig "github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestSegmentWriterCommitsOnlyCompleteSlice(t *testing.T) {

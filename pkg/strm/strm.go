@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 const streamVersion = "v1"
@@ -34,6 +34,8 @@ func Sign(secret, purpose string, parts ...string) (string, error) {
 		return "", err
 	}
 	mac := hmac.New(sha256.New, signingKey)
+	// This domain is part of every existing signed STRM URL. Keep it stable
+	// across the product rename so migrated libraries remain playable.
 	_, _ = mac.Write([]byte("decypharr-strm\x00" + streamVersion + "\x00" + purpose))
 	for _, part := range parts {
 		_, _ = mac.Write([]byte{0})

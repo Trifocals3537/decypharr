@@ -79,7 +79,7 @@ firewall rules, and a reverse proxy.
 After upgrading, an older native configuration that omitted `bind_address`
 also uses `127.0.0.1`. If the service intentionally needs to accept remote
 connections, set a specific trusted interface address (or `0.0.0.0`) in
-`config.json` or with `DECYPHARR_BIND_ADDRESS`. A non-loopback Decypharr
+`config.json` or with `TESSARR_BIND_ADDRESS`. A non-loopback Tessarr
 listener is plain HTTP; application authentication controls access but does
 not encrypt credentials. Use a trusted network or TLS proxy, and use
 `allowed_client_cidrs` when the underlying port could otherwise be reached
@@ -121,9 +121,9 @@ response when the bound is reached. Values above `4096` are clamped.
 | `min_file_size`          | string | Minimum eligible file size                                                         | `""`          |
 | `max_file_size`          | string | Maximum eligible file size; empty is unlimited                                     | `""`          |
 
-`uncached_stall_timeout` applies only to transfers that Decypharr knowingly
+`uncached_stall_timeout` applies only to transfers that Tessarr knowingly
 started through an uncached provider pass. A successful provider poll must
-first establish a progress baseline. Decypharr then requires both no progress
+first establish a progress baseline. Tessarr then requires both no progress
 for the configured duration and zero provider-reported transfer speed before it
 considers an ordinary transfer stalled. An explicit no-seeds state can use a
 shorter `10m` wait; a metadata-download (`metaDL`) state can use `20m`. The
@@ -133,7 +133,7 @@ or a changed state is retained. The minimum configured timeout is `10m`;
 invalid or shorter values disable the watchdog instead of risking premature
 removal. A restart discards a pending confirmation, not the progress baseline.
 
-For a configured Arr category, Decypharr resolves the exact torrent hash to one
+For a configured Arr category, Tessarr resolves the exact torrent hash to one
 Sonarr/Radarr queue row, asks the Arr to remove and blocklist that release, and
 allows its normal failed-download handling to search for a replacement. An
 ambiguous hash or a category without an Arr owner is left untouched for manual
@@ -143,7 +143,7 @@ transfers are never eligible.
 ## Debrid Providers
 
 Array of Debrid services. When an Arr does not set `selected_debrid`, providers
-are tried in this array order. Decypharr makes one cached-only pass over every
+are tried in this array order. Tessarr makes one cached-only pass over every
 eligible provider before it permits any uncached transfer. If every cached pass
 misses, only providers with `download_uncached: true` enter a second pass, in
 the same configured order. Provider/API failures remain errors and do not count
@@ -257,7 +257,7 @@ Mount configuration determines how files are exposed on the filesystem.
 {
   "mount": {
     "type": "dfs",
-    "mount_path": "/mnt/decypharr"
+    "mount_path": "/mnt/tessarr"
   }
 }
 ```
@@ -275,7 +275,7 @@ Mount configuration determines how files are exposed on the filesystem.
 {
   "mount": {
     "type": "dfs",
-    "mount_path": "/mnt/decypharr",
+    "mount_path": "/mnt/tessarr",
     "dfs": {
       "cache_dir": "/cache/dfs",
       "chunk_size": "10MB",
@@ -311,7 +311,7 @@ Mount configuration determines how files are exposed on the filesystem.
 {
   "mount": {
     "type": "rclone",
-    "mount_path": "/mnt/decypharr",
+    "mount_path": "/mnt/tessarr",
     "rclone": {
       "cache_dir": "/cache/rclone",
       "vfs_cache_mode": "writes",
@@ -364,7 +364,7 @@ filesystem mount. It can run with any mount setting, including `mount.type:
 
 ```json
 {
-  "app_url": "https://decypharr.example.net",
+  "app_url": "https://tessarr.example.net",
   "strm": {
     "enabled": true,
     "path": "/srv/media-strm",
@@ -382,11 +382,11 @@ filesystem mount. It can run with any mount setting, including `mount.type:
 | `keep_media_extension` | Write `Movie.mkv.strm` instead of `Movie.strm`                    | `false` |
 
 `app_url` must be reachable by the media server. When it is empty,
-Decypharr writes its configured listener address and substitutes loopback for
+Tessarr writes its configured listener address and substitutes loopback for
 an unspecified listener. That fallback is appropriate only when the player
 runs on the same host.
 
-Decypharr generates and persists a 256-bit signing key when STRM is first
+Tessarr generates and persists a 256-bit signing key when STRM is first
 configured. The key is redacted from the configuration API and is never shown
 in the Web UI. Changing it invalidates existing `.strm` URLs; use a new empty
 export directory if deliberate key rotation is required.
@@ -463,7 +463,7 @@ every grab from that Arr.
 
 ## Queue Cleanup
 
-Decypharr periodically scans each connected Arr's **Activity → Queue** and acts on stuck or
+Tessarr periodically scans each connected Arr's **Activity → Queue** and acts on stuck or
 failed downloads based on a global, rules-driven policy. This is configured once (not per-Arr)
 under **Settings → Arrs → Queue Cleanup Actions** in the Web UI, and stored in the
 `queue_cleanup` block of `config.json`. See the [Arrs guide](../arrs/#queue-cleanup) for a
@@ -521,7 +521,7 @@ All config options support environment variable overrides using double underscor
 # Server
 PORT=8282
 LOG_LEVEL=debug
-DECYPHARR_JOB_QUEUE_CAPACITY=256
+TESSARR_JOB_QUEUE_CAPACITY=256
 
 # Debrid
 DEBRIDS__0__PROVIDER=realdebrid
@@ -542,4 +542,4 @@ REPAIR__ENABLED=true
 REPAIR__INTERVAL=30m
 ```
 
-See [defaults.go](https://github.com/Trifocals3537/decypharr/blob/beta/internal/config/defaults.go) for all defaults.
+See [defaults.go](https://github.com/Trifocals3537/tessarr/blob/beta/internal/config/defaults.go) for all defaults.

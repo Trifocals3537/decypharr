@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -318,7 +318,7 @@ func torrentAddErrorStatus(err error) (status int, idempotent bool) {
 func writeTorrentAddError(w http.ResponseWriter, err error, status int) {
 	for _, code := range []string{"torrent_not_cached", "torrent_content_rejected"} {
 		if onlyCustomErrorCode(err, code) {
-			w.Header().Set("X-Decypharr-Error-Code", code)
+			w.Header().Set("X-Tessarr-Error-Code", code)
 			break
 		}
 	}

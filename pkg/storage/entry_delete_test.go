@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"google.golang.org/protobuf/proto"
 )
 
 func TestMain(m *testing.M) {
-	configDir, err := os.MkdirTemp("", "decypharr-storage-test-")
+	configDir, err := os.MkdirTemp("", "tessarr-storage-test-")
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create storage test config directory: %v\n", err)
 		os.Exit(1)

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/safepath"
 )
 
 func TestCleanupIdleFSStopsWithLifecycle(t *testing.T) {

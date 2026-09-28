@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestVerifiedNNTPConfigRejectsUntrustedAndUsesTrustedRoots(t *testing.T) {

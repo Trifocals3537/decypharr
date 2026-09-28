@@ -7,8 +7,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 )
 
 func paddedVerificationHead(prefix []byte) []byte {

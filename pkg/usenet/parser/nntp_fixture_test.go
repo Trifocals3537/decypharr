@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/nntp"
 )
 
 var contentTestTLSOnce sync.Once
@@ -27,7 +27,7 @@ var contentTestCertificate tls.Certificate
 // The process-wide logger must outlive individual fixture directories.
 // Windows cannot remove a directory while its log file is still open.
 func TestMain(m *testing.M) {
-	root, err := os.MkdirTemp("", "decypharr-parser-tests-")
+	root, err := os.MkdirTemp("", "tessarr-parser-tests-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

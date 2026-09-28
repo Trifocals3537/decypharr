@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func TestProviderSubmissionPrefersContextAwareCapabilities(t *testing.T) {

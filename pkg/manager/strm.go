@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,18 +17,23 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	strmurl "github.com/Trifocals3537/tessarr/pkg/strm"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
 )
 
 const (
-	strmRootMarker  = ".decypharr-strm-root"
-	strmEntryMarker = ".decypharr-strm-entry"
+	strmRootMarker  = ".tessarr-strm-root"
+	strmEntryMarker = ".tessarr-strm-entry"
 	maxStrmRead     = 4096
 	maxStrmWalk     = 250000
+)
+
+var (
+	strmRootMarkerNames  = []string{strmRootMarker, legacyStrmRootMarker}
+	strmEntryMarkerNames = []string{strmEntryMarker, legacyStrmEntryMarker}
 )
 
 // Strm maintains a signed, mountless media library derived from durable
@@ -88,6 +94,8 @@ func (r *StrmReport) addError(err error) {
 }
 
 func strmKeyFingerprint(secret string) string {
+	// The legacy domain is a stable on-disk signature namespace. The migration
+	// renames its marker but deliberately keeps the signature valid.
 	sum := sha256.Sum256([]byte("decypharr-strm-root\x00" + secret))
 	return hex.EncodeToString(sum[:])
 }
@@ -105,14 +113,14 @@ func (s *Strm) ensureRoot(cfg *config.Config) (string, error) {
 	}
 
 	markerPath := filepath.Join(root, strmRootMarker)
-	data, err := readRegularFile(markerPath, maxStrmRead)
+	data, err := readCompatibleStrmMarker(root, strmRootMarkerNames)
 	if errors.Is(err, os.ErrNotExist) {
 		children, readErr := os.ReadDir(root)
 		if readErr != nil {
 			return "", fmt.Errorf("inspect STRM root: %w", readErr)
 		}
 		if len(children) != 0 {
-			return "", fmt.Errorf("STRM root %q is non-empty and is not owned by Decypharr", root)
+			return "", fmt.Errorf("STRM root %q is non-empty and is not owned by Tessarr", root)
 		}
 		state := strmRootState{Version: 1, KeyFingerprint: strmKeyFingerprint(cfg.Strm.Secret)}
 		encoded, marshalErr := json.Marshal(state)
@@ -145,7 +153,7 @@ func (s *Strm) ensureEntryDir(root string, cfg *config.Config, entry *storage.En
 		return "", err
 	}
 	markerPath := filepath.Join(dir, strmEntryMarker)
-	data, err := readRegularFile(markerPath, maxStrmRead)
+	data, err := readCompatibleStrmMarker(dir, strmEntryMarkerNames)
 	if errors.Is(err, os.ErrNotExist) {
 		children, readErr := os.ReadDir(dir)
 		if readErr != nil {
@@ -378,7 +386,7 @@ func (s *Strm) removeEntryStaleLocked(ctx context.Context, root, secret string, 
 		return nil
 	})
 	if len(targets) == 0 {
-		if err := safepath.Remove(root, filepath.Join(dir, strmEntryMarker)); err == nil {
+		if err := removeStrmMarkers(root, dir, strmEntryMarkerNames); err == nil {
 			pruneEmptyStrmDirs(root, dir)
 		}
 	}
@@ -445,6 +453,7 @@ func (s *Strm) removeStale(ctx context.Context, root, secret string, desired, de
 	visited := 0
 	var stale []string
 	var staleMarkers []strmEntryState
+	seenMarkerDirs := make(map[string]struct{})
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -459,10 +468,15 @@ func (s *Strm) removeStale(ctx context.Context, root, secret string, desired, de
 		if entry.IsDir() {
 			return nil
 		}
-		if filepath.Base(path) == strmEntryMarker {
-			state, err := readEntryMarker(filepath.Dir(path), secret)
+		if isStrmMarkerName(filepath.Base(path), strmEntryMarkerNames) {
+			dir := filepath.Clean(filepath.Dir(path))
+			if _, seen := seenMarkerDirs[dir]; seen {
+				return nil
+			}
+			seenMarkerDirs[dir] = struct{}{}
+			state, err := readEntryMarker(dir, secret)
 			if err == nil {
-				if _, keep := desiredDirs[filepath.Clean(filepath.Dir(path))]; !keep {
+				if _, keep := desiredDirs[dir]; !keep {
 					staleMarkers = append(staleMarkers, state)
 				}
 			}
@@ -499,7 +513,7 @@ func (s *Strm) removeStale(ctx context.Context, root, secret string, desired, de
 		if err := verifyEntryMarker(dir, secret, state.InfoHash); err != nil {
 			continue
 		}
-		if err := safepath.Remove(root, filepath.Join(dir, strmEntryMarker)); err != nil {
+		if err := removeStrmMarkers(root, dir, strmEntryMarkerNames); err != nil {
 			report.addError(err)
 			continue
 		}
@@ -650,7 +664,7 @@ func (s *Strm) RemoveEntryAsync(entry *storage.Entry) bool {
 			}
 			return nil
 		})
-		_ = safepath.Remove(root, filepath.Join(dir, strmEntryMarker))
+		_ = removeStrmMarkers(root, dir, strmEntryMarkerNames)
 		pruneEmptyStrmDirs(root, dir)
 	})
 }
@@ -668,7 +682,7 @@ func verifyEntryMarker(dir, secret, infohash string) error {
 
 func readEntryMarker(dir, secret string) (strmEntryState, error) {
 	directory := filepath.Base(dir)
-	data, err := readRegularFile(filepath.Join(dir, strmEntryMarker), maxStrmRead)
+	data, err := readCompatibleStrmMarker(dir, strmEntryMarkerNames)
 	if err != nil {
 		return strmEntryState{}, err
 	}
@@ -679,6 +693,48 @@ func readEntryMarker(dir, secret string) (strmEntryState, error) {
 		return strmEntryState{}, fmt.Errorf("invalid STRM entry ownership marker in %q", dir)
 	}
 	return state, nil
+}
+
+func readCompatibleStrmMarker(dir string, names []string) ([]byte, error) {
+	var contents []byte
+	found := false
+	for _, name := range names {
+		data, err := readRegularFile(filepath.Join(dir, name), maxStrmRead)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if found && !bytes.Equal(contents, data) {
+			return nil, fmt.Errorf("STRM ownership markers disagree in %q", dir)
+		}
+		contents = data
+		found = true
+	}
+	if !found {
+		return nil, os.ErrNotExist
+	}
+	return contents, nil
+}
+
+func isStrmMarkerName(name string, names []string) bool {
+	for _, candidate := range names {
+		if name == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func removeStrmMarkers(root, dir string, names []string) error {
+	var removeErr error
+	for _, name := range names {
+		if err := safepath.Remove(root, filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removeErr = errors.Join(removeErr, err)
+		}
+	}
+	return removeErr
 }
 
 func readRegularFile(path string, limit int64) ([]byte, error) {
@@ -719,7 +775,7 @@ func atomicWrite(root, target string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	temporary := filepath.Join(parent, ".decypharr-strm-"+id+".tmp")
+	temporary := filepath.Join(parent, ".tessarr-strm-"+id+".tmp")
 	file, err := safepath.OpenFile(root, temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err

@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/providertraffic"
+	"github.com/Trifocals3537/tessarr/internal/tlsconfig"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/providertraffic"
-	"github.com/sirrobot01/decypharr/internal/tlsconfig"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"go.uber.org/ratelimit"
 	"golang.org/x/net/proxy"
 )

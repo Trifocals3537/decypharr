@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func TestFileIDsAreStableAcrossUpdates(t *testing.T) {

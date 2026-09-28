@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/google/uuid"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 var errWatchedNZBTestMissing = errors.New("watched NZB test record missing")

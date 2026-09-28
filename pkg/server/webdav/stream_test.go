@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	strmurl "github.com/Trifocals3537/tessarr/pkg/strm"
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
 )
 
 const webdavTestStrmSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

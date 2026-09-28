@@ -1,6 +1,6 @@
 ---
 title: Features
-description: What can Decypharr do?
+description: What can Tessarr do?
 ---
 
 ## Key Features

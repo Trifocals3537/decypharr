@@ -27,7 +27,7 @@ func TestStrmValidation(t *testing.T) {
 		Enabled: true, Path: filepath.Join(t.TempDir(), "strm"),
 		Secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
-	if err := valid.Validate("https://media.example/decypharr"); err != nil {
+	if err := valid.Validate("https://media.example/tessarr"); err != nil {
 		t.Fatalf("valid STRM config rejected: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestStrmValidation(t *testing.T) {
 func TestLoadConfigPersistsGeneratedStrmSecret(t *testing.T) {
 	configDir := useTemporaryConfigPath(t)
 	configPath := filepath.Join(configDir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"strm":{"enabled":true,"path":"/tmp/decypharr-strm-test"}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"strm":{"enabled":true,"path":"/tmp/tessarr-strm-test"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

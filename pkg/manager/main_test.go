@@ -5,12 +5,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
 )
 
 func TestMain(m *testing.M) {
-	configRoot, err := os.MkdirTemp("", "decypharr-manager-test-")
+	configRoot, err := os.MkdirTemp("", "tessarr-manager-test-")
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create manager test config root: %v\n", err)
 		os.Exit(1)

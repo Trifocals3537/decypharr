@@ -3,7 +3,7 @@ package request
 import (
 	"net/http"
 
-	"github.com/sirrobot01/decypharr/internal/providertraffic"
+	"github.com/Trifocals3537/tessarr/internal/providertraffic"
 )
 
 // providerTrafficTransport sits below retryablehttp so each physical attempt

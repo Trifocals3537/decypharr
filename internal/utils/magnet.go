@@ -14,8 +14,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Trifocals3537/tessarr/internal/logger"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/sirrobot01/decypharr/internal/logger"
 )
 
 var (

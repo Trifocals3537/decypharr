@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/request"
 )
 
 func TestMain(m *testing.M) {
-	configDir, err := os.MkdirTemp("", "decypharr-common-test-")
+	configDir, err := os.MkdirTemp("", "tessarr-common-test-")
 	if err != nil {
 		panic(err)
 	}
@@ -28,7 +28,7 @@ func TestProbeDownloadUsesCredentialFreeBoundedRange(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("Authorization = %q, want no provider API credential", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != "Decypharr-Test" {
+		if got := r.Header.Get("User-Agent"); got != "Tessarr-Test" {
 			t.Errorf("User-Agent = %q, want non-secret client header preserved", got)
 		}
 		if got := r.Header.Get("Range"); got != "bytes=0-1048575" {
@@ -42,7 +42,7 @@ func TestProbeDownloadUsesCredentialFreeBoundedRange(t *testing.T) {
 	client := request.New(
 		request.WithHeaders(map[string]string{
 			"Authorization": "Bearer secret",
-			"User-Agent":    "Decypharr-Test",
+			"User-Agent":    "Tessarr-Test",
 		}),
 		request.WithMaxRetries(0),
 	)

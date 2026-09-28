@@ -33,7 +33,7 @@ func (b RateBudget) valid() bool {
 }
 
 // Capabilities describes provider-side traffic contracts that are independent
-// of an individual Decypharr installation. Zero values mean unknown/unlimited.
+// of an individual Tessarr installation. Zero values mean unknown/unlimited.
 // User-configured rate limits remain additional, potentially tighter guards.
 type Capabilities struct {
 	AccountAPIBudget            RateBudget // shared by every API client using one account token

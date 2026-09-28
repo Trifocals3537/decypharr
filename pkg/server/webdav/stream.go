@@ -9,14 +9,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	strmurl "github.com/Trifocals3537/tessarr/pkg/strm"
 	"github.com/go-chi/chi/v5"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
 )
 
 // StreamRoutes serves the stable identities embedded in generated .strm
@@ -88,7 +88,7 @@ func (h *Handler) handleIdentityStream(w http.ResponseWriter, r *http.Request) {
 				Str("failure_class", diagnostic.Class).
 				Int("status", diagnostic.Status).
 				Str("file", file.Name).
-				Msg("STRM redirect failed; proxying through Decypharr")
+				Msg("STRM redirect failed; proxying through Tessarr")
 		}
 	}
 

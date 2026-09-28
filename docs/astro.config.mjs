@@ -8,7 +8,7 @@ export default defineConfig({
     base: docsBasePath,
     integrations: [
         starlight({
-            title: 'Decypharr',
+            title: 'Tessarr',
             favicon: '/favicon.png',
             logo: {
                 src: './src/assets/logo.png',
@@ -17,7 +17,7 @@ export default defineConfig({
                 Header: './src/components/Header.astro',
             },
             social: [
-                {label: 'GitHub', icon: 'github', href: 'https://github.com/Trifocals3537/decypharr'},
+                {label: 'GitHub', icon: 'github', href: 'https://github.com/Trifocals3537/tessarr'},
             ],
             sidebar: [
                 {
@@ -25,6 +25,7 @@ export default defineConfig({
                     items: [
                         {label: 'Installation', link: '/guides/installation'},
                         {label: 'Setup Wizard', link: '/guides/quick-start'},
+                        {label: 'Migrate from Decypharr', link: '/guides/migration-from-decypharr'},
                         {label: 'Features', link: '/features'},
                     ],
                 },

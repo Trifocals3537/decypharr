@@ -18,20 +18,16 @@ env:
 jobs:
   prepare:
     name: Prepare release metadata
-    if: >-
-      github.repository == 'Trifocals3537/tessarr' &&
-      github.ref == 'refs/heads/main'
+    if: github.repository == 'Trifocals3537/tessarr'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       channel: ${{ steps.metadata.outputs.channel }}
       tag: ${{ steps.metadata.outputs.tag }}
-      target_commit: ${{ steps.metadata.outputs.target_commit }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: main
           fetch-depth: 0
 
       - name: Extract version and channel
@@ -53,32 +49,32 @@ jobs:
           case "${version}" in
             *-beta*)
               channel=beta
-              release_branch=beta
+              release_ref=refs/heads/beta
               ;;
             *-rc*)
               channel=rc
-              release_branch=beta
+              release_ref=refs/heads/beta
               ;;
             *)
               channel=stable
-              release_branch=main
+              release_ref=refs/heads/main
               ;;
           esac
 
-          git fetch --no-tags origin \
-            "+refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
+          if [[ "${GITHUB_REF}" != "${release_ref}" ]]; then
+            echo "${tag} must be dispatched from ${release_ref#refs/heads/}" >&2
+            exit 1
+          fi
           if git ls-remote --exit-code --tags origin \
             "refs/tags/${tag}" >/dev/null 2>&1; then
             echo "Release tag already exists: ${tag}" >&2
             exit 1
           fi
-          target_commit="$(git rev-parse "refs/remotes/origin/${release_branch}")"
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "target_commit=${target_commit}" >> "${GITHUB_OUTPUT}"
-          echo "Releasing ${tag} from ${release_branch} at ${target_commit}"
+          echo "Releasing ${tag} from ${GITHUB_REF_NAME} at ${GITHUB_SHA}"
 
   build-linux:
     name: Linux ${{ matrix.label }}
@@ -98,8 +94,6 @@ jobs:
             machine_pattern: ARM aarch64
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -201,8 +195,6 @@ jobs:
     needs: prepare
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -262,8 +254,6 @@ jobs:
             expected_arch: arm64
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -321,8 +311,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
@@ -377,7 +365,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.prepare.outputs.target_commit }}
           fetch-depth: 0
 
       - name: Download all artifacts
@@ -395,7 +382,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
-          TARGET_COMMIT: ${{ needs.prepare.outputs.target_commit }}
+          TARGET_COMMIT: ${{ github.sha }}
           CHANNEL: ${{ needs.prepare.outputs.channel }}
         run: |
           set -euo pipefail

@@ -49,7 +49,7 @@ func (s *Server) SetupHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 
 	if err := cfg.SetupComplete(); err == nil {
-		http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
+		redirectLocal(w, cfg.URLBase, "", http.StatusSeeOther)
 		return
 	}
 	if !s.requireSetupAccess(w, r) {

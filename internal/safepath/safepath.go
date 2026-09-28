@@ -677,33 +677,51 @@ func RejectSymlinks(path string) error {
 	}
 	absolute = filepath.Clean(absolute)
 
-	volume := filepath.VolumeName(absolute)
-	remainder := strings.TrimPrefix(absolute, volume)
-	remainder = strings.TrimLeft(remainder, `/\`)
-
-	current := volume + string(filepath.Separator)
-	if volume == "" {
-		current = string(filepath.Separator)
+	anchor := trustedFilesystemAnchor(absolute)
+	relative, err := filepath.Rel(anchor, absolute)
+	if err != nil {
+		return fmt.Errorf("make path relative to filesystem anchor: %w", err)
 	}
-	if remainder == "" {
+	if relative == "." {
 		return nil
 	}
+	if !filepath.IsLocal(relative) {
+		return fmt.Errorf("path %q escapes filesystem anchor %q", absolute, anchor)
+	}
 
-	for _, component := range strings.Split(remainder, string(filepath.Separator)) {
-		if component == "" {
-			continue
-		}
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
+	rooted, err := os.OpenRoot(anchor)
+	if err != nil {
+		return fmt.Errorf("open filesystem anchor %q: %w", anchor, err)
+	}
+	defer func() { _ = rooted.Close() }()
+
+	components := strings.Split(relative, string(filepath.Separator))
+	for index, component := range components {
+		info, err := rooted.Lstat(component)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
-			return fmt.Errorf("inspect path component %q: %w", current, err)
+			return fmt.Errorf("inspect path component %q: %w", component, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path component %q is a symlink", current)
+			return fmt.Errorf("path component %q is a symlink", component)
 		}
+		if index == len(components)-1 {
+			return nil
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("path component %q is not a directory", component)
+		}
+		child, err := rooted.OpenRoot(component)
+		if err != nil {
+			return fmt.Errorf("open path component %q: %w", component, err)
+		}
+		if err := rooted.Close(); err != nil {
+			_ = child.Close()
+			return fmt.Errorf("close parent path component: %w", err)
+		}
+		rooted = child
 	}
 	return nil
 }

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 )
@@ -152,7 +154,7 @@ func (s *Server) requireSetupAccess(w http.ResponseWriter, r *http.Request) bool
 		return false
 	}
 	if r.Method == http.MethodGet {
-		http.Redirect(w, r, setupLoginPath(cfg.URLBase), http.StatusSeeOther)
+		redirectLocal(w, cfg.URLBase, "login", http.StatusSeeOther)
 		return false
 	}
 	http.Error(w, "Authentication required for remote setup", http.StatusUnauthorized)
@@ -161,6 +163,37 @@ func (s *Server) requireSetupAccess(w http.ResponseWriter, r *http.Request) bool
 
 func setupLoginPath(urlBase string) string {
 	return urlBasePath(urlBase, "login")
+}
+
+// redirectLocal emits only a validated, root-relative Location value. Keeping
+// redirects path-only prevents configuration from becoming an external URL or
+// injecting additional response headers.
+func redirectLocal(w http.ResponseWriter, urlBase, target string, status int) {
+	location, err := safeLocalRedirectPath(urlBase, target)
+	if err != nil {
+		http.Error(w, "invalid local redirect", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Location", location)
+	w.WriteHeader(status)
+}
+
+func safeLocalRedirectPath(urlBase, target string) (string, error) {
+	location := urlBasePath(urlBase, target)
+	if location == "" || location[0] != '/' || strings.HasPrefix(location, "//") {
+		return "", fmt.Errorf("redirect is not root-relative")
+	}
+	if strings.ContainsAny(location, "\\?#") || strings.IndexFunc(location, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("redirect contains an unsafe character")
+	}
+	parsed, err := url.ParseRequestURI(location)
+	if err != nil {
+		return "", fmt.Errorf("parse local redirect: %w", err)
+	}
+	if parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("redirect contains a non-path component")
+	}
+	return location, nil
 }
 
 func urlBasePath(urlBase, target string) string {

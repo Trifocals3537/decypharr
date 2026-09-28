@@ -205,16 +205,17 @@ func PrepareDiskCacheRoot(configuredRoot string) (string, error) {
 }
 
 func ensureDiskCacheRoot(configuredRoot string) (string, error) {
-	base, err := safepath.ValidateRoot(configuredRoot)
+	baseRoot, base, err := safepath.EnsureOpenRoot(configuredRoot, 0o700)
 	if err != nil {
 		return "", fmt.Errorf("invalid disk buffer path: %w", err)
 	}
+	defer baseRoot.Close()
 	cacheRoot, err := safepath.JoinIdentifiers(base, ownedCacheDirName)
 	if err != nil {
 		return "", fmt.Errorf("resolve owned cache root: %w", err)
 	}
 
-	info, statErr := os.Lstat(cacheRoot)
+	info, statErr := baseRoot.Lstat(ownedCacheDirName)
 	switch {
 	case statErr == nil:
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -224,69 +225,68 @@ func ensureDiskCacheRoot(configuredRoot string) (string, error) {
 			return "", fmt.Errorf("owned cache root %q is not a directory", cacheRoot)
 		}
 	case os.IsNotExist(statErr):
-		if _, err := safepath.EnsureDir(base, cacheRoot, 0o700); err != nil {
+		if err := baseRoot.Mkdir(ownedCacheDirName, 0o700); err != nil {
 			return "", fmt.Errorf("create owned cache root: %w", err)
 		}
 	default:
 		return "", fmt.Errorf("inspect owned cache root: %w", statErr)
 	}
-
-	markerPath, err := safepath.JoinIdentifiers(cacheRoot, cacheOwnerFileName)
+	cacheHandle, err := baseRoot.OpenRoot(ownedCacheDirName)
 	if err != nil {
-		return "", fmt.Errorf("resolve cache ownership marker: %w", err)
+		return "", fmt.Errorf("pin owned cache root: %w", err)
 	}
-	markerInfo, markerErr := os.Lstat(markerPath)
+	defer cacheHandle.Close()
+	openedInfo, err := cacheHandle.Stat(".")
+	if err != nil || !openedInfo.IsDir() || (statErr == nil && !os.SameFile(info, openedInfo)) {
+		return "", fmt.Errorf("owned cache root changed while opening")
+	}
+
+	markerInfo, markerErr := cacheHandle.Lstat(cacheOwnerFileName)
 	switch {
 	case markerErr == nil:
 		if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() {
-			return "", fmt.Errorf("cache ownership marker %q is not a regular file", markerPath)
+			return "", fmt.Errorf("cache ownership marker is not a regular file")
 		}
-		contents, err := readCacheOwnerMarker(cacheRoot)
+		contents, err := readCacheOwnerMarkerFromRoot(cacheHandle)
 		if err != nil {
 			return "", fmt.Errorf("read cache ownership marker: %w", err)
 		}
 		if string(contents) != cacheOwnerContents {
-			return "", fmt.Errorf("cache ownership marker %q is invalid", markerPath)
+			return "", fmt.Errorf("cache ownership marker is invalid")
 		}
 	case os.IsNotExist(markerErr):
-		empty, err := cacheDirectoryEmpty(cacheRoot)
+		empty, err := cacheDirectoryEmpty(cacheHandle)
 		if err != nil {
 			return "", fmt.Errorf("inspect unowned cache directory: %w", err)
 		}
 		if !empty {
 			return "", fmt.Errorf("refusing to claim non-empty unowned cache directory %q", cacheRoot)
 		}
-		if err := writeExclusiveMarker(cacheRoot, cacheOwnerFileName, cacheOwnerContents); err != nil {
+		if err := writeExclusiveMarkerToRoot(cacheHandle, cacheOwnerFileName, cacheOwnerContents); err != nil {
 			return "", fmt.Errorf("create cache ownership marker: %w", err)
 		}
 	default:
 		return "", fmt.Errorf("inspect cache ownership marker: %w", markerErr)
 	}
 
-	if err := os.Chmod(cacheRoot, 0o700); err != nil {
+	if err := cacheHandle.Chmod(".", 0o700); err != nil {
 		return "", fmt.Errorf("secure owned cache root permissions: %w", err)
 	}
 	return cacheRoot, nil
 }
 
-func cacheDirectoryEmpty(path string) (bool, error) {
-	rooted, err := os.OpenRoot(path)
-	if err != nil {
-		return false, err
-	}
+func cacheDirectoryEmpty(rooted *os.Root) (bool, error) {
 	directory, err := rooted.Open(".")
 	if err != nil {
-		_ = rooted.Close()
 		return false, err
 	}
 	entries, readErr := directory.ReadDir(1)
 	directoryCloseErr := directory.Close()
-	rootCloseErr := rooted.Close()
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return false, errors.Join(readErr, directoryCloseErr, rootCloseErr)
+		return false, errors.Join(readErr, directoryCloseErr)
 	}
-	if err := errors.Join(directoryCloseErr, rootCloseErr); err != nil {
-		return false, err
+	if directoryCloseErr != nil {
+		return false, directoryCloseErr
 	}
 	return len(entries) == 0, nil
 }
@@ -378,9 +378,13 @@ func writeExclusiveMarker(rootPath, name, contents string) error {
 	if err != nil {
 		return err
 	}
+	writeErr := writeExclusiveMarkerToRoot(rooted, name, contents)
+	return errors.Join(writeErr, rooted.Close())
+}
+
+func writeExclusiveMarkerToRoot(rooted *os.Root, name, contents string) error {
 	file, err := rooted.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		_ = rooted.Close()
 		return err
 	}
 	written, writeErr := file.WriteString(contents)
@@ -395,12 +399,9 @@ func writeExclusiveMarker(rootPath, name, contents string) error {
 			removeErr = nil
 		}
 		directorySyncErr := syncCacheDirectory(rooted)
-		rootCloseErr := rooted.Close()
-		return errors.Join(err, removeErr, directorySyncErr, rootCloseErr)
+		return errors.Join(err, removeErr, directorySyncErr)
 	}
-	directorySyncErr := syncCacheDirectory(rooted)
-	rootCloseErr := rooted.Close()
-	return errors.Join(directorySyncErr, rootCloseErr)
+	return syncCacheDirectory(rooted)
 }
 
 func syncCacheDirectory(rooted *os.Root) error {
@@ -423,22 +424,22 @@ func readCacheOwnerMarker(cacheRoot string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	contents, readErr := readCacheOwnerMarkerFromRoot(rooted)
+	return contents, errors.Join(readErr, rooted.Close())
+}
+
+func readCacheOwnerMarkerFromRoot(rooted *os.Root) ([]byte, error) {
 	file, err := rooted.Open(cacheOwnerFileName)
 	if err != nil {
-		_ = rooted.Close()
 		return nil, err
 	}
 	contents, readErr := io.ReadAll(io.LimitReader(file, int64(len(cacheOwnerContents)+1)))
 	fileCloseErr := file.Close()
-	rootCloseErr := rooted.Close()
 	if readErr != nil {
 		return nil, readErr
 	}
 	if fileCloseErr != nil {
 		return nil, fileCloseErr
-	}
-	if rootCloseErr != nil {
-		return nil, rootCloseErr
 	}
 	if len(contents) > len(cacheOwnerContents) {
 		return nil, fmt.Errorf("cache ownership marker is too large")

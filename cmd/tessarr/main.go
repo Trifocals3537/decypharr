@@ -11,6 +11,7 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/logsafe"
 	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/Trifocals3537/tessarr/pkg/manager"
 	"github.com/Trifocals3537/tessarr/pkg/mount/dfs"
@@ -82,7 +83,7 @@ func Start(ctx context.Context) error {
 +-------------------------------------------------------+
 |  Log Level: %-41s |
 +-------------------------------------------------------+
-`, version.GetInfo(), cfg.LogLevel)
+`, logsafe.Text(fmt.Sprint(version.GetInfo())), logsafe.Text(cfg.LogLevel))
 
 		// Initialize services
 		mountMgr, err := createMountManager(mgr, cfg)

@@ -181,6 +181,29 @@ func TestValidateLogLevel(t *testing.T) {
 	}
 }
 
+func TestValidateURLBase(t *testing.T) {
+	for _, value := range []string{"", "/", "/tessarr/", "/media/ui/"} {
+		if err := validateURLBase(value); err != nil {
+			t.Fatalf("validateURLBase(%q) error = %v", value, err)
+		}
+	}
+
+	for _, value := range []string{
+		"https://example.com/",
+		"//example.com/",
+		"/tessarr?next=evil",
+		"/tessarr#fragment",
+		"/tessarr\\admin/",
+		"/tessarr\r\nX-Test: injected/",
+		"/tessarr/%0d%0aX-Test:%20injected/",
+		"/tessarr/../admin/",
+	} {
+		if err := validateURLBase(value); err == nil {
+			t.Fatalf("validateURLBase(%q) accepted unsafe value", value)
+		}
+	}
+}
+
 func TestValidateDeploymentRejectsUnprotectedRemoteServices(t *testing.T) {
 	tests := []struct {
 		name    string

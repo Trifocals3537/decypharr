@@ -2,14 +2,19 @@
 
 package storage
 
-import "golang.org/x/sys/windows"
+import (
+	"os"
+	"path/filepath"
 
-func replaceTorrentSource(source, destination string) error {
-	sourcePtr, err := windows.UTF16PtrFromString(source)
+	"golang.org/x/sys/windows"
+)
+
+func replaceTorrentSource(rooted *os.Root, source, destination string) error {
+	sourcePtr, err := windows.UTF16PtrFromString(filepath.Join(rooted.Name(), source))
 	if err != nil {
 		return err
 	}
-	destinationPtr, err := windows.UTF16PtrFromString(destination)
+	destinationPtr, err := windows.UTF16PtrFromString(filepath.Join(rooted.Name(), destination))
 	if err != nil {
 		return err
 	}
@@ -20,7 +25,7 @@ func replaceTorrentSource(source, destination string) error {
 	)
 }
 
-func syncTorrentSourceDirectory(string) error {
+func syncTorrentSourceDirectory(*os.Root) error {
 	// MoveFileEx with WRITE_THROUGH flushes the replacement on Windows.
 	return nil
 }

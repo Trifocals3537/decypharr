@@ -4,12 +4,12 @@ package storage
 
 import "os"
 
-func replaceTorrentSource(source, destination string) error {
-	return os.Rename(source, destination)
+func replaceTorrentSource(rooted *os.Root, source, destination string) error {
+	return rooted.Rename(source, destination)
 }
 
-func syncTorrentSourceDirectory(path string) error {
-	dir, err := os.Open(path)
+func syncTorrentSourceDirectory(rooted *os.Root) error {
+	dir, err := rooted.Open(".")
 	if err != nil {
 		return err
 	}

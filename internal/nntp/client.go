@@ -234,6 +234,13 @@ func NewClient(cfg *config.Config) (*Client, error) {
 
 	pools := make(map[string]*ProviderPool)
 	for _, p := range providers {
+		if p.MaxConnections < 1 || p.MaxConnections > config.UsenetConnectionLimit {
+			return nil, fmt.Errorf(
+				"provider %q max_connections must be between 1 and %d",
+				p.Host,
+				config.UsenetConnectionLimit,
+			)
+		}
 		pp := &ProviderPool{
 			conns:  make([]*connectionEntry, 0, p.MaxConnections),
 			slots:  make(chan struct{}, p.MaxConnections),

@@ -7,6 +7,11 @@ import (
 	"strconv"
 )
 
+// UsenetConnectionLimit bounds every configured concurrency value before it
+// reaches channel or slice allocation. A few hundred concurrent NNTP sockets
+// already exceeds what a single Tessarr process can use responsibly.
+const UsenetConnectionLimit = 256
+
 type UsenetProvider struct {
 	Host           string `json:"host,omitempty"` // Host of the usenet server
 	Port           int    `json:"port,omitempty"` // Port of the usenet server
@@ -150,20 +155,32 @@ func (c *Config) updateUsenetProvider(index int, u UsenetProvider) UsenetProvide
 	return u
 }
 
-func validateUsenet(providers []UsenetProvider) error {
-	if len(providers) == 0 {
+func validateUsenet(usenet Usenet) error {
+	if len(usenet.Providers) == 0 {
 		return nil
 	}
-	for _, usenet := range providers {
+	if usenet.MaxConnections < 1 || usenet.MaxConnections > UsenetConnectionLimit {
+		return fmt.Errorf("usenet max_connections must be between 1 and %d", UsenetConnectionLimit)
+	}
+	if usenet.ProcessingMaxConnections < 1 || usenet.ProcessingMaxConnections > UsenetConnectionLimit {
+		return fmt.Errorf("usenet processing_max_connections must be between 1 and %d", UsenetConnectionLimit)
+	}
+	for _, provider := range usenet.Providers {
 		// Basic field validation
-		if usenet.Host == "" {
+		if provider.Host == "" {
 			return errors.New("usenet provider host is required")
 		}
-		if usenet.Username == "" {
+		if provider.Username == "" {
 			return errors.New("usenet provider username is required")
 		}
-		if usenet.Password == "" {
+		if provider.Password == "" {
 			return errors.New("usenet provider password is required")
+		}
+		if provider.Port < 1 || provider.Port > 65535 {
+			return fmt.Errorf("usenet provider port must be between 1 and 65535")
+		}
+		if provider.MaxConnections < 1 || provider.MaxConnections > UsenetConnectionLimit {
+			return fmt.Errorf("usenet provider max_connections must be between 1 and %d", UsenetConnectionLimit)
 		}
 	}
 

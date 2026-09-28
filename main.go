@@ -18,6 +18,7 @@ import (
 
 	"github.com/Trifocals3537/tessarr/cmd/tessarr"
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logsafe"
 	"golang.org/x/term"
 )
 
@@ -26,13 +27,13 @@ const defaultPprofAddress = "127.0.0.1:6060"
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("FATAL: Recovered from panic in main: %v\n", r)
+			log.Printf("FATAL: Recovered from panic in main: %s\n", logsafe.Text(fmt.Sprint(r)))
 			debug.PrintStack()
 		}
 	}()
 	if len(os.Args) > 1 && os.Args[1] == "migrate-from-decypharr" {
 		if err := runLegacyMigration(os.Args[2:], os.Stdout, os.Stderr); err != nil {
-			log.Fatalf("state migration failed: %v", err)
+			log.Fatalf("state migration failed: %s", logsafe.Text(err.Error()))
 		}
 		return
 	}
@@ -79,13 +80,13 @@ func main() {
 	if checkConfig {
 		cfg, err := config.LoadForValidation(configPath)
 		if err != nil {
-			log.Fatalf("Tessarr configuration check failed: %v", err)
+			log.Fatalf("Tessarr configuration check failed: %s", logsafe.Text(err.Error()))
 		}
 		if err := cfg.Validate(); err != nil {
-			log.Fatalf("Tessarr configuration check failed: %v", err)
+			log.Fatalf("Tessarr configuration check failed: %s", logsafe.Text(err.Error()))
 		}
 		if err := cfg.ValidateDeployment(); err != nil {
-			log.Fatalf("Tessarr deployment safety check failed: %v", err)
+			log.Fatalf("Tessarr deployment safety check failed: %s", logsafe.Text(err.Error()))
 		}
 		if len(cfg.AllowedClientCIDRs) == 0 &&
 			!config.IsLoopbackBindAddress(cfg.BindAddress) {
@@ -95,7 +96,7 @@ func main() {
 		}
 		fmt.Printf(
 			"Tessarr configuration is valid: %s\n",
-			filepath.Join(configPath, "config.json"),
+			logsafe.Text(filepath.Join(configPath, "config.json")),
 		)
 		return
 	}
@@ -107,12 +108,12 @@ func main() {
 
 	if setAuthUsername != "" {
 		if err := configureAuthFromTerminal(cfg, setAuthUsername); err != nil {
-			log.Fatalf("Tessarr authentication setup failed: %v", err)
+			log.Fatalf("Tessarr authentication setup failed: %s", logsafe.Text(err.Error()))
 		}
 		fmt.Printf(
 			"Authentication enabled for %q in %s\n",
 			strings.TrimSpace(setAuthUsername),
-			configPath,
+			logsafe.Text(configPath),
 		)
 		return
 	}
@@ -124,12 +125,12 @@ func main() {
 	// Start pprof server if enabled
 	if pprofAddr != "" && enablePprof {
 		if err := validatePprofListenAddress(pprofAddr); err != nil {
-			log.Fatalf("refusing unsafe pprof listener: %v", err)
+			log.Fatalf("refusing unsafe pprof listener: %s", logsafe.Text(err.Error()))
 		}
 		go func() {
-			log.Printf("Starting pprof server on %s", pprofAddr)
+			log.Printf("Starting pprof server on %s", logsafe.Text(pprofAddr))
 			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-				log.Printf("pprof server error: %v", err)
+				log.Printf("pprof server error: %s", logsafe.Text(err.Error()))
 			}
 		}()
 	}
@@ -139,7 +140,7 @@ func main() {
 	defer stop()
 
 	if err := tessarr.Start(ctx); err != nil {
-		log.Fatal(err)
+		log.Fatalf("Tessarr stopped with an error: %s", logsafe.Text(err.Error()))
 	}
 }
 

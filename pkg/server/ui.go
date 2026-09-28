@@ -11,7 +11,7 @@ import (
 func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 	if cfg.NeedsAuth() {
-		http.Redirect(w, r, urlBasePath(cfg.URLBase, "register"), http.StatusSeeOther)
+		redirectLocal(w, cfg.URLBase, "register", http.StatusSeeOther)
 		return
 	}
 	if r.Method == "GET" {
@@ -64,7 +64,7 @@ func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error saving session", http.StatusInternalServerError)
 			return
 		}
-		http.Redirect(w, r, urlBasePath(cfg.URLBase, ""), http.StatusSeeOther)
+		redirectLocal(w, cfg.URLBase, "", http.StatusSeeOther)
 		return
 	}
 
@@ -80,7 +80,7 @@ func (s *Server) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	http.Redirect(w, r, urlBasePath(config.Get().URLBase, "login"), http.StatusSeeOther)
+	redirectLocal(w, config.Get().URLBase, "login", http.StatusSeeOther)
 }
 
 func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +157,7 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, urlBasePath(result.Active.URLBase, ""), http.StatusSeeOther)
+	redirectLocal(w, result.Active.URLBase, "", http.StatusSeeOther)
 }
 
 func registrationAllowed(cfg *config.Config) bool {

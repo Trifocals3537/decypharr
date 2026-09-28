@@ -57,6 +57,41 @@ func TestURLBaseRoutingHelpers(t *testing.T) {
 	}
 }
 
+func TestSafeLocalRedirectPathRejectsExternalAndHeaderValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		base   string
+		target string
+	}{
+		{name: "header injection", base: "/tessarr\r\nLocation: https://attacker.example"},
+		{name: "backslash", base: `/\\attacker.example`},
+		{name: "query", base: "/tessarr?next=https://attacker.example"},
+		{name: "fragment", base: "/tessarr#attacker"},
+		{name: "target query", base: "/tessarr", target: "login?next=https://attacker.example"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got, err := safeLocalRedirectPath(test.base, test.target); err == nil {
+				t.Fatalf("safeLocalRedirectPath(%q, %q) = %q, want rejection", test.base, test.target, got)
+			}
+		})
+	}
+}
+
+func TestRedirectLocalWritesOnlyValidatedPath(t *testing.T) {
+	response := httptest.NewRecorder()
+	redirectLocal(response, "/tessarr/", "login", http.StatusSeeOther)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/tessarr/login" {
+		t.Fatalf("redirect response = (%d, %q)", response.Code, response.Header().Get("Location"))
+	}
+
+	response = httptest.NewRecorder()
+	redirectLocal(response, "/bad\r\nX-Test: injected", "login", http.StatusSeeOther)
+	if response.Code != http.StatusInternalServerError || response.Header().Get("Location") != "" {
+		t.Fatalf("unsafe redirect response = (%d, %q)", response.Code, response.Header().Get("Location"))
+	}
+}
+
 func TestAPIRequestDetectionHonorsURLBase(t *testing.T) {
 	server := &Server{urlBase: "/tessarr/"}
 	for _, path := range []string{

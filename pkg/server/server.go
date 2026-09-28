@@ -11,13 +11,13 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/Trifocals3537/tessarr/pkg/manager"
 	"github.com/Trifocals3537/tessarr/pkg/server/qbit"
 	"github.com/Trifocals3537/tessarr/pkg/server/sabnzbd"
@@ -295,61 +295,49 @@ func serveHTTP(ctx context.Context, srv *http.Server, listener net.Listener, shu
 }
 
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
-	logFile := filepath.Join(logger.GetLogPath(), "tessarr.log")
-
-	// Open and read the file
-	file, err := os.Open(logFile)
-	if err != nil {
-		http.Error(w, "Error reading log file", http.StatusInternalServerError)
-		return
-	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			s.logger.Error().Err(err).Msg("Error closing log file")
-		}
-	}(file)
-
-	// Set headers
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", "inline; filename=application.log")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "0")
-
-	// Stream the file
-	if _, err := io.Copy(w, file); err != nil {
-		http.Error(w, "Error streaming log file", http.StatusInternalServerError)
-		return
-	}
+	s.streamLogFile(w, "tessarr.log")
 }
 
 func (s *Server) getRcloneLogs(w http.ResponseWriter, r *http.Request) {
-	// Rclone logs resides in the same directory as the application logs
-	logFile := filepath.Join(logger.GetLogPath(), "rclone.log")
-	// Open and read the file
-	file, err := os.Open(logFile)
+	s.streamLogFile(w, "rclone.log")
+}
+
+func (s *Server) streamLogFile(w http.ResponseWriter, name string) {
+	rooted, _, err := safepath.OpenRoot(logger.GetLogPath())
 	if err != nil {
 		http.Error(w, "Error reading log file", http.StatusInternalServerError)
 		return
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			return
-		}
-	}(file)
+	defer rooted.Close()
 
-	// Set headers
+	info, err := rooted.Lstat(name)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		http.Error(w, "Error reading log file", http.StatusInternalServerError)
+		return
+	}
+	file, err := rooted.Open(name)
+	if err != nil {
+		http.Error(w, "Error reading log file", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			s.logger.Error().Err(err).Msg("Error closing log file")
+		}
+	}()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		http.Error(w, "Error reading log file", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", "inline; filename=application.log")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 
-	// Stream the file
 	if _, err := io.Copy(w, file); err != nil {
-		http.Error(w, fmt.Sprintf("error stremaing file %s", err), http.StatusInternalServerError)
-		return
+		s.logger.Warn().Err(err).Str("log_file", name).Msg("Log stream ended early")
 	}
 }

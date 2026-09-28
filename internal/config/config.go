@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"unicode"
 
 	json "github.com/bytedance/sonic"
 
@@ -386,6 +388,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported log level %q", c.LogLevel)
 	}
+	if err := validateURLBase(c.URLBase); err != nil {
+		return err
+	}
 
 	if err := validateDebrids(c.Debrids); err != nil {
 		return err
@@ -397,7 +402,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if err := validateUsenet(c.Usenet.Providers); err != nil {
+	if err := validateUsenet(c.Usenet); err != nil {
 		return err
 	}
 
@@ -413,6 +418,31 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	return nil
+}
+
+func validateURLBase(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return errors.New("url_base must be a root-relative path")
+	}
+	if strings.ContainsAny(value, "\\?#") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return errors.New("url_base contains an unsafe character")
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("url_base must contain only a local path")
+	}
+	if strings.ContainsRune(parsed.Path, '\\') || strings.IndexFunc(parsed.Path, unicode.IsControl) >= 0 {
+		return errors.New("url_base contains an unsafe escaped character")
+	}
+	for _, component := range strings.Split(parsed.Path, "/") {
+		if component == "." || component == ".." {
+			return errors.New("url_base contains a traversal component")
+		}
+	}
 	return nil
 }
 

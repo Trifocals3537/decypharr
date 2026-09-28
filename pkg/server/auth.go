@@ -55,7 +55,7 @@ func (s *Server) skipAuthHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, urlBasePath(result.Active.URLBase, ""), http.StatusSeeOther)
+	redirectLocal(w, result.Active.URLBase, "", http.StatusSeeOther)
 }
 
 // isValidAPIToken checks if the request contains a valid API token

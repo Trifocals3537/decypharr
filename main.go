@@ -30,6 +30,12 @@ func main() {
 			debug.PrintStack()
 		}
 	}()
+	if len(os.Args) > 1 && os.Args[1] == "migrate-from-decypharr" {
+		if err := runLegacyMigration(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			log.Fatalf("state migration failed: %v", err)
+		}
+		return
+	}
 
 	var configPath string
 	var pprofAddr string

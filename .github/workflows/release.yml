@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   GHCR_IMAGE: ghcr.io/trifocals3537/tessarr
   LDFLAGS_PKG: github.com/Trifocals3537/tessarr/pkg/version

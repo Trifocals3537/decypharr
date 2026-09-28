@@ -18,11 +18,17 @@ import (
 
 const (
 	usenetLegacyAdoptionCheckpointName = ".tessarr-nzb-legacy-adoption-v1.done"
+	legacyUsenetAdoptionCheckpointName = ".decypharr-nzb-legacy-adoption-v1.done"
 	// Marker payloads are durable schema identifiers; the migration renames the
 	// file without invalidating already completed adoption work.
 	usenetLegacyAdoptionCheckpointData = "decypharr NZB legacy ownership adoption v1\n"
 	usenetLegacyAdoptionMaxFiles       = 100_000
 )
+
+var usenetLegacyAdoptionCheckpointNames = []string{
+	usenetLegacyAdoptionCheckpointName,
+	legacyUsenetAdoptionCheckpointName,
+}
 
 var ErrLegacyUsenetManualReview = errors.New("legacy NZB adoption requires manual review")
 
@@ -219,12 +225,17 @@ func (a *legacyUsenetAdopter) adoptEntry(rooted *os.Root, absoluteRoot string, e
 		if markerOwner != ownerID {
 			return true, fmt.Errorf("legacy NZB release is owned by %q, not %q", markerOwner, ownerID)
 		}
-		markerInfo, statErr := entryRoot.Lstat(usenetOwnerMarkerName)
-		if statErr != nil {
-			return true, fmt.Errorf("inspect existing NZB owner marker: %w", statErr)
-		}
-		if err := requireSingleLegacyLink(entryRoot, usenetOwnerMarkerName, markerInfo); err != nil {
-			return true, fmt.Errorf("verify existing NZB owner marker: %w", err)
+		for _, markerName := range usenetOwnerMarkerNames {
+			markerInfo, statErr := entryRoot.Lstat(markerName)
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			if statErr != nil {
+				return true, fmt.Errorf("inspect existing NZB owner marker: %w", statErr)
+			}
+			if err := requireSingleLegacyLink(entryRoot, markerName, markerInfo); err != nil {
+				return true, fmt.Errorf("verify existing NZB owner marker: %w", err)
+			}
 		}
 	case !os.IsNotExist(markerErr):
 		return true, markerErr
@@ -380,7 +391,19 @@ func (a *legacyUsenetAdopter) persistManualReview(entry *storage.Entry, reason e
 }
 
 func legacyUsenetCheckpointExists(rooted *os.Root) (bool, error) {
-	info, err := rooted.Lstat(usenetLegacyAdoptionCheckpointName)
+	found := false
+	for _, name := range usenetLegacyAdoptionCheckpointNames {
+		exists, err := legacyUsenetCheckpointNamedExists(rooted, name)
+		if err != nil {
+			return false, err
+		}
+		found = found || exists
+	}
+	return found, nil
+}
+
+func legacyUsenetCheckpointNamedExists(rooted *os.Root, name string) (bool, error) {
+	info, err := rooted.Lstat(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -390,12 +413,12 @@ func legacyUsenetCheckpointExists(rooted *os.Root) (bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return false, fmt.Errorf("legacy adoption checkpoint is not a regular file")
 	}
-	file, stableInfo, err := openStableLegacyRegularFile(rooted, usenetLegacyAdoptionCheckpointName)
+	file, stableInfo, err := openStableLegacyRegularFile(rooted, name)
 	if err != nil {
 		return false, fmt.Errorf("open legacy adoption checkpoint: %w", err)
 	}
 	defer file.Close()
-	if err := requireSingleLegacyLink(rooted, usenetLegacyAdoptionCheckpointName, stableInfo); err != nil {
+	if err := requireSingleLegacyLink(rooted, name, stableInfo); err != nil {
 		return false, fmt.Errorf("verify legacy adoption checkpoint: %w", err)
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, int64(len(usenetLegacyAdoptionCheckpointData)+1)))
@@ -637,7 +660,7 @@ func (a *legacyUsenetAdopter) validateArtifacts(entryRoot *os.Root, entry *stora
 	}
 	allowedCount := len(expected)
 	if allowMarker {
-		allowedCount++
+		allowedCount += len(usenetOwnerMarkerNames)
 	}
 	if len(entries) > allowedCount {
 		return fmt.Errorf("legacy NZB directory contains extra artifacts")
@@ -647,7 +670,7 @@ func (a *legacyUsenetAdopter) validateArtifacts(entryRoot *os.Root, entry *stora
 	found := make(map[string]struct{})
 	for _, dirEntry := range entries {
 		name := dirEntry.Name()
-		if allowMarker && name == usenetOwnerMarkerName {
+		if allowMarker && isUsenetOwnerMarkerName(name) {
 			continue
 		}
 		if err := safepath.ValidateIdentifier(name); err != nil {
@@ -686,6 +709,15 @@ func (a *legacyUsenetAdopter) validateArtifacts(entryRoot *os.Root, entry *stora
 		return fmt.Errorf("completed legacy NZB action is missing expected artifacts")
 	}
 	return nil
+}
+
+func isUsenetOwnerMarkerName(name string) bool {
+	for _, markerName := range usenetOwnerMarkerNames {
+		if name == markerName {
+			return true
+		}
+	}
+	return false
 }
 
 func validateLegacyArtifact(rooted *os.Root, name string, artifact legacyArtifact) error {

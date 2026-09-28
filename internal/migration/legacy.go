@@ -21,6 +21,7 @@ import (
 const (
 	receiptName    = ".tessarr-migration.json"
 	receiptVersion = 1
+	receiptMaxSize = 4096
 )
 
 var exactStateNames = map[string]string{
@@ -229,6 +230,9 @@ func buildManifest(source string) ([]manifestEntry, error) {
 			return fmt.Errorf("source entry escapes migration root: %s", path)
 		}
 		targetPath := transformRelativePath(relative)
+		if filepath.Dir(targetPath) == "." && portablePathKey(targetPath) == portablePathKey(receiptName) {
+			return fmt.Errorf("migration source reserves target name %q for its receipt", receiptName)
+		}
 		key := portablePathKey(targetPath)
 		if previous, exists := portablePaths[key]; exists {
 			return fmt.Errorf("migration name collision: %q and %q both map to %q", previous, relative, targetPath)
@@ -362,12 +366,15 @@ func scanTarget(root string) ([]manifestEntry, error) {
 		if err != nil || !filepath.IsLocal(relative) {
 			return fmt.Errorf("target entry escapes migration root: %s", path)
 		}
-		if relative == receiptName {
-			return nil
-		}
 		info, err := os.Lstat(path)
 		if err != nil {
 			return err
+		}
+		if relative == receiptName {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return fmt.Errorf("migration receipt is not a regular file")
+			}
+			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
 			return fmt.Errorf("unexpected target entry type: %s", path)
@@ -412,7 +419,7 @@ func verifyExistingTarget(target string, expected []manifestEntry, sourceDigest 
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("migration target exists and is not a real directory")
 	}
-	data, err := os.ReadFile(filepath.Join(target, receiptName))
+	data, err := readVerifiedReceipt(target, info)
 	if err != nil {
 		return fmt.Errorf("migration target already exists without a valid Tessarr receipt: %w", err)
 	}
@@ -427,6 +434,54 @@ func verifyExistingTarget(target string, expected []manifestEntry, sourceDigest 
 		return fmt.Errorf("existing Tessarr state failed verification: %w", err)
 	}
 	return nil
+}
+
+func readVerifiedReceipt(target string, targetInfo os.FileInfo) ([]byte, error) {
+	rooted, err := os.OpenRoot(target)
+	if err != nil {
+		return nil, fmt.Errorf("open migration target: %w", err)
+	}
+	defer rooted.Close()
+	openedRoot, err := rooted.Stat(".")
+	if err != nil || !os.SameFile(targetInfo, openedRoot) {
+		return nil, fmt.Errorf("migration target changed while opening")
+	}
+
+	before, err := rooted.Lstat(receiptName)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("migration receipt is not a regular file")
+	}
+	if before.Size() < 1 || before.Size() > receiptMaxSize {
+		return nil, fmt.Errorf("migration receipt size is outside the allowed range")
+	}
+	file, err := rooted.Open(receiptName)
+	if err != nil {
+		return nil, err
+	}
+	opened, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, fmt.Errorf("migration receipt changed while opening")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, receiptMaxSize+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(data) > receiptMaxSize {
+		return nil, fmt.Errorf("migration receipt exceeds %d bytes", receiptMaxSize)
+	}
+	after, err := rooted.Lstat(receiptName)
+	if err != nil || !os.SameFile(opened, after) {
+		return nil, fmt.Errorf("migration receipt changed while reading")
+	}
+	return data, nil
 }
 
 func digestManifest(entries []manifestEntry) string {

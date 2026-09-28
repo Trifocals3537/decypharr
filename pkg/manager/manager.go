@@ -376,6 +376,8 @@ func (m *Manager) waitForBackground() error {
 	}
 }
 
+const managerSchedulerTag = "tessarr-manager"
+
 func newManagerScheduler(location *time.Location, tag string) (gocron.Scheduler, error) {
 	options := []gocron.SchedulerOption{
 		gocron.WithGlobalJobOptions(
@@ -396,9 +398,9 @@ func newManagerScheduler(location *time.Location, tag string) (gocron.Scheduler,
 func (m *Manager) init() {
 	m.initializationErr = nil
 	cfg := config.Get()
-	scheduler, err := newManagerScheduler(time.Local, "tessarr-manager")
+	scheduler, err := newManagerScheduler(time.Local, managerSchedulerTag)
 	if err != nil {
-		scheduler, _ = newManagerScheduler(nil, "tessarr-manager")
+		scheduler, _ = newManagerScheduler(nil, managerSchedulerTag)
 	}
 
 	// Create CET scheduler for time-specific jobs

@@ -80,6 +80,60 @@ func TestMigrateRejectsTransformedCollision(t *testing.T) {
 	}
 }
 
+func TestMigrateRejectsReservedReceiptSourceName(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{receiptName, ".TESSARR-MIGRATION.JSON"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "old")
+			target := filepath.Join(root, "new")
+			mustWriteFile(t, filepath.Join(source, name), []byte("user data"), 0o600)
+
+			_, err := Migrate(Options{Source: source, Target: target})
+			if err == nil || !strings.Contains(err.Error(), "reserves target name") {
+				t.Fatalf("Migrate() error = %v, want reserved receipt rejection", err)
+			}
+			if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+				t.Fatalf("reserved-name rejection created target: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestMigrateRejectsSymlinkedExistingReceipt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows test users may not have symlink permission")
+	}
+	t.Parallel()
+
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	mustWriteFile(t, filepath.Join(source, "config.json"), []byte("{}"), 0o600)
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(target, receiptName)
+	receiptData, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside-receipt.json")
+	mustWriteFile(t, outside, receiptData, 0o600)
+	if err := os.Remove(receiptPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, receiptPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Migrate(Options{Source: source, Target: target})
+	if err == nil || !strings.Contains(err.Error(), "receipt is not a regular file") {
+		t.Fatalf("Migrate() error = %v, want symlinked receipt rejection", err)
+	}
+}
+
 func TestMigrateRejectsSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows test users may not have symlink permission")

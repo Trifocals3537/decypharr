@@ -478,6 +478,29 @@ func TestLegacyUsenetAdoptionRecoversMarkerWithoutCheckpoint(t *testing.T) {
 	)
 }
 
+func TestLegacyUsenetAdoptionRecognizesDecypharrCheckpoint(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(rootPath, legacyUsenetAdoptionCheckpointName),
+		[]byte(usenetLegacyAdoptionCheckpointData),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	exists, err := legacyUsenetCheckpointExists(rooted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("legacy Decypharr adoption checkpoint was not recognized")
+	}
+}
+
 func TestLegacyUsenetAdoptionPreexistingMarkerIsRevalidated(t *testing.T) {
 	fixture := newLegacyAdoptionFixture(t, config.DownloadActionNone)
 	rooted, err := os.OpenRoot(fixture.entryPath)

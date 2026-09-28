@@ -225,7 +225,7 @@ func (m *Manager) addQueueProcessorJob(ctx context.Context) error {
 
 func (m *Manager) StartWorker(ctx context.Context) error {
 	// Stop any existing jobs before starting new ones
-	m.scheduler.RemoveByTags("tessarr")
+	m.scheduler.RemoveByTags(managerSchedulerTag)
 
 	// Call the initial calls
 	m.runInitialCalls(ctx)

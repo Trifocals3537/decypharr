@@ -247,6 +247,73 @@ func TestClaimUsenetEntryDirectoryIsIdempotentForSameOwner(t *testing.T) {
 	assertManagerFileContents(t, filepath.Join(firstPath, usenetOwnerMarkerName), strings.ToLower(entry.InfoHash)+"\n")
 }
 
+func TestClaimUsenetEntryDirectoryAcceptsLegacyOwnerMarker(t *testing.T) {
+	root := t.TempDir()
+	entry := normalNZBEntry(root)
+	path, newlyClaimed, err := claimUsenetEntryDirectory(root, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !newlyClaimed {
+		t.Fatal("initial NZB claim was not reported as new")
+	}
+	if err := os.Rename(
+		filepath.Join(path, usenetOwnerMarkerName),
+		filepath.Join(path, legacyUsenetOwnerMarkerName),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	retryPath, newlyClaimed, err := claimUsenetEntryDirectory(root, entry)
+	if err != nil {
+		t.Fatalf("legacy NZB owner marker was not accepted: %v", err)
+	}
+	if newlyClaimed || retryPath != path {
+		t.Fatalf("legacy marker retry = (%q, %t), want (%q, false)", retryPath, newlyClaimed, path)
+	}
+	assertManagerFileContents(t, filepath.Join(path, legacyUsenetOwnerMarkerName), strings.ToLower(entry.InfoHash)+"\n")
+	if _, err := os.Lstat(filepath.Join(path, usenetOwnerMarkerName)); !os.IsNotExist(err) {
+		t.Fatalf("retry rewrote the legacy NZB marker: %v", err)
+	}
+}
+
+func TestUsenetOwnerMarkerAliasesMustAgree(t *testing.T) {
+	root := t.TempDir()
+	entry := normalNZBEntry(root)
+	path, _, err := claimUsenetEntryDirectory(root, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, legacyUsenetOwnerMarkerName), []byte("different-owner\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := claimUsenetEntryDirectory(root, entry); err == nil || !strings.Contains(err.Error(), "markers disagree") {
+		t.Fatalf("conflicting NZB ownership markers error = %v", err)
+	}
+}
+
+func TestRollbackUsenetEntryClaimAcceptsLegacyMarkerOnlyDirectory(t *testing.T) {
+	root := t.TempDir()
+	entry := normalNZBEntry(root)
+	path, _, err := claimUsenetEntryDirectory(root, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(path, usenetOwnerMarkerName),
+		filepath.Join(path, legacyUsenetOwnerMarkerName),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rollbackUsenetEntryClaim(root, entry); err != nil {
+		t.Fatalf("legacy marker-only rollback failed: %v", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy marker-only directory remained after rollback: %v", err)
+	}
+}
+
 func TestClaimUsenetOwnerMarkerRemovesMarkerWhenFileSyncFails(t *testing.T) {
 	rootPath := t.TempDir()
 	rooted, err := os.OpenRoot(rootPath)
@@ -477,6 +544,46 @@ func TestRemoveOwnedUsenetEntryCleansMatchingCrashQuarantine(t *testing.T) {
 	}
 	if _, err := os.Stat(quarantine); !os.IsNotExist(err) {
 		t.Fatalf("matching crash quarantine still exists: %v", err)
+	}
+}
+
+func TestRemoveOwnedUsenetEntryCleansLegacyCrashQuarantine(t *testing.T) {
+	root := t.TempDir()
+	entry := normalNZBEntry(root)
+	entryPath, _, err := claimUsenetEntryDirectory(root, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerID, err := canonicalUsenetOwnerID(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(root, entryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyQuarantine := filepath.Join(
+		filepath.Dir(entryPath),
+		legacyUsenetQuarantinePrefix+strings.TrimPrefix(
+			usenetQuarantinePrefixForEntry(ownerID, relative),
+			usenetQuarantinePrefix,
+		)+"crash",
+	)
+	if err := os.Rename(entryPath, legacyQuarantine); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(legacyQuarantine, usenetOwnerMarkerName),
+		filepath.Join(legacyQuarantine, legacyUsenetOwnerMarkerName),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeOwnedUsenetEntryDirectory(root, entry); err != nil {
+		t.Fatalf("legacy NZB quarantine recovery failed: %v", err)
+	}
+	if _, err := os.Lstat(legacyQuarantine); !os.IsNotExist(err) {
+		t.Fatalf("legacy NZB quarantine remained: %v", err)
 	}
 }
 

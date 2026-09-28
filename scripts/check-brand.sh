@@ -5,7 +5,7 @@ set -euo pipefail
 # attribution requires their exact spelling. New product-facing use is a bug.
 git rev-parse --is-inside-work-tree >/dev/null
 
-allowed='^(README\.md|docs/astro\.config\.mjs|docs/src/content/docs/guides/migration-from-decypharr\.md|internal/migration/legacy(_test)?\.go|main\.go|migration_command(_test)?\.go|pkg/manager/legacy_usenet_adoption\.go|pkg/manager/strm\.go|pkg/manager/usenet_watcher_identity\.go|pkg/strm/strm\.go|pkg/usenet/fs/reader/cache\.go|scripts/check-brand\.sh)$'
+allowed='^(README\.md|docs/astro\.config\.mjs|docs/src/content/docs/guides/migration-from-decypharr\.md|internal/migration/legacy(_test)?\.go|main\.go|migration_command(_test)?\.go|pkg/manager/legacy_artifact_names\.go|pkg/manager/legacy_usenet_adoption\.go|pkg/manager/strm\.go|pkg/manager/usenet_watcher_identity\.go|pkg/strm/strm\.go|pkg/usenet/fs/reader/cache\.go|scripts/check-brand\.sh)$'
 failed=0
 
 while IFS=: read -r path line content; do

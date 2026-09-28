@@ -21,15 +21,12 @@ import (
 )
 
 const (
-	usenetOwnerMarkerName         = ".tessarr-nzb-owner-v1"
-	usenetOwnershipLockName       = ".tessarr-nzb-ownership.lock"
-	usenetQuarantinePrefix        = ".tessarr-nzb-quarantine-"
-	legacyUsenetOwnerMarkerName   = ".decypharr-nzb-owner-v1"
-	legacyUsenetOwnershipLockName = ".decypharr-nzb-ownership.lock"
-	legacyUsenetQuarantinePrefix  = ".decypharr-nzb-quarantine-"
-	usenetOwnerMarkerMaxBytes     = 512
-	usenetDirectoryReadBatch      = 128
-	usenetDirectoryMaxEntries     = 100_000
+	usenetOwnerMarkerName     = ".tessarr-nzb-owner-v1"
+	usenetOwnershipLockName   = ".tessarr-nzb-ownership.lock"
+	usenetQuarantinePrefix    = ".tessarr-nzb-quarantine-"
+	usenetOwnerMarkerMaxBytes = 512
+	usenetDirectoryReadBatch  = 128
+	usenetDirectoryMaxEntries = 100_000
 )
 
 var usenetOwnerMarkerNames = []string{usenetOwnerMarkerName, legacyUsenetOwnerMarkerName}

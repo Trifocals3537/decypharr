@@ -25,19 +25,15 @@ import (
 )
 
 const (
-	torrentOwnerMarkerName         = ".tessarr-torrent-owner-v1"
-	torrentOwnershipLockName       = ".tessarr-torrent-ownership.lock"
-	torrentQuarantinePrefix        = ".tessarr-torrent-quarantine-"
-	torrentPartialPrefix           = ".tessarr-torrent-part-"
-	legacyTorrentOwnerMarkerName   = ".decypharr-torrent-owner-v1"
-	legacyTorrentOwnershipLockName = ".decypharr-torrent-ownership.lock"
-	legacyTorrentQuarantinePrefix  = ".decypharr-torrent-quarantine-"
-	legacyTorrentPartialPrefix     = ".decypharr-torrent-part-"
-	torrentOwnerMarkerMaxBytes     = 256
-	torrentOwnershipMaxEntries     = 100_000
-	torrentOwnershipReadBatch      = 256
-	torrentOwnershipMaxDepth       = 64
-	torrentOwnershipLockTimeout    = 5 * time.Second
+	torrentOwnerMarkerName      = ".tessarr-torrent-owner-v1"
+	torrentOwnershipLockName    = ".tessarr-torrent-ownership.lock"
+	torrentQuarantinePrefix     = ".tessarr-torrent-quarantine-"
+	torrentPartialPrefix        = ".tessarr-torrent-part-"
+	torrentOwnerMarkerMaxBytes  = 256
+	torrentOwnershipMaxEntries  = 100_000
+	torrentOwnershipReadBatch   = 256
+	torrentOwnershipMaxDepth    = 64
+	torrentOwnershipLockTimeout = 5 * time.Second
 )
 
 var (

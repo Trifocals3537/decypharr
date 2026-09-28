@@ -65,7 +65,7 @@ func main() {
 
 	status.QbitAPI = checkQbitAPI(ctx, client, baseUrl, port, auth, cfg.UseAuth)
 	status.WebUI = checkWebUI(ctx, client, baseUrl, port, auth, cfg.UseAuth)
-	status.WebDAVService = checkBaseWebdav(ctx, client, baseUrl, port, cfg)
+	status.WebDAVService = checkWebDAVReadiness(ctx, client, baseUrl, port, cfg)
 	status.DataReady = checkDataReadiness(ctx, client, baseUrl, port)
 	// Determine overall status
 	// The control plane alone is insufficient: Plex/Jellyfin require a proven
@@ -130,6 +130,14 @@ func checkDataReadiness(ctx context.Context, client *http.Client, baseUrl, port 
 	}
 	defer drainAndClose(resp)
 	return resp.StatusCode == http.StatusOK
+}
+
+func checkWebDAVReadiness(ctx context.Context, client *http.Client, baseUrl, port string, cfg *config.Config) bool {
+	if cfg.DisableWebDav {
+		return true
+	}
+
+	return checkBaseWebdav(ctx, client, baseUrl, port, cfg)
 }
 
 func checkBaseWebdav(ctx context.Context, client *http.Client, baseUrl, port string, cfg *config.Config) bool {

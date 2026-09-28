@@ -778,7 +778,16 @@ func (tb *Torbox) updateTorrentWithCacheContext(ctx context.Context, t *types.To
 	}
 	t.Files, err = torboxFilesByLogicalName(files)
 	if err != nil {
-		return fmt.Errorf("normalize TorBox torrent files: %w", err)
+		normalizationErr := fmt.Errorf("normalize TorBox torrent files: %w", err)
+		if terminalTorboxState(data.DownloadState) {
+			return fmt.Errorf(
+				"%w: %s: %v",
+				types.ErrTerminalProviderTorrent,
+				data.DownloadState,
+				normalizationErr,
+			)
+		}
+		return normalizationErr
 	}
 
 	var cleanPath string

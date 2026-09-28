@@ -306,27 +306,33 @@ func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
 func TestUncachedStallPolicyUsesStateNotSeederCountAlone(t *testing.T) {
 	for _, test := range []struct {
 		state   string
+		status  debridTypes.TorrentStatus
 		seeders int
 		want    string
 		timeout time.Duration
 	}{
-		{state: "stalled (no seeds)", want: "no_seeds", timeout: 10 * time.Minute},
-		{state: "stalledDL", want: "no_seeds", timeout: 10 * time.Minute},
-		{state: "stalled (no seeds)", seeders: 2, want: "stalled", timeout: 30 * time.Minute},
-		{state: "metaDL", want: "metadata", timeout: 20 * time.Minute},
-		{state: "downloading", want: "stalled", timeout: 30 * time.Minute},
-		{state: "stalledDL", seeders: 2, want: "stalled", timeout: 30 * time.Minute},
-		{state: "", want: "stalled", timeout: 30 * time.Minute},
-		{state: "paused"},
-		{state: "checkingDL"},
-		{state: "queued"},
+		{state: "stalled (no seeds)", status: debridTypes.TorrentStatusDownloading, want: "no_seeds", timeout: 10 * time.Minute},
+		{state: "stalledDL", status: debridTypes.TorrentStatusDownloading, want: "no_seeds", timeout: 10 * time.Minute},
+		{state: "stalled (no seeds)", status: debridTypes.TorrentStatusDownloading, seeders: 2, want: "stalled", timeout: 30 * time.Minute},
+		{state: "metaDL", status: debridTypes.TorrentStatusDownloading, want: "metadata", timeout: 20 * time.Minute},
+		{state: "downloading", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "stalledDL", status: debridTypes.TorrentStatusDownloading, seeders: 2, want: "stalled", timeout: 30 * time.Minute},
+		{state: "", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "0", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "running", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "finished", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "magnet_conversion", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "paused", status: debridTypes.TorrentStatusDownloading},
+		{state: "checkingDL", status: debridTypes.TorrentStatusDownloading},
+		{state: "queued", status: debridTypes.TorrentStatusQueued},
+		{state: "future-provider-state", status: debridTypes.TorrentStatusError},
 	} {
-		kind, timeout := uncachedStallPolicy(test.state, test.seeders, 30*time.Minute)
+		kind, timeout := uncachedStallPolicy(test.state, test.status, test.seeders, 30*time.Minute)
 		if kind != test.want || timeout != test.timeout {
 			t.Errorf("state %q, seeders %d = %q/%s, want %q/%s", test.state, test.seeders, kind, timeout, test.want, test.timeout)
 		}
 	}
-	if kind, timeout := uncachedStallPolicy("metaDL", 0, 0); kind != "" || timeout != 0 {
+	if kind, timeout := uncachedStallPolicy("metaDL", debridTypes.TorrentStatusDownloading, 0, 0); kind != "" || timeout != 0 {
 		t.Fatalf("disabled watchdog = %q/%s", kind, timeout)
 	}
 }
@@ -363,6 +369,8 @@ func TestQueuedUncachedStateSpecificStallThresholds(t *testing.T) {
 		{name: "metadata after twenty minutes", state: "metaDL", noProgressFor: 21 * time.Minute, wantKind: "metadata"},
 		{name: "ordinary download before thirty minutes", state: "downloading", noProgressFor: 21 * time.Minute},
 		{name: "zero seeds alone does not accelerate", state: "downloading", noProgressFor: 11 * time.Minute},
+		{name: "AllDebrid active code uses generic timeout", state: "0", noProgressFor: 31 * time.Minute, wantKind: "stalled"},
+		{name: "Premiumize running uses generic timeout", state: "running", noProgressFor: 31 * time.Minute, wantKind: "stalled"},
 		{name: "paused is not a stall", state: "paused", noProgressFor: time.Hour},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -73,8 +73,13 @@ func (m *Manager) clearUncachedStallCandidate(key string) {
 
 // TorBox's explicit no-seeds and metadata states justify shorter waits than
 // an ordinary slow transfer. A zero seeder count alone never does.
-func uncachedStallPolicy(state string, seeders int, generic time.Duration) (string, time.Duration) {
-	if generic <= 0 {
+func uncachedStallPolicy(
+	state string,
+	status debridTypes.TorrentStatus,
+	seeders int,
+	generic time.Duration,
+) (string, time.Duration) {
+	if generic <= 0 || status != debridTypes.TorrentStatusDownloading {
 		return "", 0
 	}
 	normalized := strings.ToLower(strings.TrimSpace(strings.SplitN(state, "(", 2)[0]))
@@ -86,10 +91,15 @@ func uncachedStallPolicy(state string, seeders int, generic time.Duration) (stri
 			return "no_seeds", min(generic, noSeedsStallTimeout)
 		}
 		return "stalled", generic
-	case "", "downloading":
-		return "stalled", generic
-	default:
+	case "paused", "pausedup", "pauseddl", "checkingresumedata", "checkingup", "checkingdl":
 		return "", 0
+	default:
+		// Raw provider state is diagnostic data, not a complete cross-provider
+		// policy vocabulary. Once an adapter has positively mapped the state to
+		// downloading, use the generic no-progress timeout for provider-native
+		// active states (for example AllDebrid 0-3, Premiumize running, and
+		// Real-Debrid magnet_conversion) instead of silently disabling recovery.
+		return "stalled", generic
 	}
 }
 

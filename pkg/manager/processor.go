@@ -511,7 +511,12 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		placement.Progress = entry.Progress
 	}
 
-	stallKind, stallTimeout := uncachedStallPolicy(debridTorrent.ProviderState, debridTorrent.Seeders, m.uncachedStallTimeout)
+	stallKind, stallTimeout := uncachedStallPolicy(
+		debridTorrent.ProviderState,
+		debridTorrent.Status,
+		debridTorrent.Seeders,
+		m.uncachedStallTimeout,
+	)
 	if stallKind != "" && uncachedTransferStalled(
 		entry,
 		debridTorrent.Status,
@@ -525,7 +530,12 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 			m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm uncached stall; retaining queued job")
 			return m.queue.Update(entry)
 		}
-		freshKind, _ := uncachedStallPolicy(fresh.ProviderState, fresh.Seeders, m.uncachedStallTimeout)
+		freshKind, _ := uncachedStallPolicy(
+			fresh.ProviderState,
+			fresh.Status,
+			fresh.Seeders,
+			m.uncachedStallTimeout,
+		)
 		if fresh.Status != debridTypes.TorrentStatusDownloading || freshKind != stallKind || fresh.Speed > 0 || fresh.Progress/100.0 > entry.Progress {
 			m.clearUncachedStallCandidate(stallKey)
 			entry.ObserveTransfer(fresh.Progress/100.0, time.Now())

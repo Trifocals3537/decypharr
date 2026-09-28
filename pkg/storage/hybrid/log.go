@@ -38,6 +38,7 @@ const (
 	logVersion             = uint32(3) // v3: added Protocol, Bad, AddedOn
 	logHeaderSize          = 16
 	maxLogRecordBytes      = 256 << 20
+	maxLogKeyBytes         = 1 << 20
 	maxUint16EncodedLength = 1<<16 - 1
 	logRecordFixedBytes    = 35
 )
@@ -336,6 +337,10 @@ func (l *appendLog) Append(key string, value []byte, deleted bool, category, pro
 }
 
 func encodedLogRecordSize(key, value, category, provider, status, name, protocol int) (int, error) {
+	if key < 0 || key > maxLogKeyBytes {
+		return 0, fmt.Errorf("append log key exceeds %d bytes", maxLogKeyBytes)
+	}
+
 	for _, field := range []struct {
 		name   string
 		length int
@@ -511,7 +516,7 @@ func readRecordFrom(r *bufio.Reader, startPos int64, version uint32, fixed []byt
 	if err != nil {
 		return nil, 0, err
 	}
-	if keyLen > 1024*1024 { // 1MB sanity check
+	if keyLen > maxLogKeyBytes {
 		return nil, 0, fmt.Errorf("invalid key length: %d", keyLen)
 	}
 	key, err := readStr(int(keyLen))

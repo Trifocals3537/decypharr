@@ -27,6 +27,11 @@ func TestEncodedLogRecordSize(t *testing.T) {
 			wantErr:  true,
 		},
 		{
+			name:    "oversized key",
+			key:     maxLogKeyBytes + 1,
+			wantErr: true,
+		},
+		{
 			name:    "oversized record",
 			value:   maxLogRecordBytes,
 			wantErr: true,

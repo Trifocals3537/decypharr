@@ -161,10 +161,6 @@ func (s *Server) requireSetupAccess(w http.ResponseWriter, r *http.Request) bool
 	return false
 }
 
-func setupLoginPath(urlBase string) string {
-	return urlBasePath(urlBase, "login")
-}
-
 // redirectLocal emits only a validated, root-relative Location value. Keeping
 // redirects path-only prevents configuration from becoming an external URL or
 // injecting additional response headers.

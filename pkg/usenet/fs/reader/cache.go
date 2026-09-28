@@ -419,15 +419,6 @@ func syncCacheDirectory(rooted *os.Root) error {
 	return errors.Join(syncErr, closeErr)
 }
 
-func readCacheOwnerMarker(cacheRoot string) ([]byte, error) {
-	rooted, err := os.OpenRoot(cacheRoot)
-	if err != nil {
-		return nil, err
-	}
-	contents, readErr := readCacheOwnerMarkerFromRoot(rooted)
-	return contents, errors.Join(readErr, rooted.Close())
-}
-
 func readCacheOwnerMarkerFromRoot(rooted *os.Root) ([]byte, error) {
 	file, err := rooted.Open(cacheOwnerFileName)
 	if err != nil {

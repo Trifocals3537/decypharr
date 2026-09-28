@@ -223,7 +223,7 @@ Create a `docker-compose.yml`:
 ```yaml
 services:
   decypharr:
-    image: ghcr.io/trifocals3537/decypharr:beta
+    image: ghcr.io/trifocals3537/decypharr:latest
     container_name: decypharr
     ports:
       - "8282:8282"
@@ -238,6 +238,10 @@ services:
     security_opt:
       - apparmor:unconfined
 ```
+
+The `latest` image tracks stable releases. Pin a versioned tag or digest for a
+controlled production rollout. Use `beta` only when you intentionally want the
+preview channel.
 
 Run:
 
@@ -301,7 +305,7 @@ docker run -d \
     --device /dev/fuse:/dev/fuse:rwm \
     --cap-add SYS_ADMIN \
     --security-opt apparmor:unconfined \
-  ghcr.io/trifocals3537/decypharr:beta
+  ghcr.io/trifocals3537/decypharr:latest
 ```
 
 The container image explicitly listens on `0.0.0.0`; publish only the ports you

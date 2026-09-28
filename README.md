@@ -11,8 +11,8 @@ Usenet streaming.
 
 ## Features
 
-- Mock Qbittorent and Sabnzbd API that supports the Arrs (Sonarr, Radarr, Lidarr etc)
-- Multiple Debrid and usenet providers support with a single interface
+- qBittorrent- and SABnzbd-compatible APIs for Arr applications such as Sonarr, Radarr, and Lidarr
+- Multiple Debrid and Usenet providers through a single interface
 - Direct Usenet streaming via NNTP (no separate download client required)
 - Optional signed STRM library for mountless Plex, Jellyfin, and Emby playback
 
@@ -84,7 +84,7 @@ Docker remains supported, but it is not required:
 ```yaml
 services:
   decypharr:
-    image: ghcr.io/trifocals3537/decypharr:beta
+    image: ghcr.io/trifocals3537/decypharr:latest
     container_name: decypharr
     ports:
       - "8282:8282"
@@ -99,6 +99,10 @@ services:
     security_opt:
       - apparmor:unconfined
 ```
+
+The `latest` image tracks stable releases. Pin a versioned tag or digest for a
+controlled production rollout. Use `beta` only when you intentionally want the
+preview channel.
 
 If Plex, Jellyfin, Emby, or another consumer runs in a separate Linux
 container, do not use Docker's default `rprivate` bind for the Decypharr mount.
@@ -130,6 +134,8 @@ for verification and managed-host guidance.
 
 See the [documentation source](docs/src/content/docs/) while the fork's
 standalone documentation site is being prepared.
+
+See the [changelog](CHANGELOG.md) for release highlights and upgrade notes.
 
 ## Contributing
 

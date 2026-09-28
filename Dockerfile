@@ -51,7 +51,7 @@ LABEL version="${VERSION}-${CHANNEL}"
 LABEL org.opencontainers.image.source="https://github.com/Trifocals3537/decypharr"
 LABEL org.opencontainers.image.title="decypharr"
 LABEL org.opencontainers.image.authors="Decypharr contributors"
-LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/decypharr/blob/beta/README.md"
+LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/decypharr/blob/main/README.md"
 
 # Install dependencies including rclone (from binary)
 RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata && \

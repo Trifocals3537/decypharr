@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,7 +15,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gofrs/flock"
 	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -145,18 +143,18 @@ func claimUsenetEntryDirectory(downloadRoot string, entry *storage.Entry) (entry
 	usenetOwnershipMu.Lock()
 	defer usenetOwnershipMu.Unlock()
 
-	absoluteRoot, ownershipLock, _, err := acquireUsenetOwnershipLock(downloadRoot, true)
+	ownership, _, err := acquireUsenetOwnershipLock(downloadRoot, true)
 	if err != nil {
 		return "", false, err
 	}
-	entryPath, newlyClaimed, err = claimUsenetEntryDirectoryLocked(absoluteRoot, entry)
-	if unlockErr := ownershipLock.Unlock(); unlockErr != nil && err == nil {
-		err = fmt.Errorf("unlock NZB ownership root: %w", unlockErr)
+	entryPath, newlyClaimed, err = claimUsenetEntryDirectoryLocked(ownership.root, ownership.absolute, entry)
+	if closeErr := ownership.close(); closeErr != nil && err == nil {
+		err = fmt.Errorf("close NZB ownership root: %w", closeErr)
 	}
 	return entryPath, newlyClaimed, err
 }
 
-func claimUsenetEntryDirectoryLocked(absoluteRoot string, entry *storage.Entry) (entryPath string, newlyClaimed bool, err error) {
+func claimUsenetEntryDirectoryLocked(rooted *os.Root, absoluteRoot string, entry *storage.Entry) (entryPath string, newlyClaimed bool, err error) {
 	entryPath, err = safeUsenetEntryDownloadPath(absoluteRoot, entry)
 	if err != nil {
 		return "", false, err
@@ -170,11 +168,6 @@ func claimUsenetEntryDirectoryLocked(absoluteRoot string, entry *storage.Entry) 
 		return "", false, fmt.Errorf("make NZB release path relative: %w", err)
 	}
 
-	rooted, err := os.OpenRoot(absoluteRoot)
-	if err != nil {
-		return "", false, fmt.Errorf("open NZB download root: %w", err)
-	}
-	defer rooted.Close()
 	if err := recoverUsenetQuarantineForClaim(rooted, relativeEntry, ownerID); err != nil {
 		return "", false, err
 	}
@@ -343,16 +336,16 @@ func removeOwnedUsenetEntryDirectory(downloadRoot string, entry *storage.Entry) 
 	usenetOwnershipMu.Lock()
 	defer usenetOwnershipMu.Unlock()
 
-	absoluteRoot, ownershipLock, rootExists, err := acquireUsenetOwnershipLock(downloadRoot, false)
+	ownership, rootExists, err := acquireUsenetOwnershipLock(downloadRoot, false)
 	if err != nil {
 		return err
 	}
 	if !rootExists {
 		return nil
 	}
-	removeErr := quarantineAndRemoveUsenetEntryLocked(absoluteRoot, entry, false)
-	if unlockErr := ownershipLock.Unlock(); unlockErr != nil && removeErr == nil {
-		removeErr = fmt.Errorf("unlock NZB ownership root: %w", unlockErr)
+	removeErr := quarantineAndRemoveUsenetEntryLocked(ownership.root, ownership.absolute, entry, false)
+	if closeErr := ownership.close(); closeErr != nil && removeErr == nil {
+		removeErr = fmt.Errorf("close NZB ownership root: %w", closeErr)
 	}
 	return removeErr
 }
@@ -361,73 +354,35 @@ func rollbackUsenetEntryClaim(downloadRoot string, entry *storage.Entry) error {
 	usenetOwnershipMu.Lock()
 	defer usenetOwnershipMu.Unlock()
 
-	absoluteRoot, ownershipLock, rootExists, err := acquireUsenetOwnershipLock(downloadRoot, false)
+	ownership, rootExists, err := acquireUsenetOwnershipLock(downloadRoot, false)
 	if err != nil {
 		return err
 	}
 	if !rootExists {
 		return nil
 	}
-	rollbackErr := quarantineAndRemoveUsenetEntryLocked(absoluteRoot, entry, true)
-	if unlockErr := ownershipLock.Unlock(); unlockErr != nil && rollbackErr == nil {
-		rollbackErr = fmt.Errorf("unlock NZB ownership root: %w", unlockErr)
+	rollbackErr := quarantineAndRemoveUsenetEntryLocked(ownership.root, ownership.absolute, entry, true)
+	if closeErr := ownership.close(); closeErr != nil && rollbackErr == nil {
+		rollbackErr = fmt.Errorf("close NZB ownership root: %w", closeErr)
 	}
 	return rollbackErr
 }
 
-func acquireUsenetOwnershipLock(downloadRoot string, createRoot bool) (absoluteRoot string, ownershipLock *flock.Flock, rootExists bool, err error) {
-	if createRoot {
-		absoluteRoot, err = safepath.EnsureRoot(downloadRoot, 0o755)
-		if err != nil {
-			return "", nil, false, fmt.Errorf("create trusted NZB download root: %w", err)
-		}
-	} else {
-		absoluteRoot, err = safepath.ValidateRoot(downloadRoot)
-		if err != nil {
-			return "", nil, false, err
-		}
-	}
-	rooted, _, err := safepath.OpenRoot(absoluteRoot)
+func acquireUsenetOwnershipLock(downloadRoot string, createRoot bool) (*ownershipRoot, bool, error) {
+	ownership, exists, err := acquireOwnershipRoot(
+		downloadRoot,
+		usenetOwnershipLockName,
+		createRoot,
+		usenetOwnershipLockTimeout,
+		usenetOwnershipRetryDelay,
+	)
 	if err != nil {
-		if !createRoot && errors.Is(err, os.ErrNotExist) {
-			return absoluteRoot, nil, false, nil
-		}
-		return "", nil, false, fmt.Errorf("open NZB download root: %w", err)
+		return nil, false, fmt.Errorf("acquire NZB ownership root: %w", err)
 	}
-	defer rooted.Close()
-
-	lockPath := filepath.Join(absoluteRoot, usenetOwnershipLockName)
-	if info, statErr := rooted.Lstat(usenetOwnershipLockName); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", nil, false, fmt.Errorf("NZB ownership lock %q is not a regular file", lockPath)
-		}
-	} else if !os.IsNotExist(statErr) {
-		return "", nil, false, fmt.Errorf("inspect NZB ownership lock: %w", statErr)
-	}
-
-	ownershipLock = flock.New(lockPath, flock.SetPermissions(0o600))
-	lockContext, cancel := context.WithTimeout(context.Background(), usenetOwnershipLockTimeout)
-	locked, lockErr := ownershipLock.TryLockContext(lockContext, usenetOwnershipRetryDelay)
-	cancel()
-	if lockErr != nil {
-		return "", nil, false, fmt.Errorf("lock NZB ownership root: %w", lockErr)
-	}
-	if !locked {
-		return "", nil, false, fmt.Errorf("lock NZB ownership root: timed out after %s", usenetOwnershipLockTimeout)
-	}
-	info, err := rooted.Lstat(usenetOwnershipLockName)
-	if err != nil {
-		_ = ownershipLock.Unlock()
-		return "", nil, false, fmt.Errorf("inspect locked NZB ownership file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		_ = ownershipLock.Unlock()
-		return "", nil, false, fmt.Errorf("locked NZB ownership path %q is not a regular file", lockPath)
-	}
-	return absoluteRoot, ownershipLock, true, nil
+	return ownership, exists, nil
 }
 
-func quarantineAndRemoveUsenetEntryLocked(absoluteRoot string, entry *storage.Entry, markerOnly bool) error {
+func quarantineAndRemoveUsenetEntryLocked(rooted *os.Root, absoluteRoot string, entry *storage.Entry, markerOnly bool) error {
 	entryPath, err := safeUsenetEntryDownloadPath(absoluteRoot, entry)
 	if err != nil {
 		return err
@@ -440,15 +395,6 @@ func quarantineAndRemoveUsenetEntryLocked(absoluteRoot string, entry *storage.En
 	if err != nil {
 		return fmt.Errorf("make NZB release path relative: %w", err)
 	}
-	rooted, err := os.OpenRoot(absoluteRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("open NZB download root: %w", err)
-	}
-	defer rooted.Close()
-
 	info, err := rooted.Lstat(relativeEntry)
 	visibleExists := err == nil
 	if err != nil {

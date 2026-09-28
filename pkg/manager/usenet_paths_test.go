@@ -482,11 +482,11 @@ func TestRemoveOwnedUsenetEntryCleansMatchingCrashQuarantine(t *testing.T) {
 
 func TestUsenetOwnershipLockTimesOutUnderContention(t *testing.T) {
 	root := t.TempDir()
-	_, first, _, err := acquireUsenetOwnershipLock(root, true)
+	first, _, err := acquireUsenetOwnershipLock(root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Unlock()
+	defer first.close()
 
 	previousTimeout := usenetOwnershipLockTimeout
 	previousDelay := usenetOwnershipRetryDelay
@@ -497,8 +497,8 @@ func TestUsenetOwnershipLockTimesOutUnderContention(t *testing.T) {
 		usenetOwnershipRetryDelay = previousDelay
 	})
 	started := time.Now()
-	if _, second, _, err := acquireUsenetOwnershipLock(root, true); err == nil {
-		_ = second.Unlock()
+	if second, _, err := acquireUsenetOwnershipLock(root, true); err == nil {
+		_ = second.close()
 		t.Fatal("second NZB ownership lock unexpectedly succeeded")
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {

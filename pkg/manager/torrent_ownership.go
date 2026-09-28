@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,7 +17,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gofrs/flock"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -1102,18 +1100,18 @@ func claimTorrentEntryDirectory(downloadRoot string, entry *storage.Entry, proof
 	torrentOwnershipMu.Lock()
 	defer torrentOwnershipMu.Unlock()
 
-	absoluteRoot, ownershipLock, err := acquireTorrentOwnershipLock(downloadRoot)
+	ownership, err := acquireTorrentOwnershipLock(downloadRoot)
 	if err != nil {
 		return "", false, err
 	}
-	entryPath, newlyClaimed, err = claimTorrentEntryDirectoryLocked(absoluteRoot, entry, proof)
-	if unlockErr := ownershipLock.Unlock(); unlockErr != nil && err == nil {
-		err = fmt.Errorf("unlock torrent ownership root: %w", unlockErr)
+	entryPath, newlyClaimed, err = claimTorrentEntryDirectoryLocked(ownership.root, ownership.absolute, entry, proof)
+	if closeErr := ownership.close(); closeErr != nil && err == nil {
+		err = fmt.Errorf("close torrent ownership root: %w", closeErr)
 	}
 	return entryPath, newlyClaimed, err
 }
 
-func claimTorrentEntryDirectoryLocked(absoluteRoot string, entry *storage.Entry, proof torrentLegacyProof) (string, bool, error) {
+func claimTorrentEntryDirectoryLocked(rooted *os.Root, absoluteRoot string, entry *storage.Entry, proof torrentLegacyProof) (string, bool, error) {
 	entryPath, err := safeTorrentEntryDownloadPath(absoluteRoot, entry)
 	if err != nil {
 		return "", false, err
@@ -1126,12 +1124,6 @@ func claimTorrentEntryDirectoryLocked(absoluteRoot string, entry *storage.Entry,
 	if err != nil {
 		return "", false, fmt.Errorf("make torrent release path relative: %w", err)
 	}
-	rooted, err := os.OpenRoot(absoluteRoot)
-	if err != nil {
-		return "", false, fmt.Errorf("open torrent download root: %w", err)
-	}
-	defer rooted.Close()
-
 	if err := recoverTorrentQuarantineForClaim(rooted, relativeEntry, ownerID); err != nil {
 		return "", false, err
 	}
@@ -1664,15 +1656,17 @@ func removeOwnedTorrentEntryDirectory(downloadRoot string, entry *storage.Entry)
 	torrentOwnershipMu.Lock()
 	defer torrentOwnershipMu.Unlock()
 
-	absoluteRoot, ownershipLock, err := acquireTorrentOwnershipLock(downloadRoot)
+	ownership, err := acquireTorrentOwnershipLock(downloadRoot)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if unlockErr := ownershipLock.Unlock(); unlockErr != nil && err == nil {
-			err = fmt.Errorf("unlock torrent ownership root: %w", unlockErr)
+		if closeErr := ownership.close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close torrent ownership root: %w", closeErr)
 		}
 	}()
+	absoluteRoot := ownership.absolute
+	rooted := ownership.root
 
 	entryPath, err := safeTorrentEntryDownloadPath(absoluteRoot, entry)
 	if err != nil {
@@ -1686,15 +1680,6 @@ func removeOwnedTorrentEntryDirectory(downloadRoot string, entry *storage.Entry)
 	if err != nil {
 		return fmt.Errorf("make torrent release path relative: %w", err)
 	}
-	rooted, err := os.OpenRoot(absoluteRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("open torrent download root: %w", err)
-	}
-	defer rooted.Close()
-
 	visibleInfo, visibleErr := rooted.Lstat(relativeEntry)
 	visibleExists := visibleErr == nil
 	if visibleErr != nil && !os.IsNotExist(visibleErr) {
@@ -1956,55 +1941,18 @@ func rejectPortableTorrentSiblingAlias(rooted *os.Root, parent, wanted string) e
 	}
 }
 
-func acquireTorrentOwnershipLock(downloadRoot string) (string, *flock.Flock, error) {
-	absoluteRoot, err := safepath.EnsureRoot(downloadRoot, 0o755)
+func acquireTorrentOwnershipLock(downloadRoot string) (*ownershipRoot, error) {
+	ownership, _, err := acquireOwnershipRoot(
+		downloadRoot,
+		torrentOwnershipLockName,
+		true,
+		torrentOwnershipLockTimeout,
+		25*time.Millisecond,
+	)
 	if err != nil {
-		return "", nil, fmt.Errorf("create torrent download root: %w", err)
+		return nil, fmt.Errorf("acquire torrent ownership root: %w", err)
 	}
-	rooted, _, err := safepath.OpenRoot(absoluteRoot)
-	if err != nil {
-		return "", nil, fmt.Errorf("open torrent ownership root: %w", err)
-	}
-	defer rooted.Close()
-	lockFile, openErr := rooted.OpenFile(torrentOwnershipLockName, os.O_CREATE|os.O_RDWR, 0o600)
-	if openErr == nil {
-		openErr = lockFile.Close()
-	}
-	var lockInfo os.FileInfo
-	if openErr == nil {
-		info, statErr := rooted.Lstat(torrentOwnershipLockName)
-		if statErr != nil {
-			openErr = statErr
-		} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			openErr = fmt.Errorf("torrent ownership lock is not a regular file")
-		} else {
-			lockInfo = info
-		}
-	}
-	if openErr != nil {
-		return "", nil, fmt.Errorf("prepare torrent ownership lock: %w", openErr)
-	}
-
-	lock := flock.New(filepath.Join(absoluteRoot, torrentOwnershipLockName))
-	ctx, cancel := context.WithTimeout(context.Background(), torrentOwnershipLockTimeout)
-	defer cancel()
-	locked, err := lock.TryLockContext(ctx, 25*time.Millisecond)
-	if err != nil {
-		return "", nil, fmt.Errorf("lock torrent ownership root: %w", err)
-	}
-	if !locked {
-		return "", nil, fmt.Errorf("timed out locking torrent ownership root")
-	}
-	lockedInfo, err := rooted.Lstat(torrentOwnershipLockName)
-	if err != nil || lockInfo == nil || !os.SameFile(lockInfo, lockedInfo) ||
-		lockedInfo.Mode()&os.ModeSymlink != 0 || !lockedInfo.Mode().IsRegular() {
-		_ = lock.Unlock()
-		if err != nil {
-			return "", nil, fmt.Errorf("revalidate locked torrent ownership file: %w", err)
-		}
-		return "", nil, fmt.Errorf("torrent ownership lock changed while acquiring")
-	}
-	return absoluteRoot, lock, nil
+	return ownership, nil
 }
 
 func syncTorrentRootDirectory(root *os.Root, relative string) error {

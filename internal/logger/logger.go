@@ -35,13 +35,9 @@ type loggingCore struct {
 
 func GetLogPath() string {
 	logsDir := filepath.Join(config.GetMainPath(), "logs")
-	logsDir, err := safepath.EnsureRoot(logsDir, 0o700)
+	rooted, logsDir, err := safepath.EnsureOpenRoot(logsDir, 0o700)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create logs directory: %v", err))
-	}
-	rooted, _, err := safepath.OpenRoot(logsDir)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to pin logs directory: %v", err))
 	}
 	defer rooted.Close()
 	if err := rooted.Chmod(".", 0o700); err != nil {

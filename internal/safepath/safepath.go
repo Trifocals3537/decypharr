@@ -78,8 +78,7 @@ func JoinIdentifiers(root string, identifiers ...string) (string, error) {
 		return "", err
 	}
 
-	parts := make([]string, 0, len(identifiers)+1)
-	parts = append(parts, absoluteRoot)
+	parts := []string{absoluteRoot}
 	for _, identifier := range identifiers {
 		if err := ValidateIdentifier(identifier); err != nil {
 			return "", err

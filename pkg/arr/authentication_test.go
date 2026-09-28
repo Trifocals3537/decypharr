@@ -1,10 +1,38 @@
 package arr
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/puzpuzpuz/xsync/v4"
 )
+
+func TestConstantTimeStringEqual(t *testing.T) {
+	tests := []struct {
+		name        string
+		left, right string
+		want        bool
+	}{
+		{name: "equal", left: "token", right: "token", want: true},
+		{name: "different", left: "token", right: "other", want: false},
+		{name: "different lengths", left: "token", right: "token-extra", want: false},
+		{name: "empty", left: "", right: "", want: true},
+		{
+			name:  "oversized",
+			left:  strings.Repeat("a", maxCredentialCompareBytes+1),
+			right: strings.Repeat("a", maxCredentialCompareBytes+1),
+			want:  false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := constantTimeStringEqual(test.left, test.right); got != test.want {
+				t.Fatalf("constantTimeStringEqual() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
 
 func TestMatchCredentialsOnlyReturnsConfiguredArrs(t *testing.T) {
 	storage := &Storage{arrs: xsync.NewMap[string, *Arr]()}

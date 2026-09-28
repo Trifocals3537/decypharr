@@ -34,9 +34,13 @@ import (
 //   - Checksum: 4 bytes (CRC32)
 
 const (
-	logMagic      = "HYBR"
-	logVersion    = uint32(3) // v3: added Protocol, Bad, AddedOn
-	logHeaderSize = 16
+	logMagic               = "HYBR"
+	logVersion             = uint32(3) // v3: added Protocol, Bad, AddedOn
+	logHeaderSize          = 16
+	maxLogRecordBytes      = 256 << 20
+	maxLogKeyBytes         = 1 << 20
+	maxUint16EncodedLength = 1<<16 - 1
+	logRecordFixedBytes    = 35
 )
 
 // LogRecord represents a single record in the log
@@ -241,17 +245,21 @@ func (l *appendLog) Append(key string, value []byte, deleted bool, category, pro
 	nameBytes := []byte(name)
 	protocolBytes := []byte(protocol)
 
-	// Calculate total record size
-	recordSize := 4 + len(keyBytes) + // keyLen + key
-		4 + len(value) + // valueLen + value
-		1 + // flags (bit 0 = deleted, bit 1 = bad)
-		2 + len(catBytes) + // categoryLen + category
-		2 + len(provBytes) + // providerLen + provider
-		2 + len(statusBytes) + // statusLen + status
-		2 + len(nameBytes) + // nameLen + name
-		8 + // totalSize
-		2 + len(protocolBytes) + // protocolLen + protocol
-		8 // addedOn
+	recordSize, err := encodedLogRecordSize(
+		len(keyBytes),
+		len(value),
+		len(catBytes),
+		len(provBytes),
+		len(statusBytes),
+		len(nameBytes),
+		len(protocolBytes),
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	if recordSize < logRecordFixedBytes || recordSize > maxLogRecordBytes {
+		return 0, 0, fmt.Errorf("invalid append log record size %d", recordSize)
+	}
 
 	buf := make([]byte, recordSize)
 	pos := 0
@@ -328,8 +336,41 @@ func (l *appendLog) Append(key string, value []byte, deleted bool, category, pro
 	return valueOffset, int32(len(value)), nil
 }
 
+func encodedLogRecordSize(key, value, category, provider, status, name, protocol int) (int, error) {
+	if key < 0 || key > maxLogKeyBytes {
+		return 0, fmt.Errorf("append log key exceeds %d bytes", maxLogKeyBytes)
+	}
+
+	for _, field := range []struct {
+		name   string
+		length int
+	}{
+		{name: "category", length: category},
+		{name: "provider", length: provider},
+		{name: "status", length: status},
+		{name: "name", length: name},
+		{name: "protocol", length: protocol},
+	} {
+		if field.length < 0 || field.length > maxUint16EncodedLength {
+			return 0, fmt.Errorf("append log %s exceeds %d bytes", field.name, maxUint16EncodedLength)
+		}
+	}
+
+	recordSize := logRecordFixedBytes
+	for _, length := range []int{key, value, category, provider, status, name, protocol} {
+		if length < 0 || length > maxLogRecordBytes-recordSize {
+			return 0, fmt.Errorf("append log record exceeds %d bytes", maxLogRecordBytes)
+		}
+		recordSize += length
+	}
+	return recordSize, nil
+}
+
 // ReadAt reads value data at the given offset into a freshly allocated buffer.
 func (l *appendLog) ReadAt(offset int64, size int32) ([]byte, error) {
+	if size < 0 || size > maxLogRecordBytes {
+		return nil, fmt.Errorf("invalid append log read size %d", size)
+	}
 	buf := make([]byte, size)
 	_, err := l.file.ReadAt(buf, offset)
 	if err != nil {
@@ -343,6 +384,9 @@ func (l *appendLog) ReadAt(offset int64, size int32) ([]byte, error) {
 // valid only until buf is next reused — callers that retain the bytes must
 // copy them. Used by scan paths to avoid an allocation per record.
 func (l *appendLog) ReadAtInto(offset int64, size int32, buf []byte) ([]byte, error) {
+	if size < 0 || size > maxLogRecordBytes {
+		return nil, fmt.Errorf("invalid append log read size %d", size)
+	}
 	if cap(buf) < int(size) {
 		buf = make([]byte, size)
 	} else {
@@ -472,7 +516,7 @@ func readRecordFrom(r *bufio.Reader, startPos int64, version uint32, fixed []byt
 	if err != nil {
 		return nil, 0, err
 	}
-	if keyLen > 1024*1024 { // 1MB sanity check
+	if keyLen > maxLogKeyBytes {
 		return nil, 0, fmt.Errorf("invalid key length: %d", keyLen)
 	}
 	key, err := readStr(int(keyLen))

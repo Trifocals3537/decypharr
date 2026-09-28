@@ -41,7 +41,7 @@ class SetupWizard {
 
     async loadExistingConfig() {
         try {
-            const response = await window.decypharrUtils.fetcher('/api/config');
+            const response = await window.tessarrUtils.fetcher('/api/config');
             if (response.ok) {
                 const config = await response.json();
                 this.populateFields(config);
@@ -53,7 +53,7 @@ class SetupWizard {
     }
 
     populateFields(config) {
-		const redactedSecret = '__DECYPHARR_REDACTED__';
+		const redactedSecret = '__TESSARR_REDACTED__';
         // Populate authentication fields
         if (config.auth_username) {
             document.getElementById('auth-username').value = config.auth_username;
@@ -456,7 +456,7 @@ class SetupWizard {
             } else if (this.setupState.step5.mount_type === 'external_rclone') {
                 mountType = 'External Rclone';
             } else if (this.setupState.step5.mount_type === 'dfs') {
-                mountType = 'DFS (Decypharr File System)';
+                mountType = 'DFS (Tessarr File System)';
             }
 			this.renderOverviewLines(mountOverview, [
 				['Type', mountType],
@@ -505,7 +505,7 @@ class SetupWizard {
                 mount: this.setupState.step5,
             };
 
-            const response = await window.decypharrUtils.fetcher('/api/setup/complete', {
+            const response = await window.tessarrUtils.fetcher('/api/setup/complete', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(setupData),
@@ -517,10 +517,10 @@ class SetupWizard {
             }
 
             const data = await response.json();
-            window.decypharrUtils.createToast('Setup completed successfully! Redirecting...', 'success');
+            window.tessarrUtils.createToast('Setup completed successfully! Redirecting...', 'success');
 
             setTimeout(() => {
-                window.location.href = window.decypharrUtils.joinURL(window.urlBase, '/');
+                window.location.href = window.tessarrUtils.joinURL(window.urlBase, '/');
             }, 1500);
 
         } catch (error) {

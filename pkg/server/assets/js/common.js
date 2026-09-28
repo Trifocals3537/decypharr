@@ -1,5 +1,5 @@
 // Common utilities and functions
-class DecypharrUtils {
+class TessarrUtils {
     constructor() {
         this.urlBase = window.urlBase || '';
         this.toastContainer = null;
@@ -422,7 +422,7 @@ class DecypharrUtils {
                 } else {
                     const releaseLink = document.createElement('a');
                     releaseLink.href =
-                        `https://github.com/Trifocals3537/decypharr/releases/tag/v${encodeURIComponent(version)}`;
+                        `https://github.com/Trifocals3537/tessarr/releases/tag/v${encodeURIComponent(version)}`;
                     releaseLink.target = '_blank';
                     releaseLink.rel = 'noopener noreferrer';
                     releaseLink.className =
@@ -747,13 +747,13 @@ class DecypharrUtils {
 }
 
 // Initialize utilities
-window.decypharrUtils = new DecypharrUtils();
+window.tessarrUtils = new TessarrUtils();
 
 // Global functions for backward compatibility
-window.fetcher = (endpoint, options = {}) => window.decypharrUtils.fetcher(endpoint, options);
-window.createToast = (message, type, duration) => window.decypharrUtils.createToast(message, type, duration);
+window.fetcher = (endpoint, options = {}) => window.tessarrUtils.fetcher(endpoint, options);
+window.createToast = (message, type, duration) => window.tessarrUtils.createToast(message, type, duration);
 
 // Export for ES6 modules if needed
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = DecypharrUtils;
+    module.exports = TessarrUtils;
 }

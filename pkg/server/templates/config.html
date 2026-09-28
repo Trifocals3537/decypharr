@@ -807,7 +807,7 @@
                                     <input type="radio" class="radio radio-primary" name="mount.type" value="dfs"
                                            id="mount.type.dfs" checked>
                                     <div>
-                                        <span class="font-medium">DFS (Decypharr Filesystem)</span>
+                                        <span class="font-medium">DFS (Tessarr Filesystem)</span>
                                         <div class="label-text-alt">Built-in filesystem implementation</div>
                                     </div>
                                 </label>
@@ -1401,7 +1401,7 @@
                                 </label>
                                 <input type="text" class="input w-full strm-setting" name="strm.path" id="strm.path"
                                        placeholder="/home/user/media-strm">
-                                <span class="label-text-alt opacity-70">Use a dedicated folder. Decypharr refuses to
+                                <span class="label-text-alt opacity-70">Use a dedicated folder. Tessarr refuses to
                                     take ownership of a non-empty, unrecognized folder and preserves foreign files.</span>
                             </div>
 
@@ -1411,7 +1411,7 @@
                                 </label>
                                 <select class="select w-full strm-setting" name="strm.delivery_mode"
                                         id="strm.delivery_mode">
-                                    <option value="proxy">Proxy through Decypharr (recommended)</option>
+                                    <option value="proxy">Proxy through Tessarr (recommended)</option>
                                     <option value="redirect">Redirect to provider when possible</option>
                                 </select>
                                 <span class="label-text-alt opacity-70">Proxy supports both debrid and Usenet and keeps
@@ -1436,7 +1436,7 @@
                                 <h3 class="card-title text-base">Reachability</h3>
                                 <p class="text-sm opacity-80">The General tab's Application URL is written into each
                                     .strm file. Leave it blank only when the player runs on this same host and can reach
-                                    Decypharr on loopback.</p>
+                                    Tessarr on loopback.</p>
                                 <div class="card-actions justify-end">
                                     <button type="button" class="btn btn-outline btn-primary strm-setting"
                                             id="strmRegenerateBtn">
@@ -1778,10 +1778,10 @@
         const tokenDisplay = document.getElementById('api-token-display');
 
         // Show loading state
-        window.decypharrUtils.setButtonLoading(refreshBtn, true, 'Refresh Token');
+        window.tessarrUtils.setButtonLoading(refreshBtn, true, 'Refresh Token');
 
         try {
-            const response = await window.decypharrUtils.fetcher('/api/refresh-token', {
+            const response = await window.tessarrUtils.fetcher('/api/refresh-token', {
                 method: 'POST'
             });
 
@@ -1793,13 +1793,13 @@
             tokenDisplay.value = data.token;
 			tokenDisplay.dataset.tokenAvailable = 'true';
 			document.getElementById('copy-token-btn').disabled = false;
-            window.decypharrUtils.createToast(data.message || 'Token refreshed successfully', 'success');
+            window.tessarrUtils.createToast(data.message || 'Token refreshed successfully', 'success');
 
         } catch (error) {
             console.error('Error refreshing token:', error);
-            window.decypharrUtils.createToast('Failed to refresh token: ' + error.message, 'error');
+            window.tessarrUtils.createToast('Failed to refresh token: ' + error.message, 'error');
         } finally {
-            window.decypharrUtils.setButtonLoading(refreshBtn, false);
+            window.tessarrUtils.setButtonLoading(refreshBtn, false);
         }
     }
 
@@ -1808,15 +1808,15 @@
         const token = tokenDisplay.value;
 
 		if (!token || tokenDisplay.dataset.tokenAvailable !== 'true') {
-            window.decypharrUtils.createToast('No token to copy. Please refresh the token first.', 'warning');
+            window.tessarrUtils.createToast('No token to copy. Please refresh the token first.', 'warning');
             return;
         }
 
         try {
-            await window.decypharrUtils.copyToClipboard(token);
+            await window.tessarrUtils.copyToClipboard(token);
         } catch (error) {
             console.error('Failed to copy token:', error);
-            window.decypharrUtils.createToast('Failed to copy token to clipboard', 'error');
+            window.tessarrUtils.createToast('Failed to copy token to clipboard', 'error');
         }
     }
 
@@ -1827,15 +1827,15 @@
         const updateBtn = document.getElementById('update-auth-btn');
 
         if (password !== confirmPassword) {
-            window.decypharrUtils.createToast('Passwords do not match', 'error');
+            window.tessarrUtils.createToast('Passwords do not match', 'error');
             return false;
         }
 
         // Show loading state
-        window.decypharrUtils.setButtonLoading(updateBtn, true, 'Update Authentication');
+        window.tessarrUtils.setButtonLoading(updateBtn, true, 'Update Authentication');
 
         try {
-            const response = await window.decypharrUtils.fetcher('/api/update-auth', {
+            const response = await window.tessarrUtils.fetcher('/api/update-auth', {
                 method: 'POST',
                 body: JSON.stringify({
                     username: username,
@@ -1850,7 +1850,7 @@
             }
 
             const data = await response.json();
-            window.decypharrUtils.createToast(data.message, 'success');
+            window.tessarrUtils.createToast(data.message, 'success');
 
             // Clear password fields for security
             document.getElementById('auth-password').value = '';
@@ -1860,10 +1860,10 @@
 
         } catch (error) {
             console.error('Error updating auth settings:', error);
-            window.decypharrUtils.createToast('Failed to update authentication: ' + error.message, 'error');
+            window.tessarrUtils.createToast('Failed to update authentication: ' + error.message, 'error');
             return false;
         } finally {
-            window.decypharrUtils.setButtonLoading(updateBtn, false);
+            window.tessarrUtils.setButtonLoading(updateBtn, false);
         }
     }
 </script>

@@ -1,4 +1,4 @@
-// Configuration management for Decypharr
+// Configuration management for Tessarr
 class ConfigManager {
     constructor() {
         this.debridCount = 0;
@@ -7,7 +7,7 @@ class ConfigManager {
         this.debridDirectoryCounts = {};
         this.directoryFilterCounts = {};
         this.virtualFolderCount = 0;
-        this.redactedSecret = '__DECYPHARR_REDACTED__';
+        this.redactedSecret = '__TESSARR_REDACTED__';
 
         this.refs = {
             configForm: document.getElementById('configForm'),
@@ -36,7 +36,7 @@ class ConfigManager {
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('inco')) {
             const errMsg = urlParams.get('inco');
-            window.decypharrUtils.createToast(`Incomplete configuration: ${errMsg}`, 'warning');
+            window.tessarrUtils.createToast(`Incomplete configuration: ${errMsg}`, 'warning');
         }
     }
 
@@ -89,7 +89,7 @@ class ConfigManager {
 
     async loadConfiguration() {
         try {
-            const response = await window.decypharrUtils.fetcher('/api/config');
+            const response = await window.tessarrUtils.fetcher('/api/config');
             if (!response.ok) {
                 throw new Error('Failed to load configuration');
             }
@@ -99,7 +99,7 @@ class ConfigManager {
 
         } catch (error) {
             console.error('Error loading configuration:', error);
-            window.decypharrUtils.createToast('Error loading configuration', 'error');
+            window.tessarrUtils.createToast('Error loading configuration', 'error');
         }
     }
 
@@ -179,11 +179,11 @@ class ConfigManager {
 		const button = document.getElementById('strmRegenerateBtn');
 		if (button) button.disabled = true;
 		try {
-			const response = await window.decypharrUtils.fetcher('/api/strm/regenerate', {method: 'POST'});
+			const response = await window.tessarrUtils.fetcher('/api/strm/regenerate', {method: 'POST'});
 			if (!response.ok) throw new Error((await response.text()) || 'Could not start regeneration');
-			window.decypharrUtils.createToast('STRM library regeneration started.', 'success');
+			window.tessarrUtils.createToast('STRM library regeneration started.', 'success');
 		} catch (error) {
-			window.decypharrUtils.createToast(`STRM regeneration failed: ${error.message}`, 'error');
+			window.tessarrUtils.createToast(`STRM regeneration failed: ${error.message}`, 'error');
 		} finally {
 			if (button) button.disabled = !document.getElementById('strm.enabled')?.checked;
 		}
@@ -614,7 +614,7 @@ class ConfigManager {
                                 </label>
                                 <input type="text" class="input w-full" 
                                        name="debrid[${index}].user_agent" id="debrid[${index}].user_agent" 
-                                       placeholder="Decypharr/1.0">
+                                       placeholder="Tessarr/1.0">
                                 <span class="text-sm opacity-70">Custom User Agent for this debrid</span>
                             </div>
                             <div>
@@ -822,7 +822,7 @@ class ConfigManager {
 
     getFilterTemplate(debridIndex, dirIndex, filterIndex, filterType) {
         const filterConfig = this.getFilterConfig(filterType);
-		const escape = window.decypharrUtils.escapeHtml;
+		const escape = window.tessarrUtils.escapeHtml;
 
         return `
             <div class="filter-item flex items-center gap-3 p-3 bg-base-100 rounded-lg border border-base-300">
@@ -992,7 +992,7 @@ class ConfigManager {
         });
 
         // Generate option elements
-        return debridNames.map(name => `<option value="${window.decypharrUtils.escapeHtml(name)}">${window.decypharrUtils.escapeHtml(name)}</option>`).join('');
+        return debridNames.map(name => `<option value="${window.tessarrUtils.escapeHtml(name)}">${window.tessarrUtils.escapeHtml(name)}</option>`).join('');
     }
 
     updateArrDebridDropdowns() {
@@ -1071,7 +1071,7 @@ class ConfigManager {
                         ` : ''}
                     </div>
 
-                    <input type="hidden" name="arr[${index}].source" value="${window.decypharrUtils.escapeHtml(data.source || '')}">
+                    <input type="hidden" name="arr[${index}].source" value="${window.tessarrUtils.escapeHtml(data.source || '')}">
 
                     <div class="grid grid-cols-1 gap-3">
                         <div>
@@ -1163,7 +1163,7 @@ class ConfigManager {
                 throw new Error(validation.errors.join('\n'));
             }
 
-            const response = await window.decypharrUtils.fetcher('/api/config', {
+            const response = await window.tessarrUtils.fetcher('/api/config', {
                 method: 'PATCH',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(config)
@@ -1183,20 +1183,20 @@ class ConfigManager {
             }
 
             if (restarted) {
-                window.decypharrUtils.createToast('Configuration saved successfully! Services are restarting...', 'success');
+                window.tessarrUtils.createToast('Configuration saved successfully! Services are restarting...', 'success');
                 // Reload page after a delay to allow services to restart
                 setTimeout(() => {
                     window.location.reload();
                 }, 2000);
             } else {
                 // Applied live — no restart, no disruptive reload.
-                window.decypharrUtils.createToast('Configuration saved and applied.', 'success');
+                window.tessarrUtils.createToast('Configuration saved and applied.', 'success');
                 this.refs.loadingOverlay.classList.add('hidden');
             }
 
         } catch (error) {
             console.error('Error saving configuration:', error);
-            window.decypharrUtils.createToast(`Error saving configuration: ${error.message}`, 'error');
+            window.tessarrUtils.createToast(`Error saving configuration: ${error.message}`, 'error');
             this.refs.loadingOverlay.classList.add('hidden');
         }
     }
@@ -1506,7 +1506,7 @@ class ConfigManager {
             }
         });
 
-        const esc = window.decypharrUtils.escapeHtml;
+        const esc = window.tessarrUtils.escapeHtml;
         catalogEl.innerHTML = this.queueCleanupCatalog.map(c => {
             const action = c.id in savedActions ? savedActions[c.id] : '';
             return `
@@ -1525,7 +1525,7 @@ class ConfigManager {
     addQueueCleanupCustomRow(match = '', action = '') {
         const customEl = document.getElementById('queueCleanupCustom');
         if (!customEl) return;
-        const esc = window.decypharrUtils.escapeHtml;
+        const esc = window.tessarrUtils.escapeHtml;
         const row = document.createElement('div');
         row.className = 'grid grid-cols-1 md:grid-cols-12 gap-2 queue-cleanup-custom-row';
         row.innerHTML = `
@@ -1663,7 +1663,7 @@ class ConfigManager {
                     navigator.registerProtocolHandler(
                         'magnet',
                         `${window.location.origin}${window.urlBase}download?magnet=%s`,
-                        'Decypharr'
+                        'Tessarr'
                     );
                     localStorage.setItem('magnetHandler', 'true');
                     const btn = document.getElementById('registerMagnetLink');
@@ -1671,13 +1671,13 @@ class ConfigManager {
                     btn.classList.remove('btn-primary');
                     btn.classList.add('btn-success');
                     btn.disabled = true;
-                    window.decypharrUtils.createToast('Magnet link handler registered successfully');
+                    window.tessarrUtils.createToast('Magnet link handler registered successfully');
                 } catch (error) {
                     console.error('Failed to register magnet link handler:', error);
-                    window.decypharrUtils.createToast('Failed to register magnet link handler', 'error');
+                    window.tessarrUtils.createToast('Failed to register magnet link handler', 'error');
                 }
             } else {
-                window.decypharrUtils.createToast('Magnet link registration not supported in this browser', 'warning');
+                window.tessarrUtils.createToast('Magnet link registration not supported in this browser', 'warning');
             }
         };
 
@@ -1740,7 +1740,7 @@ class ConfigManager {
                             <input type="text"
                                    class="input input-bordered w-full"
                                    name="virtual_folder_${id}_name"
-                                   value="${window.decypharrUtils.escapeHtml(folderName)}"
+                                   value="${window.tessarrUtils.escapeHtml(folderName)}"
                                    placeholder="e.g., Movies, TV Shows, 4K"
                                    required>
                             <span class="text-sm opacity-70">This folder will appear in your mount</span>
@@ -1759,12 +1759,12 @@ class ConfigManager {
                                         <input type="text"
                                                class="input input-bordered input-sm flex-1"
                                                name="virtual_folder_${id}_filter_key_${index}"
-                                               value="${window.decypharrUtils.escapeHtml(key)}"
+                                               value="${window.tessarrUtils.escapeHtml(key)}"
                                                placeholder="Filter key (e.g., name, category)">
                                         <input type="text"
                                                class="input input-bordered input-sm flex-1"
                                                name="virtual_folder_${id}_filter_value_${index}"
-                                               value="${window.decypharrUtils.escapeHtml(value)}"
+                                               value="${window.tessarrUtils.escapeHtml(value)}"
                                                placeholder="Filter value (e.g., *movie*, tv)">
                                         <button type="button" class="btn btn-sm btn-ghost btn-circle" onclick="configManager.removeVirtualFolderFilter(${id}, ${index});">
                                             <i class="bi bi-trash"></i>

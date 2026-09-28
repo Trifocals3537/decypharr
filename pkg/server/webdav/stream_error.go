@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
 )
 
 func normalizeStreamError(err error, headersWritten bool) *customerror.Error {

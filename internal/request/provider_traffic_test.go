@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/providertraffic"
+	"github.com/Trifocals3537/tessarr/internal/providertraffic"
 )
 
 type providerRoundTripFunc func(*http.Request) (*http.Response, error)

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestNewManagerPropagatesUnsafeConfigDirectory(t *testing.T) {

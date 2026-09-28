@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 )
 
 func TestMainEntryDeleteKeepsFolderServedByRemainingEntry(t *testing.T) {

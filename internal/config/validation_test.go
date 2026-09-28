@@ -302,7 +302,7 @@ func TestSetDefaultsBoundsJobQueueCapacity(t *testing.T) {
 }
 
 func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
-	t.Setenv("DECYPHARR_JOB_QUEUE_CAPACITY", "73")
+	t.Setenv("TESSARR_JOB_QUEUE_CAPACITY", "73")
 	cfg := &Config{}
 	cfg.applyEnvOverrides()
 	if cfg.JobQueueCapacity != 73 {
@@ -311,7 +311,7 @@ func TestJobQueueCapacityEnvironmentOverride(t *testing.T) {
 }
 
 func TestRelativeSymlinksEnvironmentOverride(t *testing.T) {
-	t.Setenv("DECYPHARR_RELATIVE_SYMLINKS", "true")
+	t.Setenv("TESSARR_RELATIVE_SYMLINKS", "true")
 	cfg := &Config{}
 	cfg.applyEnvOverrides()
 	if !cfg.RelativeSymlinks {
@@ -326,7 +326,7 @@ func TestFirstLoadAppliesBindAddressEnvironmentOverride(t *testing.T) {
 	t.Cleanup(func() {
 		SetConfigPath(previousPath)
 	})
-	t.Setenv("DECYPHARR_BIND_ADDRESS", "0.0.0.0")
+	t.Setenv("TESSARR_BIND_ADDRESS", "0.0.0.0")
 
 	cfg := &Config{}
 	if err := cfg.loadConfig(); err != nil {

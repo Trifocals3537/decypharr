@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 const (
-	compactionCrashPathEnv  = "DECYPHARR_COMPACTION_CRASH_PATH"
-	compactionCrashPhaseEnv = "DECYPHARR_COMPACTION_CRASH_PHASE"
+	compactionCrashPathEnv  = "TESSARR_COMPACTION_CRASH_PATH"
+	compactionCrashPhaseEnv = "TESSARR_COMPACTION_CRASH_PHASE"
 	compactionCrashExitCode = 91
 )
 

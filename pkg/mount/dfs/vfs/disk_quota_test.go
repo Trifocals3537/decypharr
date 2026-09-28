@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/buffer"
+	fuseconfig "github.com/Trifocals3537/tessarr/pkg/mount/dfs/config"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/vfs/ranges"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/buffer"
-	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
 func TestDiskQuotaConcurrentReservationsNeverExceedLimit(t *testing.T) {

@@ -11,13 +11,15 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
-	usenetLegacyAdoptionCheckpointName = ".decypharr-nzb-legacy-adoption-v1.done"
+	usenetLegacyAdoptionCheckpointName = ".tessarr-nzb-legacy-adoption-v1.done"
+	// Marker payloads are durable schema identifiers; the migration renames the
+	// file without invalidating already completed adoption work.
 	usenetLegacyAdoptionCheckpointData = "decypharr NZB legacy ownership adoption v1\n"
 	usenetLegacyAdoptionMaxFiles       = 100_000
 )

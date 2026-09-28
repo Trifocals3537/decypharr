@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/request"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/request"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 func TestCheckStatusRestartsCodeSevenWithBoundedCooldown(t *testing.T) {

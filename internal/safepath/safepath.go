@@ -16,7 +16,7 @@ import (
 
 const (
 	// PortableIdentifierMaxBytes is a conservative component limit that is
-	// accepted by the filesystems Decypharr supports. Counting UTF-8 bytes is
+	// accepted by the filesystems Tessarr supports. Counting UTF-8 bytes is
 	// also conservative for Windows UTF-16 component limits.
 	PortableIdentifierMaxBytes      = 255
 	compactIdentifierDigestHexBytes = sha256.Size * 2

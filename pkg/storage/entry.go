@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 	"github.com/google/uuid"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
 	"google.golang.org/protobuf/proto"
 )
 

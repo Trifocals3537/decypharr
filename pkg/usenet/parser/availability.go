@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 )
 
 // ErrNZBArticlesUnavailable identifies an NZB whose required probe articles

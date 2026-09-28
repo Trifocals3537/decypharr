@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	strmurl "github.com/Trifocals3537/tessarr/pkg/strm"
 )
 
 const managerTestStrmSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -127,7 +127,7 @@ func newStrmSweepManager(t *testing.T) (*Manager, *config.Config) {
 		}
 	})
 	cfg := config.Get()
-	cfg.AppURL = "https://media.example/decypharr"
+	cfg.AppURL = "https://media.example/tessarr"
 	cfg.Strm = config.Strm{
 		Enabled: true,
 		Path:    filepath.Join(t.TempDir(), "library"),

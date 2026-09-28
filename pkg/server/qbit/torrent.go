@@ -7,11 +7,11 @@ import (
 	"mime/multipart"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 // All torrent-related helpers goes here
@@ -121,8 +121,8 @@ func (q *QBit) RefreshTorrent(t *storage.Entry) bool {
 func (q *QBit) GetTorrentProperties(t *storage.Entry) *TorrentProperties {
 	return &TorrentProperties{
 		AdditionDate:       t.AddedOn.Unix(),
-		Comment:            "Provider Blackhole <https://github.com/sirrobot01/decypharr>",
-		CreatedBy:          "Provider Blackhole <https://github.com/sirrobot01/decypharr>",
+		Comment:            "Provider Blackhole <https://github.com/Trifocals3537/tessarr>",
+		CreatedBy:          "Provider Blackhole <https://github.com/Trifocals3537/tessarr>",
 		CreationDate:       t.AddedOn.Unix(),
 		DlLimit:            -1,
 		UpLimit:            -1,

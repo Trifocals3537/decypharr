@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 )
 
 const (

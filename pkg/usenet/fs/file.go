@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/usenet/fs/reader"
+	"github.com/Trifocals3537/tessarr/pkg/usenet/types"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
-	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
 type File struct {

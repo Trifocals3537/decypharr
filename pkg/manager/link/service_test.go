@@ -14,14 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/account"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/pkg/debrid/account"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 	"golang.org/x/sync/singleflight"
 )
 

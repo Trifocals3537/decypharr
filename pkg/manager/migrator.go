@@ -13,11 +13,11 @@ import (
 
 	json "github.com/bytedance/sonic"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 const (

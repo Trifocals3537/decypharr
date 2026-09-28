@@ -8,20 +8,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func TestCheckFileDoesNotSendAPICredentialToSignedURL(t *testing.T) {
 	provider := newDebridLinkTestProvider(t, config.Debrid{
 		Name:      "debridlink",
 		APIKey:    "main-token",
-		UserAgent: "Decypharr-Test",
+		UserAgent: "Tessarr-Test",
 	}, func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("Authorization = %q, want no API credential on signed URL", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != "Decypharr-Test" {
+		if got := r.Header.Get("User-Agent"); got != "Tessarr-Test" {
 			t.Errorf("User-Agent = %q, want configured non-secret header", got)
 		}
 		if got := r.Header.Get("Range"); got != "bytes=0-0" {
@@ -40,7 +40,7 @@ func TestSpeedTestKeepsCredentialsOnAPIAndOffSignedURL(t *testing.T) {
 		Name:            "debridlink",
 		APIKey:          "main-token",
 		DownloadAPIKeys: []string{"download-token"},
-		UserAgent:       "Decypharr-Test",
+		UserAgent:       "Tessarr-Test",
 	}, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/account/infos":
@@ -52,7 +52,7 @@ func TestSpeedTestKeepsCredentialsOnAPIAndOffSignedURL(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "" {
 				t.Errorf("signed URL Authorization = %q, want no provider credential", got)
 			}
-			if got := r.Header.Get("User-Agent"); got != "Decypharr-Test" {
+			if got := r.Header.Get("User-Agent"); got != "Tessarr-Test" {
 				t.Errorf("User-Agent = %q, want configured non-secret header", got)
 			}
 			if got := r.Header.Get("Range"); got != "bytes=0-1048575" {

@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 // policyTestMagnet returns the minimal magnet accepted by import validation.

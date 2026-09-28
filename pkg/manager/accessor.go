@@ -3,13 +3,13 @@ package manager
 import (
 	"context"
 
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
 func (m *Manager) SetMountManager(mountMgr MountManager) {

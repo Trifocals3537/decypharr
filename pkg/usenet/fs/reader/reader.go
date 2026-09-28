@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Trifocals3537/tessarr/internal/crypto"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/crypto"
-	"github.com/sirrobot01/decypharr/internal/nntp"
 )
 
 type decryptionBuffer struct {

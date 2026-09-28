@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
@@ -146,7 +146,7 @@ func uncachedTransferStalled(
 
 // handoffUncachedFailures asks the owning Arr to remove exactly one confirmed
 // failed download, blocklist that release, and re-search. It runs outside the per-entry
-// worker lease: the Arr synchronously calls Decypharr's qBittorrent delete API,
+// worker lease: the Arr synchronously calls Tessarr's qBittorrent delete API,
 // which can then drain the old worker and durably clean the provider placement.
 // A persisted stalledDL row makes the handoff restart-safe and naturally
 // retryable until the Arr acknowledges it.

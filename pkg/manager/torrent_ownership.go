@@ -17,17 +17,17 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
-	torrentOwnerMarkerName      = ".decypharr-torrent-owner-v1"
-	torrentOwnershipLockName    = ".decypharr-torrent-ownership.lock"
-	torrentQuarantinePrefix     = ".decypharr-torrent-quarantine-"
-	torrentPartialPrefix        = ".decypharr-torrent-part-"
+	torrentOwnerMarkerName      = ".tessarr-torrent-owner-v1"
+	torrentOwnershipLockName    = ".tessarr-torrent-ownership.lock"
+	torrentQuarantinePrefix     = ".tessarr-torrent-quarantine-"
+	torrentPartialPrefix        = ".tessarr-torrent-part-"
 	torrentOwnerMarkerMaxBytes  = 256
 	torrentOwnershipMaxEntries  = 100_000
 	torrentOwnershipReadBatch   = 256

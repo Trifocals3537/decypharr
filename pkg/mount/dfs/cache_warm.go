@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/vfs"
 )
 
 var _ manager.CacheWarmOpener = (*Manager)(nil)
@@ -43,7 +43,7 @@ func (f *cacheWarmStreamFile) Close() error {
 	return f.err
 }
 
-// OpenCacheWarmFile resolves a Decypharr-created symlink or direct mount path
+// OpenCacheWarmFile resolves a Tessarr-created symlink or direct mount path
 // to stored entry metadata, then opens a DFS streaming handle directly. It
 // must not follow the symlink with os.Open/os.Stat because those calls enter
 // FUSE and can block past the import worker's context deadline.

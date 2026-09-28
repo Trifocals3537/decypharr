@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +89,7 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		if cfg.NeedsAuth() && !isLoopbackBindAddress(cfg.BindAddress) {
 			http.Error(
 				w,
-				"Remote registration is disabled; run decypharr --config PATH --set-auth USERNAME from the host",
+				"Remote registration is disabled; run tessarr --config PATH --set-auth USERNAME from the host",
 				http.StatusForbidden,
 			)
 			return

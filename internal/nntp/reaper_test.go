@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 func newPipeConnection(t *testing.T, respond bool) *Connection {

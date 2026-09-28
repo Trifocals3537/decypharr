@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func (s *Server) sessionAuthenticated(r *http.Request) bool {

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/buffer"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/buffer"
 )
 
 func TestPoolsAreScopedToOneServiceRun(t *testing.T) {

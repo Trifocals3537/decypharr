@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 // requestBody positions the shared reader at a dot-terminated article body.

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 // Callbacks simulate article responses without contacting real providers. Keep

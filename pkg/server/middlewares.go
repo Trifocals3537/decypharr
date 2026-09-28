@@ -8,7 +8,7 @@ import (
 
 	json "github.com/bytedance/sonic"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func (s *Server) clientNetworkMiddleware(next http.Handler) http.Handler {

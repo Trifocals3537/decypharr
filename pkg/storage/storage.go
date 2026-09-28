@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
 	"google.golang.org/protobuf/proto"
 )
 

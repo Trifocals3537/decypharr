@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/testutil"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/testutil"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 func testTorrentSource(t *testing.T) ([]byte, *utils.Magnet) {

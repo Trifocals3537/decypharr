@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 // NewTorrentOutputName is used only when admitting new torrent work. The

@@ -1,9 +1,9 @@
 package stats
 
 import (
-	"github.com/sirrobot01/decypharr/internal/cdntraffic"
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/internal/cdntraffic"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
 )
 
 // Snapshot holds a point-in-time stats snapshot.

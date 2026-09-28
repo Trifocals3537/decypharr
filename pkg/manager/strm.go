@@ -16,16 +16,16 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	strmurl "github.com/Trifocals3537/tessarr/pkg/strm"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	strmurl "github.com/sirrobot01/decypharr/pkg/strm"
 )
 
 const (
-	strmRootMarker  = ".decypharr-strm-root"
-	strmEntryMarker = ".decypharr-strm-entry"
+	strmRootMarker  = ".tessarr-strm-root"
+	strmEntryMarker = ".tessarr-strm-entry"
 	maxStrmRead     = 4096
 	maxStrmWalk     = 250000
 )
@@ -88,6 +88,8 @@ func (r *StrmReport) addError(err error) {
 }
 
 func strmKeyFingerprint(secret string) string {
+	// The legacy domain is a stable on-disk signature namespace. The migration
+	// renames its marker but deliberately keeps the signature valid.
 	sum := sha256.Sum256([]byte("decypharr-strm-root\x00" + secret))
 	return hex.EncodeToString(sum[:])
 }
@@ -112,7 +114,7 @@ func (s *Strm) ensureRoot(cfg *config.Config) (string, error) {
 			return "", fmt.Errorf("inspect STRM root: %w", readErr)
 		}
 		if len(children) != 0 {
-			return "", fmt.Errorf("STRM root %q is non-empty and is not owned by Decypharr", root)
+			return "", fmt.Errorf("STRM root %q is non-empty and is not owned by Tessarr", root)
 		}
 		state := strmRootState{Version: 1, KeyFingerprint: strmKeyFingerprint(cfg.Strm.Secret)}
 		encoded, marshalErr := json.Marshal(state)
@@ -719,7 +721,7 @@ func atomicWrite(root, target string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	temporary := filepath.Join(parent, ".decypharr-strm-"+id+".tmp")
+	temporary := filepath.Join(parent, ".tessarr-strm-"+id+".tmp")
 	file, err := safepath.OpenFile(root, temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err

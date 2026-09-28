@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/cdntraffic"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/internal/cdntraffic"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func (m *Manager) withCDNIdentity(ctx context.Context, link debridTypes.DownloadLink, fallbackProvider string) context.Context {

@@ -15,14 +15,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/backend"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/config"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/vfs"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/backend"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
 )
 
 const (
@@ -74,15 +74,15 @@ func NewBackend(vfs *vfs.Manager, config *config.FuseConfig) (backend.Backend, e
 
 func (b *Backend) mountOptions() fuse.MountOptions {
 	return fuse.MountOptions{
-		FsName:               "decypharr",
+		FsName:               "tessarr",
 		Debug:                false,
-		Name:                 "decypharr",
+		Name:                 "tessarr",
 		DisableXAttrs:        true,
 		IgnoreSecurityLabels: true,
 		MaxWrite:             1024 * 1024,
 		AllowOther:           true,
 		// Keep one bad handler request from taking down the mount, while routing
-		// the panic and stack through Decypharr's normal structured logs.
+		// the panic and stack through Tessarr's normal structured logs.
 		PanicHandler: func(p any) fuse.Status {
 			b.logger.Error().Any("panic", p).Bytes("stack", debug.Stack()).Msg("FUSE handler panic")
 			return fuse.EIO
@@ -144,7 +144,7 @@ func (b *Backend) Mount(ctx context.Context) error {
 	opt = append(opt, "default_permissions")
 
 	if runtime.GOOS == "darwin" {
-		opt = append(opt, "volname=decypharr")
+		opt = append(opt, "volname=tessarr")
 		opt = append(opt, "noapplexattr")
 		opt = append(opt, "noappledouble")
 	}

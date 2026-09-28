@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestTorrentFileLayoutsPreserveUnambiguousNestedDuplicateBasenames(t *testing.T) {

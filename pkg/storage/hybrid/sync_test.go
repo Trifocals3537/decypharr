@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func TestSyncIntervalZeroWritesAndDeletesAreImmediatelyRecoverable(t *testing.T) {

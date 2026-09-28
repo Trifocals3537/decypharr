@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/Trifocals3537/tessarr/internal/request"
 )
 
 // RepairFile is an immutable Arr-side binding, captured before deletion.

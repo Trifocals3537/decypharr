@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 func TestMainEntryDeleteRejectsConcurrentAndStaleMutations(t *testing.T) {

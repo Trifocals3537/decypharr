@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/google/uuid"
-	"github.com/sirrobot01/decypharr/internal/safepath"
 )
 
 type metadataRemovalLock struct {
@@ -77,7 +77,7 @@ const (
 	nzbMetaV2TempSuffix metadataFileSuffix = ".meta.v2tmp"
 )
 
-// canonicalNZBID accepts only the canonical UUID form produced by Decypharr.
+// canonicalNZBID accepts only the canonical UUID form produced by Tessarr.
 // Keeping the identifier fixed-width also bounds every derived filename.
 func canonicalNZBID(id string) (string, error) {
 	parsed, err := uuid.Parse(id)

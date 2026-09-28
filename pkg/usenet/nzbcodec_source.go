@@ -3,7 +3,7 @@ package usenet
 import (
 	"fmt"
 
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 // Optional v2 numeric-region suffix. Existing v2 records end before this tag;

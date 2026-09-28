@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage/hybrid"
 )
 
 func TestRepairRecoveryIntentIsImmediatelyDurable(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 func TestMain(m *testing.M) {

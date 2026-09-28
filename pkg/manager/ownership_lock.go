@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/filelock"
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/filelock"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // ownershipRoot keeps the validated directory capability and advisory lock

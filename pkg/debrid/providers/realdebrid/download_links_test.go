@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func TestResolveRealDebridFileDownloadLinksBoundsConcurrency(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
 )
 
 func TestLivenessAndReadinessHandlers(t *testing.T) {

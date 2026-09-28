@@ -7,7 +7,7 @@ import (
 	"hash/crc32"
 	"testing"
 
-	streamreader "github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
+	streamreader "github.com/Trifocals3537/tessarr/pkg/usenet/fs/reader"
 )
 
 func emptyMemberFixture(version int, name string, payload []byte, unpacked int) []byte {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/sirrobot01/decypharr/internal/migration"
+	"github.com/Trifocals3537/tessarr/internal/migration"
 )
 
 func runLegacyMigration(args []string, stdout, stderr io.Writer) error {

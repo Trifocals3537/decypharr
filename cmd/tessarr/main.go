@@ -1,4 +1,4 @@
-package decypharr
+package tessarr
 
 import (
 	"context"
@@ -9,15 +9,15 @@ import (
 	"runtime/debug"
 	"strconv"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs"
-	"github.com/sirrobot01/decypharr/pkg/mount/external"
-	"github.com/sirrobot01/decypharr/pkg/mount/rclone"
-	"github.com/sirrobot01/decypharr/pkg/server"
-	"github.com/sirrobot01/decypharr/pkg/version"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs"
+	"github.com/Trifocals3537/tessarr/pkg/mount/external"
+	"github.com/Trifocals3537/tessarr/pkg/mount/rclone"
+	"github.com/Trifocals3537/tessarr/pkg/server"
+	"github.com/Trifocals3537/tessarr/pkg/version"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -150,12 +150,12 @@ func Start(ctx context.Context) error {
 				return fmt.Errorf("services did not stop cleanly: %w", err)
 			}
 			shutdownFunc() // cleanup all resources including mounts
-			_log.Info().Msg("Decypharr has been stopped gracefully.")
+			_log.Info().Msg("Tessarr has been stopped gracefully.")
 			return nil
 
 		case <-restartCh:
 			cancelSvc() // tell existing services to shut down
-			_log.Info().Msg("Restarting Decypharr...")
+			_log.Info().Msg("Restarting Tessarr...")
 			restarted, err := finishRestart(ctx, serviceDone, resetFunc, shutdownFunc)
 			if err != nil {
 				_, rollbackErr := config.RollbackApplyingRestart()
@@ -168,7 +168,7 @@ func Start(ctx context.Context) error {
 				return nil
 			}
 
-			_log.Info().Msg("Decypharr has been restarted.")
+			_log.Info().Msg("Tessarr has been restarted.")
 
 		case err := <-serviceDone:
 			cancelSvc()

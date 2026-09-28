@@ -11,7 +11,7 @@ func Verified(serverName string) *tls.Config {
 	return Harden(&tls.Config{ServerName: serverName})
 }
 
-// Harden clones a caller-provided TLS configuration and applies Decypharr's
+// Harden clones a caller-provided TLS configuration and applies Tessarr's
 // minimum verification policy without mutating the caller's configuration.
 // Existing trust roots, client certificates, and stricter TLS versions are
 // preserved.

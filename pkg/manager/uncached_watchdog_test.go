@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestParseUncachedStallTimeoutFailsClosed(t *testing.T) {
@@ -511,10 +511,10 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/downloadclient":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"Decypharr","implementation":"QBittorrent","fields":[{"name":"host","value":"decypharr.example"},{"name":"port","value":8282}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"Tessarr","implementation":"QBittorrent","fields":[{"name":"host","value":"tessarr.example"},{"name":"port","value":8282}]}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/queue":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"page":1,"pageSize":200,"totalRecords":1,"records":[{"id":17,"downloadId":"ABC123","protocol":"torrent","downloadClient":"Decypharr"}]}`))
+			_, _ = w.Write([]byte(`{"page":1,"pageSize":200,"totalRecords":1,"records":[{"id":17,"downloadId":"ABC123","protocol":"torrent","downloadClient":"Tessarr"}]}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/bulk":
 			deletes.Add(1)
 			w.WriteHeader(http.StatusOK)
@@ -533,7 +533,7 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 		Category:         "sonarr",
 		State:            storage.EntryStateStalledDL,
 		DownloadUncached: true,
-		ClientEndpoint:   "decypharr.example:8282",
+		ClientEndpoint:   "tessarr.example:8282",
 	}
 	if err := queue.Add(entry); err != nil {
 		t.Fatal(err)

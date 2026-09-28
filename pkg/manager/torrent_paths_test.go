@@ -6,9 +6,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
 )
 
 func TestValidateTorrentDownloadFolder(t *testing.T) {

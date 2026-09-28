@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	fuseconfig "github.com/Trifocals3537/tessarr/pkg/mount/dfs/config"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/vfs/ranges"
 )
 
 const (

@@ -3,8 +3,8 @@ package notifications
 import (
 	"context"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 // Event represents a notification event to be dispatched

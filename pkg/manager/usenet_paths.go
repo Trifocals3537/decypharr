@@ -15,15 +15,15 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
-	usenetOwnerMarkerName     = ".decypharr-nzb-owner-v1"
-	usenetOwnershipLockName   = ".decypharr-nzb-ownership.lock"
-	usenetQuarantinePrefix    = ".decypharr-nzb-quarantine-"
+	usenetOwnerMarkerName     = ".tessarr-nzb-owner-v1"
+	usenetOwnershipLockName   = ".tessarr-nzb-ownership.lock"
+	usenetQuarantinePrefix    = ".tessarr-nzb-quarantine-"
 	usenetOwnerMarkerMaxBytes = 512
 	usenetDirectoryReadBatch  = 128
 	usenetDirectoryMaxEntries = 100_000

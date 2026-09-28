@@ -8,7 +8,7 @@ import (
 
 const maxProviderFileRecords = 100_000
 
-// FilesByLogicalName converts provider file records into Decypharr's
+// FilesByLogicalName converts provider file records into Tessarr's
 // name-keyed representation without losing nested files that share a
 // basename. The historical basename key remains unchanged when it is
 // unambiguous. Every member of a basename collision group instead uses its

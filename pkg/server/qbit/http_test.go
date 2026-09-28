@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestSIDCookieDefaultsAreBrowserSafe(t *testing.T) {

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/sirrobot01/decypharr/internal/config"
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestRepairEventQueueCoalescesAndBoundsAdmission(t *testing.T) {

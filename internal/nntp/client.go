@@ -16,14 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/internal/retry"
+	"github.com/Trifocals3537/tessarr/internal/tlsconfig"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/retry"
-	"github.com/sirrobot01/decypharr/internal/tlsconfig"
-	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 // ProviderPool manages connections for a single provider using a LIFO stack

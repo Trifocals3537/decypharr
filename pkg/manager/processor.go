@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/customerror"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/debrid/common"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/customerror"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
 )
 
 var errDeleteQueueEntryOnJobFinish = errors.New("delete queue entry after job finishes")
@@ -684,7 +684,7 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Entry,
 // applyCompletedTorrentFiles reconciles the authoritative provider snapshot
 // into an entry and reports whether every provider file has a usable link. A
 // completed transfer with an empty or partially populated file tree is an
-// eventual-consistency state, not a completed Decypharr entry. Partial trees
+// eventual-consistency state, not a completed Tessarr entry. Partial trees
 // update provider state but never leak into the canonical file map.
 func applyCompletedTorrentFiles(entry *storage.Entry, torrent *debridTypes.Torrent) bool {
 	if entry == nil || torrent == nil || torrent.Status != debridTypes.TorrentStatusDownloaded {

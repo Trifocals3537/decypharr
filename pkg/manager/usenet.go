@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet"
-	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
+	"github.com/Trifocals3537/tessarr/internal/config"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
+	"github.com/Trifocals3537/tessarr/pkg/usenet/parser"
 )
 
 var usenetSubmissionMu sync.Mutex

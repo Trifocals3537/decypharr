@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/cdntraffic"
+	"github.com/Trifocals3537/tessarr/internal/cdntraffic"
 )
 
 func baseStreamHTTPTransport(t *testing.T, client *http.Client) *http.Transport {

@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	rcloneHelperProcessEnv  = "DECYPHARR_RCLONE_HELPER_PROCESS"
-	rcloneHelperProcessMode = "DECYPHARR_RCLONE_HELPER_MODE"
+	rcloneHelperProcessEnv  = "TESSARR_RCLONE_HELPER_PROCESS"
+	rcloneHelperProcessMode = "TESSARR_RCLONE_HELPER_MODE"
 )
 
 func TestRcloneProcessHelper(t *testing.T) {

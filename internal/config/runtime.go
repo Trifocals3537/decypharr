@@ -11,7 +11,7 @@ import (
 
 	json "github.com/bytedance/sonic"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // The active configuration is an immutable snapshot. Writers serialize through

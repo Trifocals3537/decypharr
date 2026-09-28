@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 	"github.com/sourcegraph/conc/pool"
 )
 

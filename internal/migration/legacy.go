@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 const (
@@ -32,6 +32,8 @@ var exactStateNames = map[string]string{
 	".decypharr-nzb-owner-v1":                ".tessarr-nzb-owner-v1",
 	".decypharr-nzb-ownership.lock":          ".tessarr-nzb-ownership.lock",
 	".decypharr-stream-cache-v1":             ".tessarr-stream-cache-v1",
+	".decypharr-strm-entry":                  ".tessarr-strm-entry",
+	".decypharr-strm-root":                   ".tessarr-strm-root",
 	".decypharr-torrent-owner-v1":            ".tessarr-torrent-owner-v1",
 	".decypharr-torrent-ownership.lock":      ".tessarr-torrent-ownership.lock",
 	"decypharr.log":                          "tessarr.log",
@@ -43,6 +45,7 @@ var prefixedStateNames = []struct {
 }{
 	{old: ".decypharr-cache-quarantine-", new: ".tessarr-cache-quarantine-"},
 	{old: ".decypharr-nzb-quarantine-", new: ".tessarr-nzb-quarantine-"},
+	{old: ".decypharr-strm-", new: ".tessarr-strm-"},
 	{old: ".decypharr-torrent-part-", new: ".tessarr-torrent-part-"},
 	{old: ".decypharr-torrent-quarantine-", new: ".tessarr-torrent-quarantine-"},
 }

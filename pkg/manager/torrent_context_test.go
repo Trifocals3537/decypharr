@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
 func TestGetProviderTorrentsUsesContextAwareListing(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/Trifocals3537/tessarr/internal/utils"
 )
 
 var ErrCacheDiskLimit = errors.New("dfs cache: disk quota exhausted")

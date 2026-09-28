@@ -13,19 +13,19 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	mountconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
+	internalconfig "github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	mountconfig "github.com/Trifocals3537/tessarr/pkg/mount/dfs/config"
+	"github.com/Trifocals3537/tessarr/pkg/mount/dfs/vfs"
 )
 
 // TestMountReadSeekUnmount is opt-in because CI runners and containers often
 // expose no usable /dev/fuse. Run it on a Linux host with:
 //
-//	DECYPHARR_FUSE_INTEGRATION=1 go test -run TestMountReadSeekUnmount ./pkg/mount/dfs/backend/hanwen
+//	TESSARR_FUSE_INTEGRATION=1 go test -run TestMountReadSeekUnmount ./pkg/mount/dfs/backend/hanwen
 func TestMountReadSeekUnmount(t *testing.T) {
-	if os.Getenv("DECYPHARR_FUSE_INTEGRATION") != "1" {
-		t.Skip("set DECYPHARR_FUSE_INTEGRATION=1 to run the real FUSE canary")
+	if os.Getenv("TESSARR_FUSE_INTEGRATION") != "1" {
+		t.Skip("set TESSARR_FUSE_INTEGRATION=1 to run the real FUSE canary")
 	}
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Fatalf("usable /dev/fuse is required: %v", err)

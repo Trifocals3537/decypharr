@@ -21,8 +21,8 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/rs/zerolog"
 
-	"github.com/sirrobot01/decypharr/internal/buffer"
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/buffer"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // SegmentCache is a usenet-segment-aware view over a buffer.Buffer.
@@ -97,11 +97,13 @@ const (
 	numShards = 64
 	shardMask = numShards - 1
 
-	ownedCacheDirName  = ".decypharr-stream-cache-v1"
-	cacheOwnerFileName = ".decypharr-cache-owner"
-	cacheInstanceFile  = ".decypharr-cache-instance"
-	cacheCleanupLock   = ".decypharr-cache-cleanup.lock"
-	cacheQuarantine    = ".decypharr-cache-quarantine-"
+	ownedCacheDirName  = ".tessarr-stream-cache-v1"
+	cacheOwnerFileName = ".tessarr-cache-owner"
+	cacheInstanceFile  = ".tessarr-cache-instance"
+	cacheCleanupLock   = ".tessarr-cache-cleanup.lock"
+	cacheQuarantine    = ".tessarr-cache-quarantine-"
+	// These payloads are durable cache schema identifiers. Marker filenames
+	// change during migration, but existing verified caches remain reusable.
 	cacheOwnerContents = "decypharr stream cache v1\n"
 	cacheInstanceData  = "decypharr segment cache v1 "
 	cacheMarkerMaxSize = len(cacheInstanceData) + 64 + 1
@@ -194,7 +196,7 @@ func retryCacheCleanup(cleanup func() error) error {
 	return cleanupErr
 }
 
-// PrepareDiskCacheRoot establishes and validates Decypharr's private namespace
+// PrepareDiskCacheRoot establishes and validates Tessarr's private namespace
 // under the configured disk-buffer path. It deliberately does not reap cache
 // instances from a previous process: a marker proves type, not liveness, and
 // startup cannot distinguish a crash remnant from another live process.
@@ -793,7 +795,7 @@ func NewSegmentCache(
 	}
 
 	// Resolve a fresh, individually-marked cache directory inside
-	// Decypharr's owned namespace. Cleanup later proves both containment and
+	// Tessarr's owned namespace. Cleanup later proves both containment and
 	// ownership before removing it.
 	cacheRoot, diskPath, cacheToken, err := newCacheInstance(config.DiskPath)
 	if err != nil {

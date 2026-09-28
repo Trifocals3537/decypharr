@@ -16,8 +16,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/sirrobot01/decypharr/cmd/decypharr"
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/cmd/tessarr"
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"golang.org/x/term"
 )
 
@@ -68,7 +68,7 @@ func main() {
 			// If we can't get the user home directory, fallback to current directory
 			defaultDir = "."
 		}
-		defaultConfigDir := filepath.Join(defaultDir, ".decypharr")
+		defaultConfigDir := filepath.Join(defaultDir, ".tessarr")
 		configPath = defaultConfigDir
 	}
 
@@ -79,13 +79,13 @@ func main() {
 	if checkConfig {
 		cfg, err := config.LoadForValidation(configPath)
 		if err != nil {
-			log.Fatalf("Decypharr configuration check failed: %v", err)
+			log.Fatalf("Tessarr configuration check failed: %v", err)
 		}
 		if err := cfg.Validate(); err != nil {
-			log.Fatalf("Decypharr configuration check failed: %v", err)
+			log.Fatalf("Tessarr configuration check failed: %v", err)
 		}
 		if err := cfg.ValidateDeployment(); err != nil {
-			log.Fatalf("Decypharr deployment safety check failed: %v", err)
+			log.Fatalf("Tessarr deployment safety check failed: %v", err)
 		}
 		if len(cfg.AllowedClientCIDRs) == 0 &&
 			!config.IsLoopbackBindAddress(cfg.BindAddress) {
@@ -94,20 +94,20 @@ func main() {
 			)
 		}
 		fmt.Printf(
-			"Decypharr configuration is valid: %s\n",
+			"Tessarr configuration is valid: %s\n",
 			filepath.Join(configPath, "config.json"),
 		)
 		return
 	}
 
 	if err := config.SetConfigPath(configPath); err != nil {
-		log.Fatal("Invalid Decypharr data path")
+		log.Fatal("Invalid Tessarr data path")
 	}
 	cfg := config.Get()
 
 	if setAuthUsername != "" {
 		if err := configureAuthFromTerminal(cfg, setAuthUsername); err != nil {
-			log.Fatalf("Decypharr authentication setup failed: %v", err)
+			log.Fatalf("Tessarr authentication setup failed: %v", err)
 		}
 		fmt.Printf(
 			"Authentication enabled for %q in %s\n",
@@ -138,7 +138,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := decypharr.Start(ctx); err != nil {
+	if err := tessarr.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

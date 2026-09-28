@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/manager/link"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
+	"github.com/Trifocals3537/tessarr/pkg/manager/link"
 )
 
 func localRefreshCooldownError() *link.Error {

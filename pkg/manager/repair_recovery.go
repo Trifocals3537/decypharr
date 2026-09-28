@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/arr"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const recoveryRetryDelay = 5 * time.Minute

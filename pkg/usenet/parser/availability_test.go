@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/Tensai75/nzbparser"
-	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/Trifocals3537/tessarr/internal/nntp"
 )
 
 func TestArticleProbeFailuresClassifiesOnlyUniformMissingArticles(t *testing.T) {

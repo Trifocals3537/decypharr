@@ -16,17 +16,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
+	"github.com/Trifocals3537/tessarr/pkg/manager"
+	"github.com/Trifocals3537/tessarr/pkg/server/qbit"
+	"github.com/Trifocals3537/tessarr/pkg/server/sabnzbd"
+	"github.com/Trifocals3537/tessarr/pkg/server/webdav"
+	"github.com/Trifocals3537/tessarr/pkg/stats"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/sessions"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/server/qbit"
-	"github.com/sirrobot01/decypharr/pkg/server/sabnzbd"
-	"github.com/sirrobot01/decypharr/pkg/server/webdav"
-	"github.com/sirrobot01/decypharr/pkg/stats"
 )
 
 //go:embed templates/*
@@ -295,7 +295,7 @@ func serveHTTP(ctx context.Context, srv *http.Server, listener net.Listener, shu
 }
 
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
-	logFile := filepath.Join(logger.GetLogPath(), "decypharr.log")
+	logFile := filepath.Join(logger.GetLogPath(), "tessarr.log")
 
 	// Open and read the file
 	file, err := os.Open(logFile)

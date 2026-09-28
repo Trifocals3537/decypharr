@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/internal/utils"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"golang.org/x/sync/errgroup"
 )
 

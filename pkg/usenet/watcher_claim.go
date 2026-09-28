@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sirrobot01/decypharr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 const (

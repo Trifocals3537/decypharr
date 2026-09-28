@@ -4,8 +4,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sirrobot01/decypharr/internal/buffer"
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/buffer"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 // Pools owns the shared stream-buffer budget for one Usenet service run.

@@ -18,18 +18,20 @@ func TestMigrateCopiesVerifiesAndRenamesState(t *testing.T) {
 	mustWriteFile(t, filepath.Join(source, "logs", "decypharr.log"), []byte("ready\n"), 0o640)
 	mustWriteFile(t, filepath.Join(source, ".decypharr-cache-owner"), []byte("owner"), 0o600)
 	mustWriteFile(t, filepath.Join(source, ".decypharr-torrent-quarantine-123"), []byte("held"), 0o600)
+	mustWriteFile(t, filepath.Join(source, ".decypharr-strm-root"), []byte("root"), 0o600)
 
 	result, err := Migrate(Options{Source: source, Target: target})
 	if err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	if result.Files != 4 || result.RenamedEntries != 3 || result.AlreadyMigrated || result.DryRun {
+	if result.Files != 5 || result.RenamedEntries != 4 || result.AlreadyMigrated || result.DryRun {
 		t.Fatalf("Migrate() result = %+v", result)
 	}
 	assertFileContent(t, filepath.Join(source, "logs", "decypharr.log"), "ready\n")
 	assertFileContent(t, filepath.Join(target, "logs", "tessarr.log"), "ready\n")
 	assertFileContent(t, filepath.Join(target, ".tessarr-cache-owner"), "owner")
 	assertFileContent(t, filepath.Join(target, ".tessarr-torrent-quarantine-123"), "held")
+	assertFileContent(t, filepath.Join(target, ".tessarr-strm-root"), "root")
 	assertFileContent(t, filepath.Join(target, "config.json"), `{"name":"Decypharr remains valid user data"}`)
 	if _, err := os.Stat(filepath.Join(target, receiptName)); err != nil {
 		t.Fatalf("migration receipt missing: %v", err)

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	json "github.com/bytedance/sonic"
-	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func TestSetupRejectsSymlinkedDownloadRoot(t *testing.T) {

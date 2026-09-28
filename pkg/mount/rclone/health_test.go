@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
+	rcloneclient "github.com/Trifocals3537/tessarr/internal/rclone"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	rcloneclient "github.com/sirrobot01/decypharr/internal/rclone"
 )
 
 func newRecoveryTestManager(t *testing.T, handler http.Handler) *Manager {
@@ -38,7 +38,7 @@ func newRecoveryTestManager(t *testing.T, handler http.Handler) *Manager {
 		logger:    zerolog.Nop(),
 		ctx:       ctx,
 		cancel:    cancel,
-		webdavURL: "http://decypharr.example/webdav/",
+		webdavURL: "http://tessarr.example/webdav/",
 		client:    rcloneclient.NewClient(server.URL, "", "", zerolog.Nop()),
 	}
 	m.serverStarted.Store(true)

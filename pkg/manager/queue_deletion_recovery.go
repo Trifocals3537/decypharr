@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 // recoverQueuedDeletions runs before JobQueue construction and restore. Fatal

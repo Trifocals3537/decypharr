@@ -3,8 +3,8 @@ package manager
 import (
 	"testing"
 
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func TestDetectMultiSeasonRequiresMultiplePopulatedSeasonGroups(t *testing.T) {

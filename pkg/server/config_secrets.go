@@ -6,13 +6,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/config"
 )
 
 // redactedConfigSecret is an API-only placeholder. It is never persisted: a
 // matching configured secret is restored before validation, and unresolved
 // placeholders are rejected.
-const redactedConfigSecret = "__DECYPHARR_REDACTED__"
+const redactedConfigSecret = "__TESSARR_REDACTED__"
 
 type configResponse struct {
 	*config.Config

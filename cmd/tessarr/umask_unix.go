@@ -1,6 +1,6 @@
 //go:build !windows
 
-package decypharr
+package tessarr
 
 import "syscall"
 

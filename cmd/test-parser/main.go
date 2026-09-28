@@ -53,7 +53,7 @@ func main() {
 
 	// Create NNTP client (10 max connections for test)
 	if err := config.SetConfigPath("data/"); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid parser data path: %v\n", err)
+		fmt.Fprintln(os.Stderr, "invalid parser data path")
 		os.Exit(1)
 	}
 	cfg := config.Get()

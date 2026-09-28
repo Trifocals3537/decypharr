@@ -95,7 +95,7 @@ func main() {
 	}
 
 	if err := config.SetConfigPath(configPath); err != nil {
-		log.Fatalf("Invalid Decypharr data path: %v", err)
+		log.Fatal("Invalid Decypharr data path")
 	}
 	cfg := config.Get()
 

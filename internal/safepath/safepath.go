@@ -92,7 +92,10 @@ func verifyPinnedRoot(rooted *os.Root, visiblePath string) error {
 	if err != nil {
 		return fmt.Errorf("inspect pinned filesystem root %q: %w", visiblePath, err)
 	}
-	visibleInfo, err := os.Lstat(visiblePath)
+	if isFilesystemRoot(visiblePath) {
+		return nil
+	}
+	visibleInfo, err := lstatFromParentRoot(visiblePath)
 	if err != nil {
 		return fmt.Errorf("reinspect filesystem root %q: %w", visiblePath, err)
 	}
@@ -100,6 +103,27 @@ func verifyPinnedRoot(rooted *os.Root, visiblePath string) error {
 		return fmt.Errorf("filesystem root %q changed during validation", visiblePath)
 	}
 	return nil
+}
+
+// lstatFromParentRoot inspects the final path component through its pinned
+// parent. The final name is required to be local and cannot select a sibling or
+// escape the directory used as the filesystem boundary.
+func lstatFromParentRoot(path string) (os.FileInfo, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve path for pinned inspection: %w", err)
+	}
+	absolute = filepath.Clean(absolute)
+	parent, name := filepath.Dir(absolute), filepath.Base(absolute)
+	if !filepath.IsLocal(name) {
+		return nil, fmt.Errorf("path name %q is not local", name)
+	}
+	rooted, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem parent root %q: %w", parent, err)
+	}
+	defer rooted.Close()
+	return rooted.Lstat(name)
 }
 
 // EnsureRoot creates an application-owned filesystem root without passing the

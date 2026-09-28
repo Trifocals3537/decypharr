@@ -35,7 +35,7 @@ func main() {
 	flag.BoolVar(&debug, "debug", false, "enable debug mode for detailed output")
 	flag.Parse()
 	if err := config.SetConfigPath(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid configuration path: %v\n", err)
+		fmt.Fprintln(os.Stderr, "invalid configuration path")
 		os.Exit(1)
 	}
 	cfg := config.Get()

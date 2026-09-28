@@ -76,7 +76,7 @@ func OpenRoot(root string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	rooted, err := os.OpenRoot(absolute)
+	rooted, err := openRootFromFilesystemAnchor(absolute, false, 0)
 	if err != nil {
 		return nil, "", fmt.Errorf("open filesystem root %q: %w", absolute, err)
 	}
@@ -95,11 +95,16 @@ func verifyPinnedRoot(rooted *os.Root, visiblePath string) error {
 	if isFilesystemRoot(visiblePath) {
 		return nil
 	}
-	visibleInfo, err := lstatFromParentRoot(visiblePath)
+	visibleRoot, err := openRootFromFilesystemAnchor(visiblePath, false, 0)
+	if err != nil {
+		return fmt.Errorf("reopen filesystem root %q from its anchor: %w", visiblePath, err)
+	}
+	defer visibleRoot.Close()
+	visibleInfo, err := visibleRoot.Stat(".")
 	if err != nil {
 		return fmt.Errorf("reinspect filesystem root %q: %w", visiblePath, err)
 	}
-	if visibleInfo.Mode()&os.ModeSymlink != 0 || !visibleInfo.IsDir() || !os.SameFile(openedInfo, visibleInfo) {
+	if !visibleInfo.IsDir() || !os.SameFile(openedInfo, visibleInfo) {
 		return fmt.Errorf("filesystem root %q changed during validation", visiblePath)
 	}
 	return nil
@@ -119,31 +124,10 @@ func VerifyOpenRoot(rooted *os.Root, path string) error {
 	return verifyPinnedRoot(rooted, absolute)
 }
 
-// lstatFromParentRoot inspects the final path component through its pinned
-// parent. The final name is required to be local and cannot select a sibling or
-// escape the directory used as the filesystem boundary.
-func lstatFromParentRoot(path string) (os.FileInfo, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve path for pinned inspection: %w", err)
-	}
-	absolute = filepath.Clean(absolute)
-	parent, name := filepath.Dir(absolute), filepath.Base(absolute)
-	if !filepath.IsLocal(name) {
-		return nil, fmt.Errorf("path name %q is not local", name)
-	}
-	rooted, err := os.OpenRoot(parent)
-	if err != nil {
-		return nil, fmt.Errorf("open filesystem parent root %q: %w", parent, err)
-	}
-	defer rooted.Close()
-	return rooted.Lstat(name)
-}
-
 // EnsureRoot creates an application-owned filesystem root without passing the
-// complete untrusted path to a recursive creation primitive. It validates all
-// existing components, pins the nearest existing ancestor with os.Root, and
-// creates only a local relative descendant beneath that pinned directory.
+// complete untrusted path to a recursive creation primitive. It descends from
+// a trusted filesystem boundary and creates each local component through its
+// already pinned parent.
 func EnsureRoot(root string, perm os.FileMode) (string, error) {
 	rooted, absolute, err := EnsureOpenRoot(root, perm)
 	if err != nil {
@@ -163,67 +147,105 @@ func EnsureOpenRoot(root string, perm os.FileMode) (result *os.Root, validated s
 	if err != nil {
 		return nil, "", err
 	}
-
-	ancestor := absolute
-	var rooted *os.Root
-	for {
-		rooted, err = os.OpenRoot(ancestor)
-		if err == nil {
-			break
-		}
-		if !os.IsNotExist(err) {
-			return nil, "", fmt.Errorf("open filesystem ancestor %q: %w", ancestor, err)
-		}
-		parent := filepath.Dir(ancestor)
-		if samePath(parent, ancestor) {
-			return nil, "", fmt.Errorf("no existing ancestor for filesystem root %q", absolute)
-		}
-		ancestor = parent
-	}
-	openedRoots := []*os.Root{rooted}
-	defer func() {
-		for i := len(openedRoots) - 1; i >= 0; i-- {
-			if openedRoots[i] != result {
-				_ = openedRoots[i].Close()
-			}
-		}
-	}()
-
-	// ValidateRoot checked this path before it was opened. Comparing the pinned
-	// handle with the visible path closes the symlink-swap window around open.
-	if err := verifyPinnedRoot(rooted, ancestor); err != nil {
-		return nil, "", err
-	}
-
-	relative, err := filepath.Rel(ancestor, absolute)
+	rooted, err := openRootFromFilesystemAnchor(absolute, true, perm)
 	if err != nil {
-		return nil, "", fmt.Errorf("make filesystem root relative to ancestor: %w", err)
+		return nil, "", fmt.Errorf("create filesystem root %q: %w", absolute, err)
 	}
-	if relative != "." {
-		if !filepath.IsLocal(relative) {
-			return nil, "", fmt.Errorf("filesystem root %q escapes ancestor %q", absolute, ancestor)
-		}
-		for _, component := range strings.Split(relative, string(filepath.Separator)) {
-			created, err := openOrCreateRootChild(rooted, component, perm)
-			if err != nil {
-				return nil, "", fmt.Errorf("create filesystem root %q: %w", absolute, err)
-			}
-			openedRoots = append(openedRoots, created)
-			rooted = created
-		}
-		if err := verifyPinnedRoot(rooted, absolute); err != nil {
-			return nil, "", err
-		}
+	if err := verifyPinnedRoot(rooted, absolute); err != nil {
+		_ = rooted.Close()
+		return nil, "", err
 	}
 
 	validated, err = ValidateRoot(absolute)
 	if err != nil {
+		_ = rooted.Close()
 		return nil, "", fmt.Errorf("revalidate created filesystem root: %w", err)
 	}
 	return rooted, validated, nil
 }
 
+// openRootFromFilesystemAnchor descends from the filesystem or volume root one
+// component at a time. Every hop is inspected and opened through the already
+// pinned parent, so a renamed parent or a symlink swap cannot redirect the
+// capability outside the path being traversed.
+func openRootFromFilesystemAnchor(absolute string, create bool, perm os.FileMode) (result *os.Root, resultErr error) {
+	anchor := trustedFilesystemAnchor(absolute)
+	relative, err := filepath.Rel(anchor, absolute)
+	if err != nil {
+		return nil, fmt.Errorf("make filesystem root relative to anchor %q: %w", anchor, err)
+	}
+	if relative != "." && !filepath.IsLocal(relative) {
+		return nil, fmt.Errorf("filesystem root %q escapes anchor %q", absolute, anchor)
+	}
+
+	rooted, err := os.OpenRoot(anchor)
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem anchor %q: %w", anchor, err)
+	}
+	defer func() {
+		if rooted != result {
+			_ = rooted.Close()
+		}
+	}()
+	if relative == "." {
+		return rooted, nil
+	}
+
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		var child *os.Root
+		if create {
+			child, err = openOrCreateRootChild(rooted, component, perm)
+		} else {
+			child, err = openRootChild(rooted, component)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if closeErr := rooted.Close(); closeErr != nil {
+			_ = child.Close()
+			return nil, fmt.Errorf("close parent while opening component %q: %w", component, closeErr)
+		}
+		rooted = child
+	}
+	return rooted, nil
+}
+
+func trustedFilesystemAnchor(absolute string) string {
+	volumeRoot := filepath.VolumeName(absolute) + string(filepath.Separator)
+	if runtime.GOOS != "windows" {
+		return volumeRoot
+	}
+
+	// Some Windows profile ACLs permit opening the user's home but intentionally
+	// deny component inspection while descending from the volume root. The home
+	// directory is a trusted OS-managed boundary for paths beneath that profile;
+	// use it as the anchor so those ACLs remain intact. Paths elsewhere continue
+	// to descend from their volume or UNC share root.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return volumeRoot
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return volumeRoot
+	}
+	home = filepath.Clean(home)
+	relative, err := filepath.Rel(home, absolute)
+	if err == nil && (relative == "." || filepath.IsLocal(relative)) {
+		return home
+	}
+	return volumeRoot
+}
+
+func openRootChild(parent *os.Root, name string) (*os.Root, error) {
+	return openRootChildMode(parent, name, false, 0)
+}
+
 func openOrCreateRootChild(parent *os.Root, name string, perm os.FileMode) (*os.Root, error) {
+	return openRootChildMode(parent, name, true, perm)
+}
+
+func openRootChildMode(parent *os.Root, name string, create bool, perm os.FileMode) (*os.Root, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
 		strings.IndexByte(name, 0) >= 0 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 		return nil, fmt.Errorf("invalid filesystem root component %q", name)
@@ -231,7 +253,7 @@ func openOrCreateRootChild(parent *os.Root, name string, perm os.FileMode) (*os.
 
 	for attempt := 0; attempt < 2; attempt++ {
 		before, err := parent.Lstat(name)
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) && create {
 			if err := parent.Mkdir(name, perm.Perm()); os.IsExist(err) {
 				continue
 			} else if err != nil {
@@ -265,7 +287,7 @@ func openOrCreateRootChild(parent *os.Root, name string, perm os.FileMode) (*os.
 		}
 		return nil, fmt.Errorf("directory component %q changed while opening", name)
 	}
-	return nil, fmt.Errorf("directory component %q changed while creating", name)
+	return nil, fmt.Errorf("directory component %q changed while opening", name)
 }
 
 // JoinIdentifiers joins single-component identifiers under root. Identifiers

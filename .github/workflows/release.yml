@@ -1,9 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v2.6.0 or v2.6.0-beta.1
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,27 +18,34 @@ env:
 jobs:
   prepare:
     name: Prepare release metadata
-    if: github.repository == 'Trifocals3537/tessarr'
+    if: >-
+      github.repository == 'Trifocals3537/tessarr' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       channel: ${{ steps.metadata.outputs.channel }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      target_commit: ${{ steps.metadata.outputs.target_commit }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Extract version and channel
         id: metadata
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
-          tag="${GITHUB_REF#refs/tags/}"
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?(-(beta|rc)(\.[0-9]+)?)?$ ]]; then
+          tag="${RELEASE_TAG}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)(\.[0-9]+)?)?$ ]]; then
             echo "Unsupported release tag: ${tag}" >&2
-            echo "Expected vMAJOR.MINOR[.PATCH], optionally followed by -beta[.N] or -rc[.N]" >&2
+            echo "Expected vMAJOR.MINOR.PATCH, optionally followed by -beta[.N] or -rc[.N]" >&2
             exit 1
           fi
           version="${tag#v}"
@@ -57,15 +67,18 @@ jobs:
 
           git fetch --no-tags origin \
             "+refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
-          tag_commit="$(git rev-list -n 1 "${GITHUB_REF}")"
-          if ! git merge-base --is-ancestor \
-            "${tag_commit}" "refs/remotes/origin/${release_branch}"; then
-            echo "${tag} must point to a commit on the ${release_branch} branch" >&2
+          if git ls-remote --exit-code --tags origin \
+            "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Release tag already exists: ${tag}" >&2
             exit 1
           fi
+          target_commit="$(git rev-parse "refs/remotes/origin/${release_branch}")"
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "target_commit=${target_commit}" >> "${GITHUB_OUTPUT}"
+          echo "Releasing ${tag} from ${release_branch} at ${target_commit}"
 
   build-linux:
     name: Linux ${{ matrix.label }}
@@ -85,6 +98,8 @@ jobs:
             machine_pattern: ARM aarch64
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -186,6 +201,8 @@ jobs:
     needs: prepare
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -245,6 +262,8 @@ jobs:
             expected_arch: arm64
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -302,6 +321,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.target_commit }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
@@ -322,7 +343,6 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
-            type=ref,event=tag
             type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=${{ needs.prepare.outputs.channel }},enable=${{ needs.prepare.outputs.channel != 'stable' }}
             type=raw,value=latest,enable=${{ needs.prepare.outputs.channel == 'stable' }}
@@ -357,6 +377,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ needs.prepare.outputs.target_commit }}
           fetch-depth: 0
 
       - name: Download all artifacts
@@ -373,22 +394,29 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET_COMMIT: ${{ needs.prepare.outputs.target_commit }}
           CHANNEL: ${{ needs.prepare.outputs.channel }}
         run: |
           set -euo pipefail
 
+          if git ls-remote --exit-code --tags origin \
+            "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Release tag appeared while the build was running: ${TAG}" >&2
+            exit 1
+          fi
+
           release_args=(
             --title "tessarr ${TAG}"
             --generate-notes
-            --verify-tag
+            --target "${TARGET_COMMIT}"
           )
 
           if [[ "${CHANNEL}" != "stable" ]]; then
             release_args+=(--prerelease)
           fi
 
-          previous_tag="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          previous_tag="$(git describe --tags --abbrev=0 "${TARGET_COMMIT}^" 2>/dev/null || true)"
           if [[ -n "${previous_tag}" ]]; then
             release_args+=(--notes-start-tag "${previous_tag}")
           fi

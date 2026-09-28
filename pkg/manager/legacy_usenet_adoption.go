@@ -79,21 +79,17 @@ func (a *legacyUsenetAdopter) run(entries []*storage.Entry) (runErr error) {
 	usenetOwnershipMu.Lock()
 	defer usenetOwnershipMu.Unlock()
 
-	absoluteRoot, ownershipLock, _, err := acquireUsenetOwnershipLock(a.downloadRoot, true)
+	ownership, _, err := acquireUsenetOwnershipLock(a.downloadRoot, true)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if unlockErr := ownershipLock.Unlock(); unlockErr != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("unlock NZB ownership root after legacy adoption: %w", unlockErr))
+		if closeErr := ownership.close(); closeErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close NZB ownership root after legacy adoption: %w", closeErr))
 		}
 	}()
-
-	rooted, err := os.OpenRoot(absoluteRoot)
-	if err != nil {
-		return fmt.Errorf("open NZB download root for legacy adoption: %w", err)
-	}
-	defer rooted.Close()
+	rooted := ownership.root
+	absoluteRoot := ownership.absolute
 
 	if err := rejectPortableSiblingAlias(rooted, ".", usenetLegacyAdoptionCheckpointName); err != nil {
 		return fmt.Errorf("inspect legacy adoption checkpoint aliases: %w", err)

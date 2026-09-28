@@ -87,7 +87,10 @@ func Start(ctx context.Context) error {
 `, version.GetInfo(), cfg.LogLevel)
 
 		// Initialize services
-		mountMgr := createMountManager(mgr, cfg)
+		mountMgr, err := createMountManager(mgr, cfg)
+		if err != nil {
+			return fmt.Errorf("initialize mount manager: %w", err)
+		}
 		mgr.SetMountManager(mountMgr)
 		srv := server.New(mgr)
 
@@ -233,16 +236,16 @@ func finishRestart(
 	return true, nil
 }
 
-func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountManager {
+func createMountManager(mgr *manager.Manager, cfg *config.Config) (manager.MountManager, error) {
 	switch cfg.Mount.Type {
 	case config.MountTypeRclone:
 		return rclone.NewManager(mgr)
 	case config.MountTypeDFS:
-		return dfs.NewManager(mgr)
+		return dfs.NewManager(mgr), nil
 	case config.MountTypeExternalRclone:
-		return external.NewManager(mgr)
+		return external.NewManager(mgr), nil
 	default:
-		return manager.NewStubMountManager()
+		return manager.NewStubMountManager(), nil
 	}
 }
 

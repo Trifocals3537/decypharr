@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
 	"google.golang.org/protobuf/proto"
 )
@@ -80,21 +81,32 @@ func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hyb
 }
 
 func dropLegacyStores(baseDir string, log zerolog.Logger) {
+	rooted, absoluteRoot, err := safepath.OpenRoot(baseDir)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to open storage root for legacy cleanup")
+		return
+	}
+	defer rooted.Close()
 	for _, name := range legacyStoreNames {
-		path := filepath.Join(baseDir, name+".db")
-		if _, err := os.Stat(path); err == nil {
-			if err := os.RemoveAll(path); err != nil {
-				log.Warn().Err(err).Str("path", path).Msg("Failed to remove legacy repair bucket")
-			} else {
-				log.Info().Str("path", path).Msg("Removed legacy repair bucket")
-			}
+		relative := name + ".db"
+		if _, err := rooted.Lstat(relative); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			log.Warn().Err(err).Str("store", relative).Msg("Failed to inspect legacy repair bucket")
+			continue
+		}
+		if err := rooted.RemoveAll(relative); err != nil {
+			log.Warn().Err(err).Str("store", relative).Msg("Failed to remove legacy repair bucket")
+		} else {
+			log.Info().Str("path", filepath.Join(absoluteRoot, relative)).Msg("Removed legacy repair bucket")
 		}
 	}
 }
 
 func NewStorage(dbPath string) (*Storage, error) {
-	dbPath = filepath.Clean(dbPath)
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
+	var err error
+	dbPath, err = safepath.EnsureRoot(dbPath, 0o755)
+	if err != nil {
 		return nil, fmt.Errorf("failed to create db directory: %w", err)
 	}
 

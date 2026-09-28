@@ -242,6 +242,89 @@ func TestValidateRootRejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestEnsureRootCreatesNestedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	want := filepath.Join(parent, "cache", "segments")
+	got, err := EnsureRoot(want, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("EnsureRoot() = %q, want %q", got, want)
+	}
+	info, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("EnsureRoot() created non-directory mode %v", info.Mode())
+	}
+	rooted, absolute, err := OpenRoot(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	if absolute != want {
+		t.Fatalf("OpenRoot() path = %q, want %q", absolute, want)
+	}
+}
+
+func TestEnsureRootRejectsSymlinkParent(t *testing.T) {
+	parent := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(parent, "cache")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := EnsureRoot(filepath.Join(link, "segments"), 0o700); err == nil {
+		t.Fatal("EnsureRoot() accepted a symlink parent")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "segments")); !os.IsNotExist(err) {
+		t.Fatalf("EnsureRoot() created content outside its boundary: %v", err)
+	}
+}
+
+func TestAnchoredRootTraversalRejectsSymlinkAncestor(t *testing.T) {
+	parent := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "segments"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "cache")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	absolute := filepath.Join(link, "segments")
+	if _, err := openRootFromFilesystemAnchor(absolute, false, 0); err == nil {
+		t.Fatal("anchored traversal accepted a symlink ancestor")
+	}
+}
+
+func TestVerifyOpenRootDetectsVisibleParentReplacement(t *testing.T) {
+	base := t.TempDir()
+	visibleParent := filepath.Join(base, "visible")
+	visibleRoot := filepath.Join(visibleParent, "root")
+	movedParent := filepath.Join(base, "moved")
+	if err := os.MkdirAll(visibleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rooted, _, err := OpenRoot(visibleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+
+	if err := os.Rename(visibleParent, movedParent); err != nil {
+		t.Skipf("cannot rename a directory containing an open root on this platform: %v", err)
+	}
+	if err := os.MkdirAll(visibleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyOpenRoot(rooted, visibleRoot); err == nil {
+		t.Fatal("VerifyOpenRoot() accepted a visible parent replacement")
+	}
+}
+
 func TestOpenFileDoesNotTruncateOutsideHardLink(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"golang.org/x/term"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -34,10 +35,12 @@ type loggingCore struct {
 
 func GetLogPath() string {
 	logsDir := filepath.Join(config.GetMainPath(), "logs")
-	if err := os.MkdirAll(logsDir, 0700); err != nil {
+	rooted, logsDir, err := safepath.EnsureOpenRoot(logsDir, 0o700)
+	if err != nil {
 		panic(fmt.Sprintf("Failed to create logs directory: %v", err))
 	}
-	if err := os.Chmod(logsDir, 0700); err != nil {
+	defer rooted.Close()
+	if err := rooted.Chmod(".", 0o700); err != nil {
 		panic(fmt.Sprintf("Failed to secure logs directory: %v", err))
 	}
 	return logsDir

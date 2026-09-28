@@ -69,6 +69,227 @@ func ValidateRoot(root string) (string, error) {
 	return absolute, nil
 }
 
+// OpenRoot validates and pins an existing application-owned filesystem root.
+// The returned absolute path is the same boundary represented by rooted.
+func OpenRoot(root string) (*os.Root, string, error) {
+	absolute, err := ValidateRoot(root)
+	if err != nil {
+		return nil, "", err
+	}
+	rooted, err := openRootFromFilesystemAnchor(absolute, false, 0)
+	if err != nil {
+		return nil, "", fmt.Errorf("open filesystem root %q: %w", absolute, err)
+	}
+	if err := verifyPinnedRoot(rooted, absolute); err != nil {
+		_ = rooted.Close()
+		return nil, "", err
+	}
+	return rooted, absolute, nil
+}
+
+func verifyPinnedRoot(rooted *os.Root, visiblePath string) error {
+	openedInfo, err := rooted.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect pinned filesystem root %q: %w", visiblePath, err)
+	}
+	if isFilesystemRoot(visiblePath) {
+		return nil
+	}
+	visibleRoot, err := openRootFromFilesystemAnchor(visiblePath, false, 0)
+	if err != nil {
+		return fmt.Errorf("reopen filesystem root %q from its anchor: %w", visiblePath, err)
+	}
+	defer visibleRoot.Close()
+	visibleInfo, err := visibleRoot.Stat(".")
+	if err != nil {
+		return fmt.Errorf("reinspect filesystem root %q: %w", visiblePath, err)
+	}
+	if !visibleInfo.IsDir() || !os.SameFile(openedInfo, visibleInfo) {
+		return fmt.Errorf("filesystem root %q changed during validation", visiblePath)
+	}
+	return nil
+}
+
+// VerifyOpenRoot confirms that rooted still represents the directory visible
+// at path. It lets capability-based callers fail an operation if the configured
+// pathname was renamed or replaced while the root was held open.
+func VerifyOpenRoot(rooted *os.Root, path string) error {
+	if rooted == nil {
+		return fmt.Errorf("pinned filesystem root is nil")
+	}
+	absolute, err := ValidateRoot(path)
+	if err != nil {
+		return err
+	}
+	return verifyPinnedRoot(rooted, absolute)
+}
+
+// EnsureRoot creates an application-owned filesystem root without passing the
+// complete untrusted path to a recursive creation primitive. It descends from
+// a trusted filesystem boundary and creates each local component through its
+// already pinned parent.
+func EnsureRoot(root string, perm os.FileMode) (string, error) {
+	rooted, absolute, err := EnsureOpenRoot(root, perm)
+	if err != nil {
+		return "", err
+	}
+	if err := rooted.Close(); err != nil {
+		return "", fmt.Errorf("close created filesystem root %q: %w", absolute, err)
+	}
+	return absolute, nil
+}
+
+// EnsureOpenRoot is EnsureRoot's capability-preserving form. Callers that
+// mutate the tree should retain and use the returned os.Root through the full
+// operation rather than reopening the absolute path.
+func EnsureOpenRoot(root string, perm os.FileMode) (result *os.Root, validated string, resultErr error) {
+	absolute, err := ValidateRoot(root)
+	if err != nil {
+		return nil, "", err
+	}
+	rooted, err := openRootFromFilesystemAnchor(absolute, true, perm)
+	if err != nil {
+		return nil, "", fmt.Errorf("create filesystem root %q: %w", absolute, err)
+	}
+	if err := verifyPinnedRoot(rooted, absolute); err != nil {
+		_ = rooted.Close()
+		return nil, "", err
+	}
+
+	validated, err = ValidateRoot(absolute)
+	if err != nil {
+		_ = rooted.Close()
+		return nil, "", fmt.Errorf("revalidate created filesystem root: %w", err)
+	}
+	return rooted, validated, nil
+}
+
+// openRootFromFilesystemAnchor descends from the filesystem or volume root one
+// component at a time. Every hop is inspected and opened through the already
+// pinned parent, so a renamed parent or a symlink swap cannot redirect the
+// capability outside the path being traversed.
+func openRootFromFilesystemAnchor(absolute string, create bool, perm os.FileMode) (result *os.Root, resultErr error) {
+	anchor := trustedFilesystemAnchor(absolute)
+	relative, err := filepath.Rel(anchor, absolute)
+	if err != nil {
+		return nil, fmt.Errorf("make filesystem root relative to anchor %q: %w", anchor, err)
+	}
+	if relative != "." && !filepath.IsLocal(relative) {
+		return nil, fmt.Errorf("filesystem root %q escapes anchor %q", absolute, anchor)
+	}
+
+	rooted, err := os.OpenRoot(anchor)
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem anchor %q: %w", anchor, err)
+	}
+	defer func() {
+		if rooted != result {
+			_ = rooted.Close()
+		}
+	}()
+	if relative == "." {
+		return rooted, nil
+	}
+
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		var child *os.Root
+		if create {
+			child, err = openOrCreateRootChild(rooted, component, perm)
+		} else {
+			child, err = openRootChild(rooted, component)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if closeErr := rooted.Close(); closeErr != nil {
+			_ = child.Close()
+			return nil, fmt.Errorf("close parent while opening component %q: %w", component, closeErr)
+		}
+		rooted = child
+	}
+	return rooted, nil
+}
+
+func trustedFilesystemAnchor(absolute string) string {
+	volumeRoot := filepath.VolumeName(absolute) + string(filepath.Separator)
+	if runtime.GOOS != "windows" {
+		return volumeRoot
+	}
+
+	// Some Windows profile ACLs permit opening the user's home but intentionally
+	// deny component inspection while descending from the volume root. The home
+	// directory is a trusted OS-managed boundary for paths beneath that profile;
+	// use it as the anchor so those ACLs remain intact. Paths elsewhere continue
+	// to descend from their volume or UNC share root.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return volumeRoot
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return volumeRoot
+	}
+	home = filepath.Clean(home)
+	relative, err := filepath.Rel(home, absolute)
+	if err == nil && (relative == "." || filepath.IsLocal(relative)) {
+		return home
+	}
+	return volumeRoot
+}
+
+func openRootChild(parent *os.Root, name string) (*os.Root, error) {
+	return openRootChildMode(parent, name, false, 0)
+}
+
+func openOrCreateRootChild(parent *os.Root, name string, perm os.FileMode) (*os.Root, error) {
+	return openRootChildMode(parent, name, true, perm)
+}
+
+func openRootChildMode(parent *os.Root, name string, create bool, perm os.FileMode) (*os.Root, error) {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
+		strings.IndexByte(name, 0) >= 0 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return nil, fmt.Errorf("invalid filesystem root component %q", name)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		before, err := parent.Lstat(name)
+		if os.IsNotExist(err) && create {
+			if err := parent.Mkdir(name, perm.Perm()); os.IsExist(err) {
+				continue
+			} else if err != nil {
+				return nil, fmt.Errorf("create directory component %q: %w", name, err)
+			}
+			before, err = parent.Lstat(name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect directory component %q: %w", name, err)
+		}
+		if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+			return nil, fmt.Errorf("filesystem root component %q is not a regular directory", name)
+		}
+
+		child, err := parent.OpenRoot(name)
+		if err != nil {
+			return nil, fmt.Errorf("open directory component %q: %w", name, err)
+		}
+		pinned, statErr := child.Stat(".")
+		after, visibleErr := parent.Lstat(name)
+		if statErr == nil && visibleErr == nil && after.Mode()&os.ModeSymlink == 0 && after.IsDir() &&
+			os.SameFile(before, pinned) && os.SameFile(pinned, after) {
+			return child, nil
+		}
+		_ = child.Close()
+		if statErr != nil {
+			return nil, fmt.Errorf("stat pinned directory component %q: %w", name, statErr)
+		}
+		if visibleErr != nil {
+			return nil, fmt.Errorf("reinspect directory component %q: %w", name, visibleErr)
+		}
+		return nil, fmt.Errorf("directory component %q changed while opening", name)
+	}
+	return nil, fmt.Errorf("directory component %q changed while opening", name)
+}
+
 // JoinIdentifiers joins single-component identifiers under root. Identifiers
 // may not be absolute paths, traversal components, or contain either platform's
 // path separators. The returned path is absolute and symlink-checked.
@@ -248,12 +469,9 @@ func EnsureDir(root, target string, perm os.FileMode) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	absoluteRoot, err := ValidateRoot(root)
+	absoluteRoot, err := EnsureRoot(root, perm)
 	if err != nil {
 		return "", err
-	}
-	if err := os.MkdirAll(absoluteRoot, perm); err != nil {
-		return "", fmt.Errorf("create trusted root %q: %w", absoluteRoot, err)
 	}
 	rooted, relative, err := openRootTarget(absoluteRoot, absoluteTarget)
 	if err != nil {

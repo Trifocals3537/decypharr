@@ -34,7 +34,10 @@ func main() {
 	flag.StringVar(&configPath, "config", "/data", "path to the data folder")
 	flag.BoolVar(&debug, "debug", false, "enable debug mode for detailed output")
 	flag.Parse()
-	config.SetConfigPath(configPath)
+	if err := config.SetConfigPath(configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "invalid configuration path")
+		os.Exit(1)
+	}
 	cfg := config.Get()
 	// GetReader port from environment variable or use default
 	port := cmp.Or(os.Getenv("QBIT_PORT"), cfg.Port)

@@ -52,7 +52,10 @@ func main() {
 		Msg("NZB file read successfully")
 
 	// Create NNTP client (10 max connections for test)
-	config.SetConfigPath("data/")
+	if err := config.SetConfigPath("data/"); err != nil {
+		fmt.Fprintln(os.Stderr, "invalid parser data path")
+		os.Exit(1)
+	}
 	cfg := config.Get()
 	nntpClient, err := nntp.NewClient(cfg)
 	if err != nil {

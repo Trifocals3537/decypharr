@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 
 	json "github.com/bytedance/sonic"
+
+	"github.com/sirrobot01/decypharr/internal/safepath"
 )
 
 // The active configuration is an immutable snapshot. Writers serialize through
@@ -32,10 +34,18 @@ type UpdateResult struct {
 	RestartRequired bool
 }
 
-func SetConfigPath(path string) {
+func SetConfigPath(path string) error {
+	if path != "" {
+		validated, err := safepath.ValidateRoot(path)
+		if err != nil {
+			return fmt.Errorf("invalid configuration root: %w", err)
+		}
+		path = validated
+	}
 	pathMu.Lock()
 	configPath = path
 	pathMu.Unlock()
+	return nil
 }
 
 func GetMainPath() string {

@@ -26,7 +26,7 @@ All configuration options from [Real Debrid](./real-debrid/) apply (rate limits,
 ## Transient magnet recovery
 
 When uncached downloading is enabled and All Debrid reports status code `7`
-(`Not downloaded in 20 min`), Decypharr uses All Debrid's documented
+(`Not downloaded in 20 min`), Tessarr uses All Debrid's documented
 [magnet restart endpoint](https://docs.alldebrid.com/#restart) instead of
 immediately deleting the download. Recovery is bounded to two restart calls
 with a 30-minute cooldown; after that, the exact provider status is reported

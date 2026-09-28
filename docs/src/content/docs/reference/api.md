@@ -3,7 +3,7 @@ title: API Reference
 description: REST API endpoints.
 ---
 
-Decypharr provides a REST API for programmatic access.
+Tessarr provides a REST API for programmatic access.
 
 ## Authentication
 
@@ -20,7 +20,7 @@ Get API token from **Settings** → **Auth** after login.
 
 ### GET /version
 
-Get Decypharr version.
+Get Tessarr version.
 
 ```bash
 curl http://localhost:8282/version
@@ -39,7 +39,7 @@ curl http://localhost:8282/version
 Get the editable configuration without returning stored credentials. Configured
 provider keys, Arr tokens, Usenet and rclone passwords, proxy values, webhook
 URLs, and callback URLs are represented by the reserved
-`__DECYPHARR_REDACTED__` placeholder. The control-plane API token is never
+`__TESSARR_REDACTED__` placeholder. The control-plane API token is never
 returned; `api_token_configured` reports whether one exists.
 
 ```bash
@@ -240,7 +240,7 @@ curl -X POST \
 ### POST /webhooks/tautulli
 
 Trigger a targeted media recheck from Tautulli. When authentication is
-enabled, configure the notification agent to send Decypharr's API token in an
+enabled, configure the notification agent to send Tessarr's API token in an
 `Authorization: Bearer TOKEN` header. A payload without a media identifier
 starts a full sweep.
 
@@ -282,7 +282,7 @@ curl -X POST \
 
 ## QBitTorrent API
 
-Decypharr implements QBitTorrent Web API for Arr compatibility.
+Tessarr implements QBitTorrent Web API for Arr compatibility.
 
 ### POST /api/v2/auth/login
 
@@ -316,14 +316,14 @@ curl -X POST \
 ```
 
 When every eligible provider gives a definite cache miss, the endpoint returns
-`409 Conflict` with `X-Decypharr-Error-Code: torrent_not_cached`. Mixed failures
+`409 Conflict` with `X-Tessarr-Error-Code: torrent_not_cached`. Mixed failures
 (for example, a cache miss followed by a provider outage) are not mislabeled as
 an all-provider cache miss.
 
 When every eligible provider rejects the content permanently, the endpoint
 returns `422 Unprocessable Entity` with
-`X-Decypharr-Error-Code: torrent_content_rejected`. Real-Debrid HTTP 451
-responses use this outcome. Decypharr cools down that provider and info hash
+`X-Tessarr-Error-Code: torrent_content_rejected`. Real-Debrid HTTP 451
+responses use this outcome. Tessarr cools down that provider and info hash
 for 24 hours, so recurring Arr grabs do not repeatedly call the rejecting
 provider; other providers remain eligible. Cache misses and operational
 failures are never placed in this cooldown.

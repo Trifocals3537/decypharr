@@ -116,7 +116,7 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 
 The normal NZB probe checks whether sampled articles are available. For a
 manual, deeper check, call `POST /api/repair/run` with
-`"verify_content": true`. After the availability probe succeeds, Decypharr
+`"verify_content": true`. After the availability probe succeeds, Tessarr
 reads up to 512 logical bytes from the start of supported media files and
 checks for a recognized container signature.
 
@@ -165,7 +165,7 @@ Recovery is backend-only and supports Sonarr and Radarr. It is inspired by
 upstream beta's exact-binding and mutation-intent approach, without replacing
 this fork's storage, mount, or UI.
 
-- Before any deletion, Decypharr saves the old Arr file ID, path, size, and
+- Before any deletion, Tessarr saves the old Arr file ID, path, size, and
   media identities to a synchronously flushed `repair_recoveries.db` store.
   Sonarr multi-episode files retain **all** their episode IDs.
 - History blocklisting requires the **exact original download ID** and matching

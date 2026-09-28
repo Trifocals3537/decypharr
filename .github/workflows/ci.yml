@@ -66,6 +66,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Verify Tessarr brand boundary
+        run: bash scripts/check-brand.sh
+
       - name: Install pinned security analyzers
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0

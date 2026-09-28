@@ -27,7 +27,7 @@ It must not estimate missing bytes or join disconnected archive fragments.
   article's supplied CRC matches its decoded payload.
 
 An article listing is not proof of a readable body: some servers answer `STAT`
-successfully while retrieval fails. When `BODY` returns 430, Decypharr tries
+successfully while retrieval fails. When `BODY` returns 430, Tessarr tries
 `ARTICLE` once for the same message ID on that provider. It validates the response
 and Message-ID header, bounds header parsing, and sends the body through the
 normal decoder. This does not relax checksum or missing-article handling.

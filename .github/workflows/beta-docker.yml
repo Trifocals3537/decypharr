@@ -1,6 +1,7 @@
 name: Beta Docker Build
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - beta
@@ -15,11 +16,14 @@ concurrency:
 
 env:
   GHCR_IMAGE: ghcr.io/trifocals3537/tessarr
+  BETA_VERSION_BASE: "2.6.0"
 
 jobs:
   build:
     name: Build and publish beta image
-    if: github.repository == 'Trifocals3537/tessarr'
+    if: >-
+      github.repository == 'Trifocals3537/tessarr' &&
+      github.ref == 'refs/heads/beta'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -33,25 +37,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          latest_tag="$(
-            git tag --list --sort=-version:refname |
-              grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' |
-              head -n 1 || true
-          )"
-
-          if [[ -z "${latest_tag}" ]]; then
-            major=0
-            minor=0
-            patch=0
-          else
-            base_version="${latest_tag#v}"
-            IFS='.' read -r major minor patch <<< "${base_version}"
-            patch="${patch:-0}"
+          if [[ ! "${BETA_VERSION_BASE}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid BETA_VERSION_BASE: ${BETA_VERSION_BASE}" >&2
+            echo "Expected MAJOR.MINOR.PATCH" >&2
+            exit 1
           fi
 
-          next_patch=$((10#${patch} + 1))
           short_sha="${GITHUB_SHA::7}"
-          beta_version="${major}.${minor}.${next_patch}-beta.${GITHUB_RUN_NUMBER}.${short_sha}"
+          beta_version="${BETA_VERSION_BASE}-beta.${GITHUB_RUN_NUMBER}.${short_sha}"
 
           echo "version=${beta_version}" >> "${GITHUB_OUTPUT}"
           echo "Building beta version ${beta_version}"

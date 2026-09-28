@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,41 @@ func TestFreshTerminalStatusBypassesTorBoxCache(t *testing.T) {
 	torrent, err := client.CheckStatusFreshContext(context.Background(), &types.Torrent{Id: "42", DownloadUncached: true})
 	if !errors.Is(err, types.ErrTerminalProviderTorrent) || torrent.ProviderState != "failed (processing)" {
 		t.Fatalf("fresh terminal status = %+v, %v", torrent, err)
+	}
+}
+
+func TestTerminalStatusSurvivesTorBoxFileNormalizationFailure(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+			"id": 42, "name": "release", "download_state": "failed (processing)",
+			"download_finished": false,
+			"files": []any{
+				map[string]any{"id": 1, "name": "Release/Episode.mkv", "absolute_path": "Release/Episode.mkv", "size": 1024},
+				map[string]any{"id": 2, "name": "Release/Episode.mkv", "absolute_path": "Release/Episode.mkv", "size": 1024},
+			},
+		}})
+	}))
+	defer server.Close()
+
+	client := &Torbox{
+		Host:   server.URL,
+		client: request.New(request.WithMaxRetries(0), request.WithTimeout(2*time.Second)),
+		logger: zerolog.Nop(),
+		config: config.Debrid{Name: "torbox"},
+	}
+	torrent, err := client.CheckStatusFreshContext(context.Background(), &types.Torrent{
+		Id:               "42",
+		DownloadUncached: true,
+	})
+	if !errors.Is(err, types.ErrTerminalProviderTorrent) {
+		t.Fatalf("terminal normalization failure = %v, want terminal provider marker", err)
+	}
+	if !strings.Contains(err.Error(), "normalize TorBox torrent files") {
+		t.Fatalf("terminal normalization failure lost its cause: %v", err)
+	}
+	if torrent.ProviderState != "failed (processing)" || torrent.Status != types.TorrentStatusError {
+		t.Fatalf("torrent state = %q/%q, want failed (processing)/error", torrent.ProviderState, torrent.Status)
 	}
 }
 

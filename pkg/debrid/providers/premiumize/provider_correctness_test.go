@@ -141,6 +141,41 @@ func TestFinishedTransferWithPendingLinksIsNotRejectedAsUncached(t *testing.T) {
 	}
 }
 
+func TestPremiumizeTransferErrorClassifiesOnlyDocumentedErrorState(t *testing.T) {
+	err := premiumizeTransferStatusError("Release", "error")
+	if !errors.Is(err, types.ErrTerminalProviderTorrent) {
+		t.Fatalf("premiumizeTransferStatusError(error) = %v, want terminal provider marker", err)
+	}
+
+	err = premiumizeTransferStatusError("Release", "future_provider_state")
+	if errors.Is(err, types.ErrTerminalProviderTorrent) {
+		t.Fatalf("premiumizeTransferStatusError(unknown) = %v, unknown state must remain retryable", err)
+	}
+}
+
+func TestCheckStatusPreservesPremiumizeProviderState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","transfers":[{"id":"transfer-1","name":"Movie","status":"error","progress":0.25}]}`))
+	}))
+	defer server.Close()
+
+	client := &Premiumize{
+		Host:   server.URL,
+		client: request.New(request.WithMaxRetries(0)),
+		config: config.Debrid{Name: "premiumize-main"},
+	}
+	torrent := &types.Torrent{Id: "transfer-1", Name: "Movie", DownloadUncached: true}
+
+	got, err := client.CheckStatusContext(context.Background(), torrent)
+	if !errors.Is(err, types.ErrTerminalProviderTorrent) {
+		t.Fatalf("CheckStatusContext() error = %v, want terminal provider marker", err)
+	}
+	if got.ProviderState != "error" || got.Status != types.TorrentStatusError {
+		t.Fatalf("torrent state = %q/%q, want error/error", got.ProviderState, got.Status)
+	}
+}
+
 func TestFetchDownloadLinkReMintsStoredLink(t *testing.T) {
 	config.SetConfigPath(t.TempDir())
 

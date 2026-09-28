@@ -322,6 +322,30 @@ func (m *Manager) processQueuedNZB(ctx context.Context, entry *storage.Entry) er
 	return nil
 }
 
+func providerReportedTransferError(torrent *debridTypes.Torrent) bool {
+	return torrent != nil && torrent.Status == debridTypes.TorrentStatusError
+}
+
+func providerConfirmedTerminalTransfer(torrent *debridTypes.Torrent, err error) bool {
+	return providerReportedTransferError(torrent) &&
+		errors.Is(err, debridTypes.ErrTerminalProviderTorrent)
+}
+
+// freshUncachedProviderStatusProbe prevents a failed cached observation from being
+// mistaken for fresh terminal evidence when the confirmation request itself
+// fails before the provider can update the torrent. Provider identity and
+// transfer policy stay intact; only observation fields are cleared.
+func freshUncachedProviderStatusProbe(torrent *debridTypes.Torrent) *debridTypes.Torrent {
+	if torrent == nil {
+		return nil
+	}
+	probe := torrent.Copy()
+	probe.Status = ""
+	probe.ProviderState = ""
+	probe.DownloadUncached = true
+	return probe
+}
+
 func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry) error {
 	defer m.processingEntries.Delete(entry.InfoHash)
 	if err := ctx.Err(); err != nil {
@@ -366,32 +390,62 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
-	if err != nil {
-		if entry.DownloadUncached && errors.Is(err, debridTypes.ErrTerminalProviderTorrent) {
-			m.clearUncachedStallCandidate(stallKey)
-			m.uncachedFreshChecks.Add(1)
-			fresh, freshErr := checkFreshProviderStatus(ctx, client, debridTorrent)
-			if errors.Is(freshErr, debridTypes.ErrTerminalProviderTorrent) && fresh != nil && fresh.Status == debridTypes.TorrentStatusError {
-				entry.TerminalChecks++
-				if entry.TerminalChecks >= 2 {
-					entry.MarkAsStalled(fmt.Errorf("provider confirmed terminal uncached transfer"))
-					entry.GetActiveProvider().Status = debridTypes.TorrentStatusError
-					entry.HandoffReason = "terminal"
-					m.uncachedTerminalConfirmed.Add(1)
-					m.logger.Warn().Str("name", entry.Name).Str("provider", entry.ActiveProvider).Msg("Confirmed terminal uncached transfer; waiting for Arr replacement handoff")
-				} else {
-					m.logger.Warn().Str("name", entry.Name).Msg("Provider reported terminal transfer state; awaiting second fresh confirmation")
-				}
-				return m.queue.Update(entry)
+	if entry.DownloadUncached && providerConfirmedTerminalTransfer(dbT, err) {
+		// The provider's explicit terminal sentinel is the portable contract.
+		// A normalized error status alone can also represent an unknown future
+		// provider state, so require the sentinel and a cache-bypassing repeat
+		// observation before handing the release back to Arr.
+		m.clearUncachedStallCandidate(stallKey)
+		m.uncachedFreshChecks.Add(1)
+		freshSource := dbT
+		if freshSource == nil {
+			freshSource = debridTorrent
+		}
+		fresh, freshErr := checkFreshProviderStatus(
+			ctx,
+			client,
+			freshUncachedProviderStatusProbe(freshSource),
+		)
+		if providerConfirmedTerminalTransfer(fresh, freshErr) {
+			entry.TerminalChecks++
+			if entry.TerminalChecks >= 2 {
+				entry.MarkAsStalled(fmt.Errorf("provider confirmed terminal uncached transfer"))
+				entry.GetActiveProvider().Status = debridTypes.TorrentStatusError
+				entry.HandoffReason = "terminal"
+				m.uncachedTerminalConfirmed.Add(1)
+				m.logger.Warn().Str("name", entry.Name).Str("provider", entry.ActiveProvider).Msg("Confirmed terminal uncached transfer; waiting for Arr replacement handoff")
+			} else {
+				m.logger.Warn().Str("name", entry.Name).Msg("Provider reported terminal transfer state; awaiting second fresh confirmation")
 			}
-			if freshErr != nil {
-				m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm provider transfer failure; retaining queued job")
-				entry.TerminalChecks = 0
-				return m.queue.Update(entry)
-			}
+			return m.queue.Update(entry)
+		}
+		if freshErr != nil {
+			m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm provider transfer failure; retaining queued job")
 			entry.TerminalChecks = 0
-			dbT = fresh
-		} else if dbT == nil || dbT.Status != debridTypes.TorrentStatusError {
+			return m.queue.Update(entry)
+		}
+		entry.TerminalChecks = 0
+		dbT = fresh
+		err = nil
+	} else if entry.DownloadUncached && providerReportedTransferError(dbT) {
+		// Keep unclassified provider states visible and retryable. In particular,
+		// TorBox maps unknown future download_state values to StatusError so they
+		// fail closed, but does not mark them terminal. Deleting the placement or
+		// handing it to Arr here could replace a transfer that is still active.
+		m.clearUncachedStallCandidate(stallKey)
+		m.logger.Warn().
+			Err(err).
+			Str("name", entry.Name).
+			Str("provider", entry.ActiveProvider).
+			Str("provider_state", dbT.ProviderState).
+			Msg("Provider returned unclassified uncached error state; retaining queued job")
+		if entry.TerminalChecks != 0 {
+			entry.TerminalChecks = 0
+			return m.queue.Update(entry)
+		}
+		return nil
+	} else if err != nil {
+		if dbT == nil || dbT.Status != debridTypes.TorrentStatusError {
 			m.clearUncachedStallCandidate(stallKey)
 			m.logger.Warn().Err(err).Str("name", entry.Name).Msg("Provider status unavailable; retaining queued job for retry")
 			if entry.TerminalChecks != 0 {
@@ -457,7 +511,12 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		placement.Progress = entry.Progress
 	}
 
-	stallKind, stallTimeout := uncachedStallPolicy(debridTorrent.ProviderState, debridTorrent.Seeders, m.uncachedStallTimeout)
+	stallKind, stallTimeout := uncachedStallPolicy(
+		debridTorrent.ProviderState,
+		debridTorrent.Status,
+		debridTorrent.Seeders,
+		m.uncachedStallTimeout,
+	)
 	if stallKind != "" && uncachedTransferStalled(
 		entry,
 		debridTorrent.Status,
@@ -471,7 +530,12 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 			m.logger.Warn().Err(freshErr).Str("name", entry.Name).Msg("Could not confirm uncached stall; retaining queued job")
 			return m.queue.Update(entry)
 		}
-		freshKind, _ := uncachedStallPolicy(fresh.ProviderState, fresh.Seeders, m.uncachedStallTimeout)
+		freshKind, _ := uncachedStallPolicy(
+			fresh.ProviderState,
+			fresh.Status,
+			fresh.Seeders,
+			m.uncachedStallTimeout,
+		)
 		if fresh.Status != debridTypes.TorrentStatusDownloading || freshKind != stallKind || fresh.Speed > 0 || fresh.Progress/100.0 > entry.Progress {
 			m.clearUncachedStallCandidate(stallKey)
 			entry.ObserveTransfer(fresh.Progress/100.0, time.Now())

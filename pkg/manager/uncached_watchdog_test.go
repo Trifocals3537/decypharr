@@ -147,6 +147,8 @@ func TestTerminalUncachedFailureRequiresTwoFreshConfirmations(t *testing.T) {
 		},
 		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
 			freshCalls.Add(1)
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "failed (processing)"
 			return torrent, debridTypes.ErrTerminalProviderTorrent
 		},
 	})
@@ -174,6 +176,93 @@ func TestTerminalUncachedFailureRequiresTwoFreshConfirmations(t *testing.T) {
 	}
 }
 
+func TestUnclassifiedUncachedProviderErrorStaysQueued(t *testing.T) {
+	m := newQueueRecoveryTestManager(t)
+	entry := interruptedQueueTestEntry("unclassified-provider-transfer")
+	entry.Status = debridTypes.TorrentStatusDownloading
+	entry.IsDownloading = false
+	entry.TerminalChecks = 1
+	if err := m.queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	var freshCalls atomic.Int32
+	var deleteCalls atomic.Int32
+	m.clients.Store("torbox", &routingTestClient{
+		cfg: config.Debrid{Name: "torbox"},
+		check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "provider-specific-error"
+			return torrent, errors.New("torrent has error")
+		},
+		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			freshCalls.Add(1)
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "provider-specific-error"
+			return torrent, errors.New("torrent has error")
+		},
+		delete: func(string) error {
+			deleteCalls.Add(1)
+			return nil
+		},
+	})
+
+	for range 2 {
+		if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
+			t.Fatal(err)
+		}
+		current, err := m.queue.GetTorrent(entry.InfoHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.TerminalChecks != 0 {
+			t.Fatalf("checks = %d, want reset for an unclassified state", current.TerminalChecks)
+		}
+		if current.State != storage.EntryStateDownloading || current.HandoffReason != "" {
+			t.Fatalf("unclassified failure = %s/%s, want downloading with no handoff", current.State, current.HandoffReason)
+		}
+		entry = current
+	}
+	if freshCalls.Load() != 0 {
+		t.Fatalf("fresh calls = %d, want 0 without an explicit terminal classification", freshCalls.Load())
+	}
+	if deleteCalls.Load() != 0 {
+		t.Fatalf("provider delete calls = %d, want 0 before Arr handoff", deleteCalls.Load())
+	}
+}
+
+func TestTerminalSentinelNeedsProviderErrorStatus(t *testing.T) {
+	m := newQueueRecoveryTestManager(t)
+	entry := interruptedQueueTestEntry("terminal-sentinel-without-error-state")
+	entry.Status = debridTypes.TorrentStatusDownloading
+	entry.IsDownloading = false
+	entry.TerminalChecks = 1
+	if err := m.queue.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	m.clients.Store("torbox", &routingTestClient{
+		cfg: config.Debrid{Name: "torbox"},
+		check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
+			torrent.Status = debridTypes.TorrentStatusDownloading
+			torrent.ProviderState = "downloading"
+			return torrent, debridTypes.ErrTerminalProviderTorrent
+		},
+	})
+
+	if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+	current, err := m.queue.GetTorrent(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.TerminalChecks != 0 {
+		t.Fatalf("checks = %d, want reset without provider error status", current.TerminalChecks)
+	}
+	if current.State != storage.EntryStateDownloading || current.HandoffReason != "" {
+		t.Fatalf("sentinel-only failure = %s/%s, want downloading with no handoff", current.State, current.HandoffReason)
+	}
+}
+
 func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
 	m := newQueueRecoveryTestManager(t)
 	entry := interruptedQueueTestEntry("transient-provider-error")
@@ -194,6 +283,8 @@ func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
 			if freshCalls.Add(1) == 2 {
 				return torrent, errors.New("temporary provider outage")
 			}
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "failed"
 			return torrent, debridTypes.ErrTerminalProviderTorrent
 		},
 	})
@@ -215,27 +306,33 @@ func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
 func TestUncachedStallPolicyUsesStateNotSeederCountAlone(t *testing.T) {
 	for _, test := range []struct {
 		state   string
+		status  debridTypes.TorrentStatus
 		seeders int
 		want    string
 		timeout time.Duration
 	}{
-		{state: "stalled (no seeds)", want: "no_seeds", timeout: 10 * time.Minute},
-		{state: "stalledDL", want: "no_seeds", timeout: 10 * time.Minute},
-		{state: "stalled (no seeds)", seeders: 2, want: "stalled", timeout: 30 * time.Minute},
-		{state: "metaDL", want: "metadata", timeout: 20 * time.Minute},
-		{state: "downloading", want: "stalled", timeout: 30 * time.Minute},
-		{state: "stalledDL", seeders: 2, want: "stalled", timeout: 30 * time.Minute},
-		{state: "", want: "stalled", timeout: 30 * time.Minute},
-		{state: "paused"},
-		{state: "checkingDL"},
-		{state: "queued"},
+		{state: "stalled (no seeds)", status: debridTypes.TorrentStatusDownloading, want: "no_seeds", timeout: 10 * time.Minute},
+		{state: "stalledDL", status: debridTypes.TorrentStatusDownloading, want: "no_seeds", timeout: 10 * time.Minute},
+		{state: "stalled (no seeds)", status: debridTypes.TorrentStatusDownloading, seeders: 2, want: "stalled", timeout: 30 * time.Minute},
+		{state: "metaDL", status: debridTypes.TorrentStatusDownloading, want: "metadata", timeout: 20 * time.Minute},
+		{state: "downloading", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "stalledDL", status: debridTypes.TorrentStatusDownloading, seeders: 2, want: "stalled", timeout: 30 * time.Minute},
+		{state: "", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "0", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "running", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "finished", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "magnet_conversion", status: debridTypes.TorrentStatusDownloading, want: "stalled", timeout: 30 * time.Minute},
+		{state: "paused", status: debridTypes.TorrentStatusDownloading},
+		{state: "checkingDL", status: debridTypes.TorrentStatusDownloading},
+		{state: "queued", status: debridTypes.TorrentStatusQueued},
+		{state: "future-provider-state", status: debridTypes.TorrentStatusError},
 	} {
-		kind, timeout := uncachedStallPolicy(test.state, test.seeders, 30*time.Minute)
+		kind, timeout := uncachedStallPolicy(test.state, test.status, test.seeders, 30*time.Minute)
 		if kind != test.want || timeout != test.timeout {
 			t.Errorf("state %q, seeders %d = %q/%s, want %q/%s", test.state, test.seeders, kind, timeout, test.want, test.timeout)
 		}
 	}
-	if kind, timeout := uncachedStallPolicy("metaDL", 0, 0); kind != "" || timeout != 0 {
+	if kind, timeout := uncachedStallPolicy("metaDL", debridTypes.TorrentStatusDownloading, 0, 0); kind != "" || timeout != 0 {
 		t.Fatalf("disabled watchdog = %q/%s", kind, timeout)
 	}
 }
@@ -272,6 +369,8 @@ func TestQueuedUncachedStateSpecificStallThresholds(t *testing.T) {
 		{name: "metadata after twenty minutes", state: "metaDL", noProgressFor: 21 * time.Minute, wantKind: "metadata"},
 		{name: "ordinary download before thirty minutes", state: "downloading", noProgressFor: 21 * time.Minute},
 		{name: "zero seeds alone does not accelerate", state: "downloading", noProgressFor: 11 * time.Minute},
+		{name: "AllDebrid active code uses generic timeout", state: "0", noProgressFor: 31 * time.Minute, wantKind: "stalled"},
+		{name: "Premiumize running uses generic timeout", state: "running", noProgressFor: 31 * time.Minute, wantKind: "stalled"},
 		{name: "paused is not a stall", state: "paused", noProgressFor: time.Hour},
 	} {
 		t.Run(test.name, func(t *testing.T) {

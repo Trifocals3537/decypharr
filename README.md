@@ -133,6 +133,8 @@ for verification and managed-host guidance.
 See the [documentation source](docs/src/content/docs/) while the fork's
 standalone documentation site is being prepared.
 
+See the [changelog](CHANGELOG.md) for the upcoming release and upgrade notes.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

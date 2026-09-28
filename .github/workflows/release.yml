@@ -21,6 +21,11 @@ jobs:
       version: ${{ steps.metadata.outputs.version }}
       channel: ${{ steps.metadata.outputs.channel }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
       - name: Extract version and channel
         id: metadata
         shell: bash
@@ -38,14 +43,26 @@ jobs:
           case "${version}" in
             *-beta*)
               channel=beta
+              release_branch=beta
               ;;
             *-rc*)
               channel=rc
+              release_branch=beta
               ;;
             *)
               channel=stable
+              release_branch=main
               ;;
           esac
+
+          git fetch --no-tags origin \
+            "+refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
+          tag_commit="$(git rev-list -n 1 "${GITHUB_REF}")"
+          if ! git merge-base --is-ancestor \
+            "${tag_commit}" "refs/remotes/origin/${release_branch}"; then
+            echo "${tag} must point to a commit on the ${release_branch} branch" >&2
+            exit 1
+          fi
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "channel=${channel}" >> "${GITHUB_OUTPUT}"

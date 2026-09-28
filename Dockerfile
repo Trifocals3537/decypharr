@@ -30,9 +30,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 \
     xx-go build -trimpath \
-    -ldflags="-w -s -X github.com/sirrobot01/decypharr/pkg/version.Version=${VERSION} -X github.com/sirrobot01/decypharr/pkg/version.Channel=${CHANNEL}" \
-    -o /decypharr && \
-    xx-verify /decypharr
+    -ldflags="-w -s -X github.com/Trifocals3537/tessarr/pkg/version.Version=${VERSION} -X github.com/Trifocals3537/tessarr/pkg/version.Channel=${CHANNEL}" \
+    -o /tessarr && \
+    xx-verify /tessarr
 
 # Build healthcheck (no CGO needed, plain cross-compile)
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -48,10 +48,10 @@ ARG VERSION=0.0.0
 ARG CHANNEL=dev
 
 LABEL version="${VERSION}-${CHANNEL}"
-LABEL org.opencontainers.image.source="https://github.com/Trifocals3537/decypharr"
-LABEL org.opencontainers.image.title="decypharr"
-LABEL org.opencontainers.image.authors="Decypharr contributors"
-LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/decypharr/blob/beta/README.md"
+LABEL org.opencontainers.image.source="https://github.com/Trifocals3537/tessarr"
+LABEL org.opencontainers.image.title="tessarr"
+LABEL org.opencontainers.image.authors="Tessarr contributors"
+LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/tessarr/blob/beta/README.md"
 
 # Install dependencies including rclone (from binary)
 RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata && \
@@ -70,7 +70,7 @@ RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata &&
     apk del curl unzip
 
 # Copy binaries and entrypoint
-COPY --from=builder /decypharr /usr/bin/decypharr
+COPY --from=builder /tessarr /usr/bin/tessarr
 COPY --from=builder /healthcheck /usr/bin/healthcheck
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -79,7 +79,7 @@ RUN chmod +x /entrypoint.sh
 ENV PUID=1000
 ENV PGID=1000
 ENV LOG_PATH=/app/logs
-ENV DECYPHARR_BIND_ADDRESS=0.0.0.0
+ENV TESSARR_BIND_ADDRESS=0.0.0.0
 
 EXPOSE 8282
 VOLUME ["/app"]
@@ -87,4 +87,4 @@ VOLUME ["/app"]
 HEALTHCHECK --interval=10s --timeout=35s --start-period=120s --retries=10 CMD ["/usr/bin/healthcheck", "--config", "/app"]
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/usr/bin/decypharr", "--config", "/app"]
+CMD ["/usr/bin/tessarr", "--config", "/app"]

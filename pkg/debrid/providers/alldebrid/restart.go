@@ -57,16 +57,20 @@ var allDebridStatusDescriptions = map[int]string{
 }
 
 func newAllDebridStatusError(name string, statusCode int) error {
-	description := allDebridStatusDescriptions[statusCode]
-	if description == "" {
+	description, terminal := allDebridStatusDescriptions[statusCode]
+	if !terminal {
 		description = "unknown provider status"
 	}
-	return fmt.Errorf(
+	err := fmt.Errorf(
 		"torrent %q has AllDebrid error status %d (%s)",
 		name,
 		statusCode,
 		description,
 	)
+	if terminal {
+		return fmt.Errorf("%w: %v", types.ErrTerminalProviderTorrent, err)
+	}
+	return err
 }
 
 func (ad *AllDebrid) recoverNotDownloadedTorrentContext(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {

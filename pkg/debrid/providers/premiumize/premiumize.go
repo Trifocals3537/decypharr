@@ -272,7 +272,15 @@ func (pm *Premiumize) updateAndReturnTorrentContext(ctx context.Context, t *type
 		}
 		return t, nil
 	}
-	return t, fmt.Errorf("torrent: %s has error status: %s", t.Name, t.Status)
+	return t, premiumizeTransferStatusError(t.Name, t.ProviderState)
+}
+
+func premiumizeTransferStatusError(name, status string) error {
+	err := fmt.Errorf("torrent: %s has error status: %s", name, status)
+	if strings.EqualFold(strings.TrimSpace(status), "error") {
+		return fmt.Errorf("%w: %v", types.ErrTerminalProviderTorrent, err)
+	}
+	return err
 }
 
 func (pm *Premiumize) GetTorrent(torrentID string) (*types.Torrent, error) {
@@ -314,6 +322,7 @@ func (pm *Premiumize) updateTorrentContext(ctx context.Context, t *types.Torrent
 			t.Size = updated.Size
 			t.Progress = updated.Progress
 			t.Status = updated.Status
+			t.ProviderState = updated.ProviderState
 			t.Files = updated.Files
 			t.Links = updated.Links
 			t.Debrid = updated.Debrid
@@ -422,7 +431,8 @@ func (pm *Premiumize) transferToTorrent(tr premiumizeTransfer, fallbackInfoHash 
 }
 
 func (pm *Premiumize) transferToTorrentContext(ctx context.Context, tr premiumizeTransfer, fallbackInfoHash string) (*types.Torrent, error) {
-	status := mapStatus(tr.Status)
+	providerState := strings.ToLower(strings.TrimSpace(tr.Status))
+	status := mapStatus(providerState)
 	files := make(map[string]types.File)
 	var links []string
 	if status == types.TorrentStatusDownloaded {
@@ -457,6 +467,7 @@ func (pm *Premiumize) transferToTorrentContext(ctx context.Context, tr premiumiz
 		Size:             size,
 		Files:            files,
 		Status:           status,
+		ProviderState:    providerState,
 		Progress:         normalizeProgress(tr.Progress),
 		Links:            links,
 		Debrid:           pm.config.Name,
@@ -883,7 +894,7 @@ func (pm *Premiumize) SupportsCheck() bool {
 }
 
 func mapStatus(status string) types.TorrentStatus {
-	switch strings.ToLower(status) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "finished", "seeding":
 		return types.TorrentStatusDownloaded
 	case "queued":

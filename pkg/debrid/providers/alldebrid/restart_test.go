@@ -86,13 +86,36 @@ func TestCheckStatusPreservesOtherTerminalAllDebridCodes(t *testing.T) {
 	defer server.Close()
 	provider := newAllDebridRestartTestProvider(server.URL, time.Now)
 
-	_, err := provider.CheckStatus(&types.Torrent{Id: "42", Name: "Release", DownloadUncached: true})
+	torrent := &types.Torrent{Id: "42", Name: "Release", DownloadUncached: true}
+	_, err := provider.CheckStatus(torrent)
 	if err == nil || !strings.Contains(err.Error(), "status 10") ||
 		!strings.Contains(err.Error(), "72 hours") {
 		t.Fatalf("CheckStatus() error = %v, want descriptive terminal status", err)
 	}
+	if !errors.Is(err, types.ErrTerminalProviderTorrent) {
+		t.Fatalf("CheckStatus() error = %v, want terminal provider marker", err)
+	}
+	if torrent.ProviderState != "10" {
+		t.Fatalf("provider state = %q, want raw AllDebrid status 10", torrent.ProviderState)
+	}
 	if got := restartCalls.Load(); got != 0 {
 		t.Fatalf("restart calls = %d, want 0 for status 10", got)
+	}
+}
+
+func TestAllDebridStatusErrorClassifiesOnlyDocumentedTerminalCodes(t *testing.T) {
+	for statusCode := 5; statusCode <= 15; statusCode++ {
+		err := newAllDebridStatusError("Release", statusCode)
+		if !errors.Is(err, types.ErrTerminalProviderTorrent) {
+			t.Fatalf("newAllDebridStatusError(%d) = %v, want terminal provider marker", statusCode, err)
+		}
+	}
+
+	for _, statusCode := range []int{4, 16, 99} {
+		err := newAllDebridStatusError("Release", statusCode)
+		if errors.Is(err, types.ErrTerminalProviderTorrent) {
+			t.Fatalf("newAllDebridStatusError(%d) = %v, undocumented status must remain retryable", statusCode, err)
+		}
 	}
 }
 

@@ -761,6 +761,16 @@ func getStatus(status string) types.TorrentStatus {
 	}
 }
 
+func realDebridStatusError(name, status string) error {
+	err := fmt.Errorf("torrent: %s has error status: %s", name, status)
+	switch status {
+	case "magnet_error", "error", "virus", "dead":
+		return fmt.Errorf("%w: %v", types.ErrTerminalProviderTorrent, err)
+	default:
+		return err
+	}
+}
+
 func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 	var data torrentInfo
 
@@ -896,7 +906,7 @@ func (r *RealDebrid) CheckStatusContext(ctx context.Context, t *types.Torrent) (
 				Str("debrid_status", debridStatus).
 				Str("mapped_status", string(t.Status)).
 				Msg("Unexpected debrid status, treating as error")
-			return t, fmt.Errorf("torrent: %s has error status: %s", t.Name, debridStatus)
+			return t, realDebridStatusError(t.Name, debridStatus)
 		}
 	}
 }

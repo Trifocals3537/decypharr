@@ -423,6 +423,7 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Id:               strconv.Itoa(data.Id),
 		Name:             name,
 		Status:           status,
+		ProviderState:    strconv.Itoa(data.StatusCode),
 		Filename:         name,
 		OriginalFilename: name,
 		Files:            make(map[string]types.File),
@@ -477,6 +478,7 @@ func (ad *AllDebrid) updateTorrentContext(ctx context.Context, t *types.Torrent)
 	name := data.Filename
 	t.Name = name
 	t.Status = status
+	t.ProviderState = strconv.Itoa(data.StatusCode)
 	t.Filename = name
 	t.OriginalFilename = name
 	t.Debrid = ad.config.Name

@@ -309,7 +309,11 @@ jobs:
   docker:
     name: Publish container image
     runs-on: ubuntu-latest
-    needs: prepare
+    needs:
+      - prepare
+      - build-linux
+      - build-windows
+      - build-darwin
     permissions:
       contents: read
       packages: write

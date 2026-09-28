@@ -20,6 +20,7 @@ auth.json
 .env
 node_modules/
 .cache/
+.deploy/
 .venv/
 .stignore
 .stfolder/**

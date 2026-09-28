@@ -327,8 +327,8 @@ func providerReportedTransferError(torrent *debridTypes.Torrent) bool {
 }
 
 func providerConfirmedTerminalTransfer(torrent *debridTypes.Torrent, err error) bool {
-	return torrent != nil && (errors.Is(err, debridTypes.ErrTerminalProviderTorrent) ||
-		providerReportedTransferError(torrent))
+	return providerReportedTransferError(torrent) &&
+		errors.Is(err, debridTypes.ErrTerminalProviderTorrent)
 }
 
 // freshUncachedProviderStatusProbe prevents a failed cached observation from being
@@ -391,11 +391,10 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		return ctxErr
 	}
 	if entry.DownloadUncached && providerConfirmedTerminalTransfer(dbT, err) {
-		// Providers do not all wrap their error state with the shared terminal
-		// sentinel. The status value is the portable contract, but it must be
-		// observed again through a cache-bypassing request before Arr handoff.
-		// This keeps generic provider errors out of legacy age-based cleanup,
-		// which would otherwise silently remove the qBittorrent row.
+		// The provider's explicit terminal sentinel is the portable contract.
+		// A normalized error status alone can also represent an unknown future
+		// provider state, so require the sentinel and a cache-bypassing repeat
+		// observation before handing the release back to Arr.
 		m.clearUncachedStallCandidate(stallKey)
 		m.uncachedFreshChecks.Add(1)
 		freshSource := dbT
@@ -428,6 +427,23 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 		entry.TerminalChecks = 0
 		dbT = fresh
 		err = nil
+	} else if entry.DownloadUncached && providerReportedTransferError(dbT) {
+		// Keep unclassified provider states visible and retryable. In particular,
+		// TorBox maps unknown future download_state values to StatusError so they
+		// fail closed, but does not mark them terminal. Deleting the placement or
+		// handing it to Arr here could replace a transfer that is still active.
+		m.clearUncachedStallCandidate(stallKey)
+		m.logger.Warn().
+			Err(err).
+			Str("name", entry.Name).
+			Str("provider", entry.ActiveProvider).
+			Str("provider_state", dbT.ProviderState).
+			Msg("Provider returned unclassified uncached error state; retaining queued job")
+		if entry.TerminalChecks != 0 {
+			entry.TerminalChecks = 0
+			return m.queue.Update(entry)
+		}
+		return nil
 	} else if err != nil {
 		if dbT == nil || dbT.Status != debridTypes.TorrentStatusError {
 			m.clearUncachedStallCandidate(stallKey)

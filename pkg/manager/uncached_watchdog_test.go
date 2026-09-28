@@ -147,6 +147,8 @@ func TestTerminalUncachedFailureRequiresTwoFreshConfirmations(t *testing.T) {
 		},
 		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
 			freshCalls.Add(1)
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "failed (processing)"
 			return torrent, debridTypes.ErrTerminalProviderTorrent
 		},
 	})
@@ -174,11 +176,12 @@ func TestTerminalUncachedFailureRequiresTwoFreshConfirmations(t *testing.T) {
 	}
 }
 
-func TestGenericUncachedProviderErrorUsesDurableHandoff(t *testing.T) {
+func TestUnclassifiedUncachedProviderErrorStaysQueued(t *testing.T) {
 	m := newQueueRecoveryTestManager(t)
-	entry := interruptedQueueTestEntry("generic-terminal-provider-transfer")
+	entry := interruptedQueueTestEntry("unclassified-provider-transfer")
 	entry.Status = debridTypes.TorrentStatusDownloading
 	entry.IsDownloading = false
+	entry.TerminalChecks = 1
 	if err := m.queue.Add(entry); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +206,7 @@ func TestGenericUncachedProviderErrorUsesDurableHandoff(t *testing.T) {
 		},
 	})
 
-	for n := 1; n <= 2; n++ {
+	for range 2 {
 		if err := m.processQueuedTorrent(context.Background(), entry); err != nil {
 			t.Fatal(err)
 		}
@@ -211,28 +214,25 @@ func TestGenericUncachedProviderErrorUsesDurableHandoff(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if current.TerminalChecks != n {
-			t.Fatalf("checks = %d, want %d", current.TerminalChecks, n)
+		if current.TerminalChecks != 0 {
+			t.Fatalf("checks = %d, want reset for an unclassified state", current.TerminalChecks)
 		}
-		if n == 1 && current.State != storage.EntryStateDownloading {
-			t.Fatalf("first failure state = %s, want downloading", current.State)
-		}
-		if n == 2 && (current.State != storage.EntryStateStalledDL || current.HandoffReason != "terminal") {
-			t.Fatalf("confirmed failure = %s/%s, want stalledDL/terminal", current.State, current.HandoffReason)
+		if current.State != storage.EntryStateDownloading || current.HandoffReason != "" {
+			t.Fatalf("unclassified failure = %s/%s, want downloading with no handoff", current.State, current.HandoffReason)
 		}
 		entry = current
 	}
-	if freshCalls.Load() != 2 {
-		t.Fatalf("fresh calls = %d, want 2", freshCalls.Load())
+	if freshCalls.Load() != 0 {
+		t.Fatalf("fresh calls = %d, want 0 without an explicit terminal classification", freshCalls.Load())
 	}
 	if deleteCalls.Load() != 0 {
 		t.Fatalf("provider delete calls = %d, want 0 before Arr handoff", deleteCalls.Load())
 	}
 }
 
-func TestGenericUncachedProviderErrorNeedsFreshErrorState(t *testing.T) {
+func TestTerminalSentinelNeedsProviderErrorStatus(t *testing.T) {
 	m := newQueueRecoveryTestManager(t)
-	entry := interruptedQueueTestEntry("generic-transient-provider-error")
+	entry := interruptedQueueTestEntry("terminal-sentinel-without-error-state")
 	entry.Status = debridTypes.TorrentStatusDownloading
 	entry.IsDownloading = false
 	entry.TerminalChecks = 1
@@ -242,15 +242,9 @@ func TestGenericUncachedProviderErrorNeedsFreshErrorState(t *testing.T) {
 	m.clients.Store("torbox", &routingTestClient{
 		cfg: config.Debrid{Name: "torbox"},
 		check: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
-			torrent.Status = debridTypes.TorrentStatusError
-			torrent.ProviderState = "provider-specific-error"
-			return torrent, errors.New("torrent has error")
-		},
-		fresh: func(torrent *debridTypes.Torrent) (*debridTypes.Torrent, error) {
-			if torrent.Status != "" || torrent.ProviderState != "" {
-				t.Fatalf("fresh probe retained stale state %q/%q", torrent.Status, torrent.ProviderState)
-			}
-			return torrent, errors.New("temporary provider outage")
+			torrent.Status = debridTypes.TorrentStatusDownloading
+			torrent.ProviderState = "downloading"
+			return torrent, debridTypes.ErrTerminalProviderTorrent
 		},
 	})
 
@@ -262,10 +256,10 @@ func TestGenericUncachedProviderErrorNeedsFreshErrorState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if current.TerminalChecks != 0 {
-		t.Fatalf("checks = %d, want reset after unconfirmed error", current.TerminalChecks)
+		t.Fatalf("checks = %d, want reset without provider error status", current.TerminalChecks)
 	}
 	if current.State != storage.EntryStateDownloading || current.HandoffReason != "" {
-		t.Fatalf("unconfirmed failure = %s/%s, want downloading with no handoff", current.State, current.HandoffReason)
+		t.Fatalf("sentinel-only failure = %s/%s, want downloading with no handoff", current.State, current.HandoffReason)
 	}
 }
 
@@ -289,6 +283,8 @@ func TestTransientFreshCheckBreaksTerminalConfirmation(t *testing.T) {
 			if freshCalls.Add(1) == 2 {
 				return torrent, errors.New("temporary provider outage")
 			}
+			torrent.Status = debridTypes.TorrentStatusError
+			torrent.ProviderState = "failed"
 			return torrent, debridTypes.ErrTerminalProviderTorrent
 		},
 	})

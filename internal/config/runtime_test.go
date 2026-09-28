@@ -21,6 +21,36 @@ func useRuntimeConfig(t *testing.T) *Config {
 	return Get()
 }
 
+func TestSetConfigPathValidatesAndCanonicalizesRoot(t *testing.T) {
+	oldPath := GetMainPath()
+	t.Cleanup(func() { _ = SetConfigPath(oldPath) })
+
+	parent := t.TempDir()
+	configured := filepath.Join(parent, "nested", "..", "config")
+	if err := SetConfigPath(configured); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(filepath.Clean(configured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := GetMainPath(); got != want {
+		t.Fatalf("GetMainPath() = %q, want %q", got, want)
+	}
+
+	outside := t.TempDir()
+	link := filepath.Join(parent, "config-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := SetConfigPath(link); err == nil {
+		t.Fatal("SetConfigPath() accepted a symlink root")
+	}
+	if got := GetMainPath(); got != want {
+		t.Fatalf("failed SetConfigPath() changed root to %q", got)
+	}
+}
+
 func TestUpdatePublishesImmutableHotSnapshot(t *testing.T) {
 	previous := useRuntimeConfig(t)
 	originalRelative := previous.RelativeSymlinks

@@ -59,12 +59,9 @@ type NZBStorage struct {
 // NewNZBStorage creates a new file-based NZB storage
 func NewNZBStorage() (*NZBStorage, error) {
 	metaDir := filepath.Join(config.GetMainPath(), "usenet", metaDirName)
-	if err := os.MkdirAll(metaDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create meta directory: %w", err)
-	}
-	metaDir, err := safepath.ValidateRoot(metaDir)
+	metaDir, err := safepath.EnsureRoot(metaDir, 0o755)
 	if err != nil {
-		return nil, fmt.Errorf("invalid meta directory: %w", err)
+		return nil, fmt.Errorf("failed to create meta directory: %w", err)
 	}
 
 	s := &NZBStorage{

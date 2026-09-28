@@ -242,6 +242,48 @@ func TestValidateRootRejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestEnsureRootCreatesNestedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	want := filepath.Join(parent, "cache", "segments")
+	got, err := EnsureRoot(want, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("EnsureRoot() = %q, want %q", got, want)
+	}
+	info, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("EnsureRoot() created non-directory mode %v", info.Mode())
+	}
+	rooted, absolute, err := OpenRoot(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	if absolute != want {
+		t.Fatalf("OpenRoot() path = %q, want %q", absolute, want)
+	}
+}
+
+func TestEnsureRootRejectsSymlinkParent(t *testing.T) {
+	parent := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(parent, "cache")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := EnsureRoot(filepath.Join(link, "segments"), 0o700); err == nil {
+		t.Fatal("EnsureRoot() accepted a symlink parent")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "segments")); !os.IsNotExist(err) {
+		t.Fatalf("EnsureRoot() created content outside its boundary: %v", err)
+	}
+}
+
 func TestOpenFileDoesNotTruncateOutsideHardLink(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

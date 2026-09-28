@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -262,7 +261,7 @@ func New() (*Usenet, error) {
 	_logger := logger.New("usenet")
 
 	metadataDir := filepath.Join(config.GetMainPath(), "usenet", "nzbs")
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
+	if _, err := safepath.EnsureRoot(metadataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create metadata dir: %w", err)
 	}
 

@@ -94,7 +94,9 @@ func main() {
 		return
 	}
 
-	config.SetConfigPath(configPath)
+	if err := config.SetConfigPath(configPath); err != nil {
+		log.Fatalf("Invalid Decypharr data path: %v", err)
+	}
 	cfg := config.Get()
 
 	if setAuthUsername != "" {

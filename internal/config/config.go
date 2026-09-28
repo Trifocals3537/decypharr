@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	json "github.com/bytedance/sonic"
+
+	"github.com/sirrobot01/decypharr/internal/safepath"
 )
 
 type (
@@ -355,6 +357,11 @@ func (c *Config) loadConfig() error {
 // creating files, generating credentials, or updating the process-wide
 // configuration singleton.
 func LoadForValidation(path string) (*Config, error) {
+	var err error
+	path, err = safepath.ValidateRoot(path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid configuration root: %w", err)
+	}
 	configFile := filepath.Join(path, "config.json")
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -909,8 +916,7 @@ func (c *Config) RequiresRestart(n *Config) bool {
 }
 
 func (c *Config) createConfig() error {
-	// Create the directory if it doesn't exist
-	if err := os.MkdirAll(GetMainPath(), 0700); err != nil {
+	if _, err := safepath.EnsureRoot(GetMainPath(), 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 	c.URLBase = "/"

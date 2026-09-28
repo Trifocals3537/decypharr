@@ -69,6 +69,104 @@ func ValidateRoot(root string) (string, error) {
 	return absolute, nil
 }
 
+// OpenRoot validates and pins an existing application-owned filesystem root.
+// The returned absolute path is the same boundary represented by rooted.
+func OpenRoot(root string) (*os.Root, string, error) {
+	absolute, err := ValidateRoot(root)
+	if err != nil {
+		return nil, "", err
+	}
+	rooted, err := os.OpenRoot(absolute)
+	if err != nil {
+		return nil, "", fmt.Errorf("open filesystem root %q: %w", absolute, err)
+	}
+	if err := verifyPinnedRoot(rooted, absolute); err != nil {
+		_ = rooted.Close()
+		return nil, "", err
+	}
+	return rooted, absolute, nil
+}
+
+func verifyPinnedRoot(rooted *os.Root, visiblePath string) error {
+	openedInfo, err := rooted.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect pinned filesystem root %q: %w", visiblePath, err)
+	}
+	visibleInfo, err := os.Lstat(visiblePath)
+	if err != nil {
+		return fmt.Errorf("reinspect filesystem root %q: %w", visiblePath, err)
+	}
+	if visibleInfo.Mode()&os.ModeSymlink != 0 || !visibleInfo.IsDir() || !os.SameFile(openedInfo, visibleInfo) {
+		return fmt.Errorf("filesystem root %q changed during validation", visiblePath)
+	}
+	return nil
+}
+
+// EnsureRoot creates an application-owned filesystem root without passing the
+// complete untrusted path to a recursive creation primitive. It validates all
+// existing components, pins the nearest existing ancestor with os.Root, and
+// creates only a local relative descendant beneath that pinned directory.
+func EnsureRoot(root string, perm os.FileMode) (string, error) {
+	absolute, err := ValidateRoot(root)
+	if err != nil {
+		return "", err
+	}
+
+	ancestor := absolute
+	var rooted *os.Root
+	for {
+		rooted, err = os.OpenRoot(ancestor)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("open filesystem ancestor %q: %w", ancestor, err)
+		}
+		parent := filepath.Dir(ancestor)
+		if samePath(parent, ancestor) {
+			return "", fmt.Errorf("no existing ancestor for filesystem root %q", absolute)
+		}
+		ancestor = parent
+	}
+	defer rooted.Close()
+
+	// ValidateRoot checked this path before it was opened. Comparing the pinned
+	// handle with the visible path closes the symlink-swap window around open.
+	if err := verifyPinnedRoot(rooted, ancestor); err != nil {
+		return "", err
+	}
+
+	relative, err := filepath.Rel(ancestor, absolute)
+	if err != nil {
+		return "", fmt.Errorf("make filesystem root relative to ancestor: %w", err)
+	}
+	if relative != "." {
+		if !filepath.IsLocal(relative) {
+			return "", fmt.Errorf("filesystem root %q escapes ancestor %q", absolute, ancestor)
+		}
+		if err := rooted.MkdirAll(relative, perm.Perm()); err != nil {
+			return "", fmt.Errorf("create filesystem root %q: %w", absolute, err)
+		}
+		created, err := rooted.OpenRoot(relative)
+		if err != nil {
+			return "", fmt.Errorf("pin created filesystem root %q: %w", absolute, err)
+		}
+		if err := verifyPinnedRoot(created, absolute); err != nil {
+			_ = created.Close()
+			return "", err
+		}
+		if err := created.Close(); err != nil {
+			return "", fmt.Errorf("close created filesystem root %q: %w", absolute, err)
+		}
+	}
+
+	validated, err := ValidateRoot(absolute)
+	if err != nil {
+		return "", fmt.Errorf("revalidate created filesystem root: %w", err)
+	}
+	return validated, nil
+}
+
 // JoinIdentifiers joins single-component identifiers under root. Identifiers
 // may not be absolute paths, traversal components, or contain either platform's
 // path separators. The returned path is absolute and symlink-checked.
@@ -248,12 +346,9 @@ func EnsureDir(root, target string, perm os.FileMode) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	absoluteRoot, err := ValidateRoot(root)
+	absoluteRoot, err := EnsureRoot(root, perm)
 	if err != nil {
 		return "", err
-	}
-	if err := os.MkdirAll(absoluteRoot, perm); err != nil {
-		return "", fmt.Errorf("create trusted root %q: %w", absoluteRoot, err)
 	}
 	rooted, relative, err := openRootTarget(absoluteRoot, absoluteTarget)
 	if err != nil {

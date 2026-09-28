@@ -18,6 +18,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/rclone"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -81,8 +82,11 @@ func NewManager(manager *manager.Manager) *Manager {
 	}
 
 	// Ensure config directory exists
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	var err error
+	configDir, err = safepath.EnsureRoot(configDir, 0o755)
+	if err != nil {
 		_logger.Error().Err(err).Msg("Failed to create rclone config directory")
+		return nil
 	}
 
 	bindAddress := mainCfg.BindAddress
@@ -161,8 +165,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	if cfg.Rclone.CacheDir != "" {
-		if err := os.MkdirAll(cfg.Rclone.CacheDir, 0755); err == nil {
-			args = append(args, "--cache-dir", cfg.Rclone.CacheDir)
+		cacheDir, err := safepath.EnsureRoot(cfg.Rclone.CacheDir, 0o755)
+		if err == nil {
+			args = append(args, "--cache-dir", cacheDir)
+		} else {
+			m.logger.Warn().Err(err).Msg("Ignoring invalid rclone cache directory")
 		}
 	}
 	command := m.command

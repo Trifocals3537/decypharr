@@ -1957,26 +1957,15 @@ func rejectPortableTorrentSiblingAlias(rooted *os.Root, parent, wanted string) e
 }
 
 func acquireTorrentOwnershipLock(downloadRoot string) (string, *flock.Flock, error) {
-	absoluteRoot, err := filepath.Abs(downloadRoot)
+	absoluteRoot, err := safepath.EnsureRoot(downloadRoot, 0o755)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve torrent download root: %w", err)
-	}
-	absoluteRoot = filepath.Clean(absoluteRoot)
-	absoluteRoot, err = safepath.ValidateRoot(absoluteRoot)
-	if err != nil {
-		return "", nil, err
-	}
-	if err := os.MkdirAll(absoluteRoot, 0o755); err != nil {
 		return "", nil, fmt.Errorf("create torrent download root: %w", err)
 	}
-	absoluteRoot, err = safepath.ValidateRoot(absoluteRoot)
-	if err != nil {
-		return "", nil, err
-	}
-	rooted, err := os.OpenRoot(absoluteRoot)
+	rooted, _, err := safepath.OpenRoot(absoluteRoot)
 	if err != nil {
 		return "", nil, fmt.Errorf("open torrent ownership root: %w", err)
 	}
+	defer rooted.Close()
 	lockFile, openErr := rooted.OpenFile(torrentOwnershipLockName, os.O_CREATE|os.O_RDWR, 0o600)
 	if openErr == nil {
 		openErr = lockFile.Close()
@@ -1992,12 +1981,8 @@ func acquireTorrentOwnershipLock(downloadRoot string) (string, *flock.Flock, err
 			lockInfo = info
 		}
 	}
-	closeErr := rooted.Close()
 	if openErr != nil {
 		return "", nil, fmt.Errorf("prepare torrent ownership lock: %w", openErr)
-	}
-	if closeErr != nil {
-		return "", nil, fmt.Errorf("close torrent ownership root: %w", closeErr)
 	}
 
 	lock := flock.New(filepath.Join(absoluteRoot, torrentOwnershipLockName))
@@ -2010,7 +1995,7 @@ func acquireTorrentOwnershipLock(downloadRoot string) (string, *flock.Flock, err
 	if !locked {
 		return "", nil, fmt.Errorf("timed out locking torrent ownership root")
 	}
-	lockedInfo, err := os.Lstat(filepath.Join(absoluteRoot, torrentOwnershipLockName))
+	lockedInfo, err := rooted.Lstat(torrentOwnershipLockName)
 	if err != nil || lockInfo == nil || !os.SameFile(lockInfo, lockedInfo) ||
 		lockedInfo.Mode()&os.ModeSymlink != 0 || !lockedInfo.Mode().IsRegular() {
 		_ = lock.Unlock()

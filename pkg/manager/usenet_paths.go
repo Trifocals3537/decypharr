@@ -376,32 +376,28 @@ func rollbackUsenetEntryClaim(downloadRoot string, entry *storage.Entry) error {
 }
 
 func acquireUsenetOwnershipLock(downloadRoot string, createRoot bool) (absoluteRoot string, ownershipLock *flock.Flock, rootExists bool, err error) {
-	absoluteRoot, err = safepath.ValidateRoot(downloadRoot)
-	if err != nil {
-		return "", nil, false, err
-	}
 	if createRoot {
-		if err := os.MkdirAll(absoluteRoot, 0o755); err != nil {
+		absoluteRoot, err = safepath.EnsureRoot(downloadRoot, 0o755)
+		if err != nil {
 			return "", nil, false, fmt.Errorf("create trusted NZB download root: %w", err)
 		}
-		if _, err := safepath.ValidateRoot(absoluteRoot); err != nil {
-			return "", nil, false, fmt.Errorf("revalidate NZB download root: %w", err)
-		}
 	} else {
-		info, statErr := os.Lstat(absoluteRoot)
-		if statErr != nil {
-			if os.IsNotExist(statErr) {
-				return absoluteRoot, nil, false, nil
-			}
-			return "", nil, false, fmt.Errorf("inspect NZB download root: %w", statErr)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", nil, false, fmt.Errorf("NZB download root %q is not a regular directory", absoluteRoot)
+		absoluteRoot, err = safepath.ValidateRoot(downloadRoot)
+		if err != nil {
+			return "", nil, false, err
 		}
 	}
+	rooted, _, err := safepath.OpenRoot(absoluteRoot)
+	if err != nil {
+		if !createRoot && errors.Is(err, os.ErrNotExist) {
+			return absoluteRoot, nil, false, nil
+		}
+		return "", nil, false, fmt.Errorf("open NZB download root: %w", err)
+	}
+	defer rooted.Close()
 
 	lockPath := filepath.Join(absoluteRoot, usenetOwnershipLockName)
-	if info, statErr := os.Lstat(lockPath); statErr == nil {
+	if info, statErr := rooted.Lstat(usenetOwnershipLockName); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return "", nil, false, fmt.Errorf("NZB ownership lock %q is not a regular file", lockPath)
 		}
@@ -419,7 +415,7 @@ func acquireUsenetOwnershipLock(downloadRoot string, createRoot bool) (absoluteR
 	if !locked {
 		return "", nil, false, fmt.Errorf("lock NZB ownership root: timed out after %s", usenetOwnershipLockTimeout)
 	}
-	info, err := os.Lstat(lockPath)
+	info, err := rooted.Lstat(usenetOwnershipLockName)
 	if err != nil {
 		_ = ownershipLock.Unlock()
 		return "", nil, false, fmt.Errorf("inspect locked NZB ownership file: %w", err)

@@ -3,11 +3,11 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/safepath"
 	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
@@ -192,17 +192,20 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create the folder if it doesn't exist
-	if err := os.MkdirAll(req.Download.DownloadFolder, 0755); err != nil {
+	downloadRoot, err := safepath.EnsureRoot(req.Download.DownloadFolder, 0o755)
+	if err != nil {
 		s.sendSetupError(w, "Failed to create download folder", err)
 		return
 	}
+	req.Download.DownloadFolder = downloadRoot
 
 	if req.Mount.MountType == "dfs" {
-		if err := os.MkdirAll(req.Mount.CacheDir, 0755); err != nil {
+		cacheRoot, err := safepath.EnsureRoot(req.Mount.CacheDir, 0o755)
+		if err != nil {
 			s.sendSetupError(w, "Failed to create cache directory", err)
 			return
 		}
+		req.Mount.CacheDir = cacheRoot
 	}
 
 	result, err := config.Update(func(draft *config.Config) error {

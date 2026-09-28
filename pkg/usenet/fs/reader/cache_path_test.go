@@ -67,6 +67,64 @@ func TestPrepareDiskCacheRootPreservesExistingInstances(t *testing.T) {
 	}
 }
 
+func TestPrepareDiskCacheRootAcceptsPreCutoverNamespace(t *testing.T) {
+	base := t.TempDir()
+	legacyRoot := filepath.Join(base, legacyOwnedCacheDirName)
+	if err := os.Mkdir(legacyRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(legacyRoot, legacyCacheOwnerFileName),
+		[]byte(cacheOwnerContents),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(legacyRoot, "preserve")
+	if err := os.WriteFile(sentinel, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := PrepareDiskCacheRoot(base)
+	if err != nil {
+		t.Fatalf("pre-cutover cache root was not accepted: %v", err)
+	}
+	if prepared != legacyRoot {
+		t.Fatalf("prepared cache root = %q, want %q", prepared, legacyRoot)
+	}
+	assertFileContents(t, sentinel, "cache")
+	if _, err := os.Lstat(filepath.Join(base, ownedCacheDirName)); !os.IsNotExist(err) {
+		t.Fatalf("current cache namespace was created beside the legacy namespace: %v", err)
+	}
+}
+
+func TestPrepareDiskCacheRootRejectsAmbiguousNamespacesAndMarkers(t *testing.T) {
+	base := t.TempDir()
+	for _, name := range ownedCacheDirNames {
+		if err := os.Mkdir(filepath.Join(base, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := PrepareDiskCacheRoot(base); err == nil || !strings.Contains(err.Error(), "both Tessarr and legacy") {
+		t.Fatalf("ambiguous cache namespaces error = %v", err)
+	}
+
+	markerBase := t.TempDir()
+	cacheRoot := filepath.Join(markerBase, ownedCacheDirName)
+	if err := os.Mkdir(cacheRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheRoot, cacheOwnerFileName), []byte(cacheOwnerContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheRoot, legacyCacheOwnerFileName), []byte("wrong\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareDiskCacheRoot(markerBase); err == nil || !strings.Contains(err.Error(), "markers disagree") {
+		t.Fatalf("conflicting cache markers error = %v", err)
+	}
+}
+
 func TestPrepareDiskCacheRootRefusesUnownedNonEmptyNamespace(t *testing.T) {
 	base := t.TempDir()
 	cacheRoot := filepath.Join(base, ownedCacheDirName)
@@ -310,6 +368,38 @@ func TestRemoveCacheInstanceRecoversMatchingQuarantine(t *testing.T) {
 	}
 }
 
+func TestRemoveCacheInstanceRecoversPreCutoverMarkerAndQuarantine(t *testing.T) {
+	base := t.TempDir()
+	cacheRoot, instance, token, err := newCacheInstance(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(instance, cacheInstanceFile),
+		filepath.Join(instance, legacyCacheInstanceFile),
+	); err != nil {
+		t.Fatal(err)
+	}
+	relative := filepath.Base(instance)
+	legacyQuarantine := filepath.Join(
+		cacheRoot,
+		legacyCacheQuarantine+strings.TrimPrefix(
+			cacheQuarantinePrefixForInstance(relative, token),
+			cacheQuarantine,
+		)+"crash",
+	)
+	if err := os.Rename(instance, legacyQuarantine); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeCacheInstance(cacheRoot, instance, token); err != nil {
+		t.Fatalf("pre-cutover cache quarantine recovery failed: %v", err)
+	}
+	if _, err := os.Lstat(legacyQuarantine); !os.IsNotExist(err) {
+		t.Fatalf("pre-cutover cache quarantine remained: %v", err)
+	}
+}
+
 func TestRemoveCacheInstanceFindsPortableCaseQuarantine(t *testing.T) {
 	base := t.TempDir()
 	cacheRoot, instance, token, err := newCacheInstance(base)
@@ -355,6 +445,31 @@ func TestCacheCleanupLockTimesOutUnderContention(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("cache cleanup lock timeout took %s", elapsed)
+	}
+}
+
+func TestCacheCleanupLockContendsWithPreCutoverLock(t *testing.T) {
+	cacheRoot, err := ensureDiskCacheRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := acquireCacheCleanupLockNamed(cacheRoot, legacyCacheCleanupLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Unlock()
+
+	previousTimeout := cacheCleanupLockTimeout
+	previousDelay := cacheCleanupRetryDelay
+	cacheCleanupLockTimeout = 75 * time.Millisecond
+	cacheCleanupRetryDelay = 5 * time.Millisecond
+	t.Cleanup(func() {
+		cacheCleanupLockTimeout = previousTimeout
+		cacheCleanupRetryDelay = previousDelay
+	})
+	if combined, err := acquireCacheCleanupLock(cacheRoot); err == nil {
+		_ = combined.Unlock()
+		t.Fatal("current cache cleanup ignored the pre-cutover lock")
 	}
 }
 

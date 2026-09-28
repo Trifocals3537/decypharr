@@ -12,4 +12,7 @@ const (
 	legacyUsenetOwnerMarkerName   = ".decypharr-nzb-owner-v1"
 	legacyUsenetOwnershipLockName = ".decypharr-nzb-ownership.lock"
 	legacyUsenetQuarantinePrefix  = ".decypharr-nzb-quarantine-"
+
+	legacyStrmRootMarker  = ".decypharr-strm-root"
+	legacyStrmEntryMarker = ".decypharr-strm-entry"
 )

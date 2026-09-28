@@ -176,7 +176,8 @@ func redirectLocal(w http.ResponseWriter, urlBase, target string, status int) {
 
 func safeLocalRedirectPath(urlBase, target string) (string, error) {
 	location := urlBasePath(urlBase, target)
-	if location == "" || location[0] != '/' || strings.HasPrefix(location, "//") {
+	if location == "" || location[0] != '/' ||
+		(len(location) > 1 && (location[1] == '/' || location[1] == '\\')) {
 		return "", fmt.Errorf("redirect is not root-relative")
 	}
 	if strings.ContainsAny(location, "\\?#") || strings.IndexFunc(location, unicode.IsControl) >= 0 {

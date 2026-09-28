@@ -170,7 +170,7 @@ func restoreConfigSecrets(candidate, current *config.Config) error {
 }
 
 func restoreString(value *string, configured string, identityMatched bool, label string) error {
-	if *value != redactedConfigSecret {
+	if !isRedactedConfigSecret(*value) {
 		return nil
 	}
 	if !identityMatched || configured == "" {
@@ -183,7 +183,7 @@ func restoreString(value *string, configured string, identityMatched bool, label
 func restoreStrings(values *[]string, configured []string, identityMatched bool, label string) error {
 	markerIndex := -1
 	for i, value := range *values {
-		if value == redactedConfigSecret {
+		if isRedactedConfigSecret(value) {
 			markerIndex = i
 			break
 		}
@@ -197,7 +197,7 @@ func restoreStrings(values *[]string, configured []string, identityMatched bool,
 
 	var restored []string
 	for _, value := range *values {
-		if value == redactedConfigSecret {
+		if isRedactedConfigSecret(value) {
 			restored = append(restored, configured...)
 			continue
 		}
@@ -205,6 +205,10 @@ func restoreStrings(values *[]string, configured []string, identityMatched bool,
 	}
 	*values = restored
 	return nil
+}
+
+func isRedactedConfigSecret(value string) bool {
+	return value == redactedConfigSecret || value == legacyRedactedConfigSecret
 }
 
 func debridIdentity(debrid config.Debrid) string {

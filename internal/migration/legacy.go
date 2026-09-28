@@ -16,11 +16,12 @@ import (
 	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 const (
 	receiptName    = ".tessarr-migration.json"
-	receiptVersion = 1
+	receiptVersion = 2
 	receiptMaxSize = 4096
 )
 
@@ -80,6 +81,7 @@ type manifestEntry struct {
 type receipt struct {
 	SchemaVersion int    `json:"schema_version"`
 	SourceDigest  string `json:"source_digest"`
+	TargetDigest  string `json:"target_digest"`
 }
 
 // Migrate copies an offline Decypharr state tree into a new Tessarr state
@@ -112,7 +114,7 @@ func Migrate(options Options) (Result, error) {
 	sourceDigest := digestManifest(entries)
 
 	if _, err := os.Lstat(target); err == nil {
-		if err := verifyExistingTarget(target, entries, sourceDigest); err != nil {
+		if err := verifyExistingTarget(target, sourceDigest); err != nil {
 			return result, err
 		}
 		result.AlreadyMigrated = true
@@ -142,6 +144,14 @@ func Migrate(options Options) (Result, error) {
 	if err := verifyTree(stage, entries); err != nil {
 		return result, fmt.Errorf("verify staged Tessarr state: %w", err)
 	}
+	if err := applyStatePathRebase(stage, source, target); err != nil {
+		return result, err
+	}
+	targetEntries, err := scanTarget(stage)
+	if err != nil {
+		return result, fmt.Errorf("inspect rebased Tessarr state: %w", err)
+	}
+	targetDigest := digestManifest(targetEntries)
 
 	currentEntries, err := buildManifest(source)
 	if err != nil {
@@ -151,7 +161,7 @@ func Migrate(options Options) (Result, error) {
 		return result, fmt.Errorf("source state changed during migration; stop the service and retry")
 	}
 
-	if err := writeReceipt(stage, sourceDigest); err != nil {
+	if err := writeReceipt(stage, sourceDigest, targetDigest); err != nil {
 		return result, err
 	}
 	if err := os.Rename(stage, target); err != nil {
@@ -297,7 +307,7 @@ func copyManifest(source, stage string, entries []manifestEntry) error {
 		sourcePath := filepath.Join(source, entry.SourcePath)
 		targetPath := filepath.Join(stage, entry.TargetPath)
 		if entry.Mode.IsDir() {
-			if err := os.Mkdir(targetPath, entry.Mode.Perm()); err != nil {
+			if err := os.Mkdir(targetPath, 0o700); err != nil {
 				return fmt.Errorf("create staged directory %q: %w", entry.TargetPath, err)
 			}
 			continue
@@ -309,6 +319,15 @@ func copyManifest(source, stage string, entries []manifestEntry) error {
 			return fmt.Errorf("preserve timestamp for %q: %w", entry.TargetPath, err)
 		}
 	}
+	for index := len(entries) - 1; index >= 0; index-- {
+		entry := entries[index]
+		if !entry.Mode.IsDir() {
+			continue
+		}
+		if err := os.Chmod(filepath.Join(stage, entry.TargetPath), entry.Mode.Perm()); err != nil {
+			return fmt.Errorf("preserve directory mode for %q: %w", entry.TargetPath, err)
+		}
+	}
 	return nil
 }
 
@@ -318,12 +337,14 @@ func copyFile(source, target string, mode fs.FileMode) error {
 		return err
 	}
 	defer input.Close()
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	copyErr := error(nil)
 	if _, err := io.Copy(output, input); err != nil {
+		copyErr = err
+	} else if err := output.Chmod(mode); err != nil {
 		copyErr = err
 	} else if err := output.Sync(); err != nil {
 		copyErr = err
@@ -398,8 +419,12 @@ func scanTarget(root string) ([]manifestEntry, error) {
 	return entries, nil
 }
 
-func writeReceipt(stage, sourceDigest string) error {
-	data, err := json.MarshalIndent(receipt{SchemaVersion: receiptVersion, SourceDigest: sourceDigest}, "", "  ")
+func writeReceipt(stage, sourceDigest, targetDigest string) error {
+	data, err := json.MarshalIndent(receipt{
+		SchemaVersion: receiptVersion,
+		SourceDigest:  sourceDigest,
+		TargetDigest:  targetDigest,
+	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode migration receipt: %w", err)
 	}
@@ -411,7 +436,7 @@ func writeReceipt(stage, sourceDigest string) error {
 	return nil
 }
 
-func verifyExistingTarget(target string, expected []manifestEntry, sourceDigest string) error {
+func verifyExistingTarget(target, sourceDigest string) error {
 	info, err := os.Lstat(target)
 	if err != nil {
 		return err
@@ -427,13 +452,102 @@ func verifyExistingTarget(target string, expected []manifestEntry, sourceDigest 
 	if err := json.Unmarshal(data, &completed); err != nil {
 		return fmt.Errorf("decode migration receipt: %w", err)
 	}
-	if completed.SchemaVersion != receiptVersion || completed.SourceDigest != sourceDigest {
+	if completed.SchemaVersion != receiptVersion || completed.SourceDigest != sourceDigest || completed.TargetDigest == "" {
 		return fmt.Errorf("migration target belongs to different source state")
 	}
-	if err := verifyTree(target, expected); err != nil {
-		return fmt.Errorf("existing Tessarr state failed verification: %w", err)
+	actual, err := scanTarget(target)
+	if err != nil {
+		return fmt.Errorf("inspect existing Tessarr state: %w", err)
+	}
+	if digestManifest(actual) != completed.TargetDigest {
+		return fmt.Errorf("existing Tessarr state failed receipt verification")
 	}
 	return nil
+}
+
+func applyStatePathRebase(stage, source, target string) error {
+	configPath := filepath.Join(stage, "config.json")
+	if info, err := os.Lstat(configPath); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("staged configuration is not a regular file")
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return fmt.Errorf("read staged configuration: %w", err)
+		}
+		var document any
+		if err := json.Unmarshal(data, &document); err != nil {
+			return fmt.Errorf("decode staged configuration: %w", err)
+		}
+		if rebaseJSONStatePaths(document, source, target) > 0 {
+			encoded, err := json.MarshalIndent(document, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encode rebased configuration: %w", err)
+			}
+			encoded = append(encoded, '\n')
+			if err := os.WriteFile(configPath, encoded, info.Mode().Perm()); err != nil {
+				return fmt.Errorf("write rebased configuration: %w", err)
+			}
+			if err := os.Chmod(configPath, info.Mode().Perm()); err != nil {
+				return fmt.Errorf("restore rebased configuration mode: %w", err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect staged configuration: %w", err)
+	}
+
+	dbPath := filepath.Join(stage, "db")
+	if info, err := os.Lstat(dbPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("staged storage path is not a regular directory")
+		}
+		if _, err := storage.RebaseStatePaths(dbPath, source, target); err != nil {
+			return fmt.Errorf("rebase persisted entry paths: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect staged storage path: %w", err)
+	}
+	return nil
+}
+
+func rebaseJSONStatePaths(value any, source, target string) int {
+	changed := 0
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if text, ok := child.(string); ok {
+				if rebased, changedPath := rebaseStatePath(text, source, target); changedPath {
+					current[key] = rebased
+					changed++
+				}
+				continue
+			}
+			changed += rebaseJSONStatePaths(child, source, target)
+		}
+	case []any:
+		for index, child := range current {
+			if text, ok := child.(string); ok {
+				if rebased, changedPath := rebaseStatePath(text, source, target); changedPath {
+					current[index] = rebased
+					changed++
+				}
+				continue
+			}
+			changed += rebaseJSONStatePaths(child, source, target)
+		}
+	}
+	return changed
+}
+
+func rebaseStatePath(value, source, target string) (string, bool) {
+	if !filepath.IsAbs(value) {
+		return value, false
+	}
+	relative, err := filepath.Rel(source, filepath.Clean(value))
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return value, false
+	}
+	return filepath.Join(target, relative), true
 }
 
 func readVerifiedReceipt(target string, targetInfo os.FileInfo) ([]byte, error) {

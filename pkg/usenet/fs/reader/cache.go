@@ -149,6 +149,13 @@ const (
 )
 
 var (
+	ownedCacheDirNames  = []string{ownedCacheDirName, legacyOwnedCacheDirName}
+	cacheOwnerFileNames = []string{cacheOwnerFileName, legacyCacheOwnerFileName}
+	cacheInstanceFiles  = []string{cacheInstanceFile, legacyCacheInstanceFile}
+	cacheCleanupLocks   = []string{legacyCacheCleanupLock, cacheCleanupLock}
+)
+
+var (
 	cacheCleanupMu          sync.Mutex
 	cacheCleanupLockTimeout = 5 * time.Second
 	cacheCleanupRetryDelay  = 25 * time.Millisecond
@@ -210,47 +217,41 @@ func ensureDiskCacheRoot(configuredRoot string) (string, error) {
 		return "", fmt.Errorf("invalid disk buffer path: %w", err)
 	}
 	defer baseRoot.Close()
-	cacheRoot, err := safepath.JoinIdentifiers(base, ownedCacheDirName)
+	cacheDirName, cacheInfo, err := selectCacheNamespace(baseRoot)
+	if err != nil {
+		return "", err
+	}
+	cacheRoot, err := safepath.JoinIdentifiers(base, cacheDirName)
 	if err != nil {
 		return "", fmt.Errorf("resolve owned cache root: %w", err)
 	}
 
-	info, statErr := baseRoot.Lstat(ownedCacheDirName)
 	switch {
-	case statErr == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
+	case cacheInfo != nil:
+		if cacheInfo.Mode()&os.ModeSymlink != 0 {
 			return "", fmt.Errorf("owned cache root %q is a symlink", cacheRoot)
 		}
-		if !info.IsDir() {
+		if !cacheInfo.IsDir() {
 			return "", fmt.Errorf("owned cache root %q is not a directory", cacheRoot)
 		}
-	case os.IsNotExist(statErr):
-		if err := baseRoot.Mkdir(ownedCacheDirName, 0o700); err != nil {
+	default:
+		if err := baseRoot.Mkdir(cacheDirName, 0o700); err != nil {
 			return "", fmt.Errorf("create owned cache root: %w", err)
 		}
-	default:
-		return "", fmt.Errorf("inspect owned cache root: %w", statErr)
 	}
-	cacheHandle, err := baseRoot.OpenRoot(ownedCacheDirName)
+	cacheHandle, err := baseRoot.OpenRoot(cacheDirName)
 	if err != nil {
 		return "", fmt.Errorf("pin owned cache root: %w", err)
 	}
 	defer cacheHandle.Close()
 	openedInfo, err := cacheHandle.Stat(".")
-	if err != nil || !openedInfo.IsDir() || (statErr == nil && !os.SameFile(info, openedInfo)) {
+	if err != nil || !openedInfo.IsDir() || (cacheInfo != nil && !os.SameFile(cacheInfo, openedInfo)) {
 		return "", fmt.Errorf("owned cache root changed while opening")
 	}
 
-	markerInfo, markerErr := cacheHandle.Lstat(cacheOwnerFileName)
+	contents, markerErr := readCacheOwnerMarkerFromRoot(cacheHandle)
 	switch {
 	case markerErr == nil:
-		if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() {
-			return "", fmt.Errorf("cache ownership marker is not a regular file")
-		}
-		contents, err := readCacheOwnerMarkerFromRoot(cacheHandle)
-		if err != nil {
-			return "", fmt.Errorf("read cache ownership marker: %w", err)
-		}
 		if string(contents) != cacheOwnerContents {
 			return "", fmt.Errorf("cache ownership marker is invalid")
 		}
@@ -273,6 +274,29 @@ func ensureDiskCacheRoot(configuredRoot string) (string, error) {
 		return "", fmt.Errorf("secure owned cache root permissions: %w", err)
 	}
 	return cacheRoot, nil
+}
+
+func selectCacheNamespace(baseRoot *os.Root) (string, os.FileInfo, error) {
+	var selected string
+	var selectedInfo os.FileInfo
+	for _, name := range ownedCacheDirNames {
+		info, err := baseRoot.Lstat(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", nil, fmt.Errorf("inspect owned cache root %q: %w", name, err)
+		}
+		if selected != "" {
+			return "", nil, fmt.Errorf("both Tessarr and legacy cache roots exist")
+		}
+		selected = name
+		selectedInfo = info
+	}
+	if selected == "" {
+		return ownedCacheDirName, nil, nil
+	}
+	return selected, selectedInfo, nil
 }
 
 func cacheDirectoryEmpty(rooted *os.Root) (bool, error) {
@@ -420,7 +444,37 @@ func syncCacheDirectory(rooted *os.Root) error {
 }
 
 func readCacheOwnerMarkerFromRoot(rooted *os.Root) ([]byte, error) {
-	file, err := rooted.Open(cacheOwnerFileName)
+	var contents []byte
+	found := false
+	for _, name := range cacheOwnerFileNames {
+		current, err := readCacheOwnerMarkerNamed(rooted, name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if found && string(contents) != string(current) {
+			return nil, fmt.Errorf("cache ownership markers disagree")
+		}
+		contents = current
+		found = true
+	}
+	if !found {
+		return nil, os.ErrNotExist
+	}
+	return contents, nil
+}
+
+func readCacheOwnerMarkerNamed(rooted *os.Root, name string) ([]byte, error) {
+	info, err := rooted.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("cache ownership marker is not a regular file")
+	}
+	file, err := rooted.Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -438,12 +492,37 @@ func readCacheOwnerMarkerFromRoot(rooted *os.Root) ([]byte, error) {
 	return contents, nil
 }
 
-func acquireCacheCleanupLock(cacheRoot string) (*flock.Flock, error) {
+type cacheCleanupLockSet struct {
+	locks []*flock.Flock
+}
+
+func (set *cacheCleanupLockSet) Unlock() error {
+	var unlockErr error
+	for index := len(set.locks) - 1; index >= 0; index-- {
+		unlockErr = errors.Join(unlockErr, set.locks[index].Unlock())
+	}
+	set.locks = nil
+	return unlockErr
+}
+
+func acquireCacheCleanupLock(cacheRoot string) (*cacheCleanupLockSet, error) {
 	absoluteRoot, err := safepath.ValidateRoot(cacheRoot)
 	if err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(absoluteRoot, cacheCleanupLock)
+	set := &cacheCleanupLockSet{}
+	for _, name := range cacheCleanupLocks {
+		cacheLock, err := acquireCacheCleanupLockNamed(absoluteRoot, name)
+		if err != nil {
+			return nil, errors.Join(err, set.Unlock())
+		}
+		set.locks = append(set.locks, cacheLock)
+	}
+	return set, nil
+}
+
+func acquireCacheCleanupLockNamed(absoluteRoot, name string) (*flock.Flock, error) {
+	lockPath := filepath.Join(absoluteRoot, name)
 	if info, statErr := os.Lstat(lockPath); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("cache cleanup lock %q is not a regular file", lockPath)
@@ -568,14 +647,37 @@ func removeCacheInstance(cacheRoot, diskPath, expectedToken string) (err error) 
 }
 
 func readCacheInstanceToken(instanceRoot *os.Root) (string, error) {
-	info, err := instanceRoot.Lstat(cacheInstanceFile)
+	var token string
+	found := false
+	for _, name := range cacheInstanceFiles {
+		current, err := readCacheInstanceTokenNamed(instanceRoot, name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if found && token != current {
+			return "", fmt.Errorf("cache instance markers disagree")
+		}
+		token = current
+		found = true
+	}
+	if !found {
+		return "", fmt.Errorf("inspect cache instance marker: %w", os.ErrNotExist)
+	}
+	return token, nil
+}
+
+func readCacheInstanceTokenNamed(instanceRoot *os.Root, name string) (string, error) {
+	info, err := instanceRoot.Lstat(name)
 	if err != nil {
-		return "", fmt.Errorf("inspect cache instance marker: %w", err)
+		return "", err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("cache instance marker is not a regular file")
 	}
-	file, err := instanceRoot.Open(cacheInstanceFile)
+	file, err := instanceRoot.Open(name)
 	if err != nil {
 		return "", fmt.Errorf("open cache instance marker: %w", err)
 	}
@@ -643,7 +745,7 @@ func removeVerifiedCacheQuarantine(
 			MaxEntries:       cacheQuarantineMaxEntries,
 			MaxDepth:         cacheQuarantineMaxDepth,
 			ReadBatch:        cacheQuarantineReadBatch,
-			PreserveTopLevel: []string{cacheInstanceFile},
+			PreserveTopLevel: cacheInstanceFiles,
 		},
 	); err != nil {
 		_ = quarantineRoot.Close()
@@ -665,7 +767,7 @@ func removeVerifiedCacheQuarantine(
 		}
 		return fmt.Errorf("emptied cache quarantine owner token mismatch")
 	}
-	if err := quarantineRoot.Remove(cacheInstanceFile); err != nil {
+	if err := removeCacheInstanceMarkers(quarantineRoot); err != nil {
 		_ = quarantineRoot.Close()
 		return retryableCacheCleanup(fmt.Errorf("remove cache quarantine marker: %w", err))
 	}
@@ -700,7 +802,7 @@ func findCacheQuarantines(rooted *os.Root, relativeInstance, token string) ([]st
 		}
 		return nil, fmt.Errorf("open cache parent for quarantine recovery: %w", err)
 	}
-	prefix := cacheQuarantinePrefixForInstance(relativeInstance, token)
+	prefixes := cacheQuarantinePrefixesForInstance(relativeInstance, token)
 	var quarantines []string
 	scanned := 0
 	for scanned < cacheQuarantineMaxEntries {
@@ -708,7 +810,14 @@ func findCacheQuarantines(rooted *os.Root, relativeInstance, token string) ([]st
 		entries, readErr := dir.ReadDir(min(cacheQuarantineReadBatch, remaining))
 		scanned += len(entries)
 		for _, entry := range entries {
-			if strings.HasPrefix(strings.ToLower(entry.Name()), strings.ToLower(prefix)) {
+			matched := false
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(strings.ToLower(entry.Name()), strings.ToLower(prefix)) {
+					matched = true
+					break
+				}
+			}
+			if matched {
 				quarantines = append(
 					quarantines,
 					filepath.Join(filepath.Dir(relativeInstance), entry.Name()),
@@ -766,6 +875,22 @@ func newCacheQuarantinePath(rooted *os.Root, relativeInstance, token string) (st
 func cacheQuarantinePrefixForInstance(relativeInstance, token string) string {
 	digest := sha256.Sum256([]byte(token + "\x00" + filepath.ToSlash(relativeInstance)))
 	return cacheQuarantine + hex.EncodeToString(digest[:16]) + "-"
+}
+
+func cacheQuarantinePrefixesForInstance(relativeInstance, token string) []string {
+	digest := sha256.Sum256([]byte(token + "\x00" + filepath.ToSlash(relativeInstance)))
+	suffix := hex.EncodeToString(digest[:16]) + "-"
+	return []string{cacheQuarantine + suffix, legacyCacheQuarantine + suffix}
+}
+
+func removeCacheInstanceMarkers(rooted *os.Root) error {
+	var removeErr error
+	for _, name := range cacheInstanceFiles {
+		if err := rooted.Remove(name); err != nil && !os.IsNotExist(err) {
+			removeErr = errors.Join(removeErr, err)
+		}
+	}
+	return removeErr
 }
 
 // NewSegmentCache creates a new segment cache backed by a freshly-created

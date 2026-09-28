@@ -65,6 +65,7 @@ func TestSafeLocalRedirectPathRejectsExternalAndHeaderValues(t *testing.T) {
 	}{
 		{name: "header injection", base: "/tessarr\r\nLocation: https://attacker.example"},
 		{name: "backslash", base: `/\\attacker.example`},
+		{name: "network path backslash", base: `/\attacker.example`},
 		{name: "query", base: "/tessarr?next=https://attacker.example"},
 		{name: "fragment", base: "/tessarr#attacker"},
 		{name: "target query", base: "/tessarr", target: "login?next=https://attacker.example"},

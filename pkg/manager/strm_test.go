@@ -48,6 +48,58 @@ func TestStrmRootMarkerPinsSigningKey(t *testing.T) {
 	}
 }
 
+func TestStrmAcceptsPreCutoverRootAndEntryMarkers(t *testing.T) {
+	manager, cfg := newStrmSweepManager(t)
+	entry := addStrmSweepEntry(t, manager)
+	if _, err := manager.strm.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entryDir := filepath.Join(cfg.Strm.Path, entryDirectoryName(entry))
+	if err := os.Rename(
+		filepath.Join(cfg.Strm.Path, strmRootMarker),
+		filepath.Join(cfg.Strm.Path, legacyStrmRootMarker),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(entryDir, strmEntryMarker),
+		filepath.Join(entryDir, legacyStrmEntryMarker),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := manager.strm.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("pre-cutover STRM markers were not accepted: %v", err)
+	}
+	if report.Written != 0 || report.Deleted != 0 || report.Verified != 1 || len(report.Errors) != 0 {
+		t.Fatalf("pre-cutover marker sweep did not converge: %+v", report)
+	}
+	for _, path := range []string{
+		filepath.Join(cfg.Strm.Path, legacyStrmRootMarker),
+		filepath.Join(entryDir, legacyStrmEntryMarker),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("legacy marker %q was not preserved: %v", path, err)
+		}
+	}
+}
+
+func TestStrmRejectsConflictingMarkerAliases(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "library")
+	reconciler := &Strm{}
+	cfg := &config.Config{Strm: config.Strm{Enabled: true, Path: root, Secret: managerTestStrmSecret}}
+	if _, err := reconciler.ensureRoot(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, legacyStrmRootMarker), []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.ensureRoot(cfg); err == nil || !strings.Contains(err.Error(), "markers disagree") {
+		t.Fatalf("conflicting STRM markers error = %v", err)
+	}
+}
+
 func TestWriteOwnedStrmPreservesForeignFile(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "library")
 	if err := os.MkdirAll(root, 0755); err != nil {

@@ -1,11 +1,15 @@
 package migration
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
 func TestMigrateCopiesVerifiesAndRenamesState(t *testing.T) {
@@ -63,6 +67,116 @@ func TestMigrateDryRunMakesNoChanges(t *testing.T) {
 	}
 	if _, err := os.Lstat(target); !os.IsNotExist(err) {
 		t.Fatalf("dry run created target: %v", err)
+	}
+}
+
+func TestMigrateRebasesOnlyContainedConfigurationPaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	external := filepath.Join(root, "external-media")
+	configuration := map[string]any{
+		"download_folder": filepath.Join(source, "downloads"),
+		"usenet": map[string]any{
+			"disk_buffer_path": filepath.Join(source, "buffer"),
+		},
+		"mount": map[string]any{
+			"mount_path": external,
+		},
+	}
+	data, err := json.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(source, "config.json"), data, 0o600)
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := os.ReadFile(filepath.Join(target, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(migrated, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["download_folder"] != filepath.Join(target, "downloads") {
+		t.Fatalf("download folder = %q", got["download_folder"])
+	}
+	usenet := got["usenet"].(map[string]any)
+	if usenet["disk_buffer_path"] != filepath.Join(target, "buffer") {
+		t.Fatalf("disk buffer path = %q", usenet["disk_buffer_path"])
+	}
+	mount := got["mount"].(map[string]any)
+	if mount["mount_path"] != external {
+		t.Fatalf("external mount path changed to %q", mount["mount_path"])
+	}
+
+	if err := os.WriteFile(filepath.Join(target, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(Options{Source: source, Target: target}); err == nil ||
+		!strings.Contains(err.Error(), "receipt verification") {
+		t.Fatalf("tampered rebased target error = %v", err)
+	}
+}
+
+func TestMigrateRebasesPersistedEntryPaths(t *testing.T) {
+	root := t.TempDir()
+	previousConfigPath := config.GetMainPath()
+	config.Reset()
+	if err := config.SetConfigPath(filepath.Join(root, "runtime-config")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		config.Reset()
+		if err := config.SetConfigPath(previousConfigPath); err != nil {
+			t.Errorf("restore config path: %v", err)
+		}
+	})
+
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	mustWriteFile(t, filepath.Join(source, "config.json"), []byte("{}"), 0o600)
+	store, err := storage.NewStorage(filepath.Join(source, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &storage.Entry{
+		Protocol:    config.ProtocolTorrent,
+		InfoHash:    "migration-entry",
+		Name:        "Migration Entry",
+		SavePath:    filepath.Join(source, "downloads"),
+		ContentPath: filepath.Join(source, "downloads", "Migration Entry"),
+		Files:       map[string]*storage.File{},
+		Providers:   map[string]*storage.ProviderEntry{},
+	}
+	if err := store.AddOrUpdateDurable(entry); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := storage.NewStorage(filepath.Join(target, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	got, err := migrated.Get(entry.InfoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SavePath != filepath.Join(target, "downloads") ||
+		got.ContentPath != filepath.Join(target, "downloads", "Migration Entry") {
+		t.Fatalf("migrated entry paths = %#v", got)
 	}
 }
 
@@ -150,6 +264,55 @@ func TestMigrateRejectsSymlink(t *testing.T) {
 	_, err := Migrate(Options{Source: source, Target: filepath.Join(root, "new")})
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("Migrate() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestMigratePopulatesReadOnlyDirectoriesBeforeRestoringModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not preserve Unix permission bits")
+	}
+	t.Parallel()
+
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	t.Cleanup(func() {
+		for _, path := range []string{
+			filepath.Join(source, "readonly"),
+			filepath.Join(source, "readonly", "nested"),
+			filepath.Join(target, "readonly"),
+			filepath.Join(target, "readonly", "nested"),
+		} {
+			_ = os.Chmod(path, 0o700)
+		}
+	})
+	nested := filepath.Join(source, "readonly", "nested")
+	mustWriteFile(t, filepath.Join(nested, "state.bin"), []byte("state"), 0o640)
+	if err := os.Chmod(nested, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(nested), 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{"readonly", filepath.Join("readonly", "nested")} {
+		info, err := os.Stat(filepath.Join(target, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o555 {
+			t.Fatalf("mode for %q = %o, want 555", relative, got)
+		}
+	}
+	info, err := os.Stat(filepath.Join(target, "readonly", "nested", "state.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("file mode = %o, want 640", got)
 	}
 }
 

@@ -25,10 +25,10 @@ require (
 	github.com/winfsp/cgofuse v1.6.0
 	go.uber.org/ratelimit v0.3.1
 	go4.org v0.0.0-20200411211856-f5505b9728dd
-	golang.org/x/crypto v0.42.0
-	golang.org/x/net v0.43.0
-	golang.org/x/sync v0.18.0
-	golang.org/x/sys v0.38.0
+	golang.org/x/crypto v0.52.0
+	golang.org/x/net v0.54.0
+	golang.org/x/sync v0.20.0
+	golang.org/x/sys v0.45.0
 	google.golang.org/protobuf v1.36.7
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -64,5 +64,5 @@ require (
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )

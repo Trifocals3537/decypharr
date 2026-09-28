@@ -170,7 +170,15 @@ func redirectLocal(w http.ResponseWriter, urlBase, target string, status int) {
 		http.Error(w, "invalid local redirect", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Location", location)
+	// Keep the URL host check in the same control flow as the redirect sink.
+	// Browsers may interpret backslashes as slashes, so normalize before parsing
+	// even though safeLocalRedirectPath already rejects them.
+	parsed, err := url.Parse(strings.ReplaceAll(location, "\\", "/"))
+	if err != nil || parsed.Hostname() != "" || parsed.IsAbs() {
+		http.Error(w, "invalid local redirect", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Location", parsed.String())
 	w.WriteHeader(status)
 }
 

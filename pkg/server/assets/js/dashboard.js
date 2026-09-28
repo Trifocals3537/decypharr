@@ -561,3 +561,7 @@ class TorrentDashboard {
             .replace(/"/g, '&quot;');
     }
 }
+
+// Keep the classic browser script testable without evaluating its source as
+// code. The name is intentionally specific to avoid colliding with host pages.
+globalThis.DecypharrTorrentDashboard = TorrentDashboard;

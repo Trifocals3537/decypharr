@@ -195,7 +195,7 @@ func restoreStrings(values *[]string, configured []string, identityMatched bool,
 		return fmt.Errorf("cannot preserve %s because its configured entry no longer matches", label)
 	}
 
-	restored := make([]string, 0, len(configured)+len(*values)-1)
+	var restored []string
 	for _, value := range *values {
 		if value == redactedConfigSecret {
 			restored = append(restored, configured...)

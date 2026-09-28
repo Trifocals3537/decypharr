@@ -1,27 +1,10 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
 import test from 'node:test';
-import vm from 'node:vm';
 
-const source = await readFile(
-    new URL('../pkg/server/assets/js/dashboard.js', import.meta.url),
-    'utf8',
-);
+await import('../pkg/server/assets/js/dashboard.js');
 
 function dashboardPrototype() {
-    const context = vm.createContext({
-        URLSearchParams,
-        clearTimeout,
-        console,
-        setInterval() {},
-        setTimeout,
-    });
-    vm.runInContext(
-        `${source}\nglobalThis.TestTorrentDashboard = TorrentDashboard;`,
-        context,
-        {filename: 'dashboard.js'},
-    );
-    return context.TestTorrentDashboard.prototype;
+    return globalThis.DecypharrTorrentDashboard.prototype;
 }
 
 function renderProviderCell(torrent) {

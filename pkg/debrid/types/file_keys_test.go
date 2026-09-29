@@ -137,6 +137,42 @@ func TestFilesByLogicalNameSanitizesOutputDirectoriesOnly(t *testing.T) {
 	}
 }
 
+func TestFilesByLogicalNameSeparatesFileAndDirectoryOutputPaths(t *testing.T) {
+	input := []File{
+		{Id: "1", Path: "Release/Movie_.mkv"},
+		{Id: "2", Path: "Release/Movie?.mkv/Episode.mkv"},
+	}
+	files, err := FilesByLogicalName(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := fileByProviderID(t, files, "1")
+	nested := fileByProviderID(t, files, "2")
+	if file.Path != input[0].Path || nested.Path != input[1].Path {
+		t.Fatalf("provider paths changed: file=%q nested=%q", file.Path, nested.Path)
+	}
+	if file.OutputPath != "Release/Movie_.mkv" {
+		t.Fatalf("non-conflicting file output changed to %q", file.OutputPath)
+	}
+	if !strings.HasPrefix(nested.OutputPath, "Release/Movie_~") || !strings.HasSuffix(nested.OutputPath, ".mkv/Episode.mkv") {
+		t.Fatalf("nested output was not safely disambiguated: %q", nested.OutputPath)
+	}
+	if strings.HasPrefix(
+		portableProviderPathKey(nested.OutputPath),
+		portableProviderPathKey(file.OutputPath)+"/",
+	) {
+		t.Fatalf("file output %q remains a parent of %q", file.OutputPath, nested.OutputPath)
+	}
+
+	reversed, err := FilesByLogicalName([]File{input[1], input[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, reversed) {
+		t.Fatalf("file/directory disambiguation changed with provider order:\nfirst: %#v\nsecond: %#v", files, reversed)
+	}
+}
+
 func TestFilesByLogicalNameIsDeterministicAcrossProviderOrder(t *testing.T) {
 	firstInput := []File{
 		{Id: "1", Path: "Release/Season 01/Episode.mkv"},

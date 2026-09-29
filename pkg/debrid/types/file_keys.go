@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -18,8 +19,16 @@ type providerFileCandidate struct {
 	baseName               string
 	baseKey                string
 	fullPath               string
+	providerParts          []string
+	outputParts            []string
 	requiresDisambiguation bool
 	logicalName            string
+}
+
+type providerDirectoryGroup struct {
+	componentIndex int
+	providerKey    string
+	members        []int
 }
 
 // FilesByLogicalName converts provider file records into Tessarr's
@@ -113,6 +122,9 @@ func FilesByLogicalName(files []File) (map[string]File, error) {
 			candidates[index].logicalName = candidates[index].baseName
 		}
 	}
+	if err := assignProviderOutputPaths(candidates); err != nil {
+		return nil, err
+	}
 
 	result := make(map[string]File, len(candidates))
 	portableNames := make(map[string]string, len(candidates))
@@ -127,10 +139,7 @@ func FilesByLogicalName(files []File) (map[string]File, error) {
 			return nil, fmt.Errorf("provider files %q and %q have the same generated logical name", previous, candidate.logicalName)
 		}
 		portableNames[logicalKey] = candidate.logicalName
-		outputPath, err := portableProviderOutputPath(candidate.fullPath, candidate.logicalName)
-		if err != nil {
-			return nil, fmt.Errorf("provider file %q: %w", candidate.fullPath, err)
-		}
+		outputPath := candidate.file.OutputPath
 		outputKey := portableProviderPathKey(outputPath)
 		if previous, exists := portableOutputs[outputKey]; exists {
 			return nil, fmt.Errorf("provider files %q and %q have the same portable output path", previous, outputPath)
@@ -197,18 +206,125 @@ func disambiguateProviderFileName(baseName, fullPath string) (string, error) {
 	return safepath.CompactIdentifier(name, safepath.PortableIdentifierMaxBytes)
 }
 
-func portableProviderOutputPath(fullPath, logicalName string) (string, error) {
+func assignProviderOutputPaths(candidates []providerFileCandidate) error {
+	filesByDepth := make(map[int][]int)
+	directoryGroupsByDepth := make(map[int]map[string]*providerDirectoryGroup)
+	maxDirectoryDepth := -1
+	for index := range candidates {
+		candidate := &candidates[index]
+		outputParts, err := portableProviderOutputParts(candidate.fullPath, candidate.logicalName)
+		if err != nil {
+			return fmt.Errorf("provider file %q: %w", candidate.fullPath, err)
+		}
+		candidate.providerParts = strings.Split(candidate.fullPath, "/")
+		candidate.outputParts = outputParts
+		leafDepth := len(outputParts) - 1
+		filesByDepth[leafDepth] = append(filesByDepth[leafDepth], index)
+		for depth := 0; depth < leafDepth; depth++ {
+			if depth > maxDirectoryDepth {
+				maxDirectoryDepth = depth
+			}
+			groups := directoryGroupsByDepth[depth]
+			if groups == nil {
+				groups = make(map[string]*providerDirectoryGroup)
+				directoryGroupsByDepth[depth] = groups
+			}
+			providerKey := portableProviderPathKey(strings.Join(candidate.providerParts[:depth+1], "/"))
+			group := groups[providerKey]
+			if group == nil {
+				group = &providerDirectoryGroup{componentIndex: depth, providerKey: providerKey}
+				groups[providerKey] = group
+			}
+			group.members = append(group.members, index)
+		}
+	}
+
+	// Resolve a file/directory collision at each depth only after every parent
+	// component is final. Files at this depth cannot move later, so a stable
+	// hash of the provider directory identity is sufficient and the pass stays
+	// bounded by the number of path components.
+	for depth := 0; depth <= maxDirectoryDepth; depth++ {
+		fileKeys := make(map[string]struct{}, len(filesByDepth[depth]))
+		for _, index := range filesByDepth[depth] {
+			fileKeys[portableProviderPathKey(strings.Join(candidates[index].outputParts, "/"))] = struct{}{}
+		}
+		groups := directoryGroupsByDepth[depth]
+		groupKeys := make([]string, 0, len(groups))
+		for key := range groups {
+			groupKeys = append(groupKeys, key)
+		}
+		sort.Strings(groupKeys)
+		for _, groupKey := range groupKeys {
+			group := groups[groupKey]
+			representative := &candidates[group.members[0]]
+			prefix := strings.Join(representative.outputParts[:depth+1], "/")
+			if _, conflict := fileKeys[portableProviderPathKey(prefix)]; !conflict {
+				continue
+			}
+			original := representative.outputParts[depth]
+			resolved := ""
+			for attempt := 0; attempt < 16; attempt++ {
+				name, err := disambiguateProviderDirectoryName(original, group.providerKey, attempt)
+				if err != nil {
+					return fmt.Errorf("provider directory %q: %w", group.providerKey, err)
+				}
+				parts := append([]string(nil), representative.outputParts[:depth]...)
+				parts = append(parts, name)
+				if _, conflict := fileKeys[portableProviderPathKey(strings.Join(parts, "/"))]; !conflict {
+					resolved = name
+					break
+				}
+			}
+			if resolved == "" {
+				return fmt.Errorf("provider directory %q cannot be separated safely from a file", group.providerKey)
+			}
+			for _, index := range group.members {
+				candidates[index].outputParts[group.componentIndex] = resolved
+			}
+		}
+	}
+
+	fileKeys := make(map[string]string, len(candidates))
+	for index := range candidates {
+		outputPath := strings.Join(candidates[index].outputParts, "/")
+		key := portableProviderPathKey(outputPath)
+		if previous, exists := fileKeys[key]; exists {
+			return fmt.Errorf("provider files %q and %q have the same portable output path", previous, outputPath)
+		}
+		fileKeys[key] = outputPath
+		candidates[index].file.OutputPath = outputPath
+	}
+	for index := range candidates {
+		for depth := 0; depth < len(candidates[index].outputParts)-1; depth++ {
+			prefix := strings.Join(candidates[index].outputParts[:depth+1], "/")
+			if file, conflict := fileKeys[portableProviderPathKey(prefix)]; conflict {
+				return fmt.Errorf("provider output directory %q conflicts with file %q", prefix, file)
+			}
+		}
+	}
+	return nil
+}
+
+func portableProviderOutputParts(fullPath, logicalName string) ([]string, error) {
 	parts := strings.Split(fullPath, "/")
 	output := make([]string, 0, len(parts))
 	for _, component := range parts[:len(parts)-1] {
 		portable, err := portableProviderFileName(component)
 		if err != nil {
-			return "", fmt.Errorf("invalid output directory %q: %w", component, err)
+			return nil, fmt.Errorf("invalid output directory %q: %w", component, err)
 		}
 		output = append(output, portable)
 	}
 	output = append(output, logicalName)
-	return strings.Join(output, "/"), nil
+	return output, nil
+}
+
+func disambiguateProviderDirectoryName(name, providerKey string, attempt int) (string, error) {
+	extension := path.Ext(name)
+	stem := strings.TrimSuffix(name, extension)
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00directory\x00%d", providerKey, attempt)))
+	disambiguated := stem + "~" + hex.EncodeToString(digest[:]) + extension
+	return safepath.CompactIdentifier(disambiguated, safepath.PortableIdentifierMaxBytes)
 }
 
 func normalizeProviderFilePath(providerPath, fallbackName string) (string, error) {

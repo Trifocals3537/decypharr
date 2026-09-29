@@ -102,7 +102,7 @@ func TestVerifyTreeIgnoresDirectoryAllocationSize(t *testing.T) {
 	}
 }
 
-func TestMigrateAcceptsVersionTwoReceiptAfterDirectorySizeDrift(t *testing.T) {
+func TestMigrateAcceptsExactVersionTwoReceipt(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "old")
 	target := filepath.Join(root, "new")
@@ -119,22 +119,10 @@ func TestMigrateAcceptsVersionTwoReceiptAfterDirectorySizeDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacySource := append([]manifestEntry(nil), sourceEntries...)
-	legacyTarget := append([]manifestEntry(nil), targetEntries...)
-	for index := range legacySource {
-		if legacySource[index].Mode.IsDir() {
-			legacySource[index].Size += 4096
-		}
-	}
-	for index := range legacyTarget {
-		if legacyTarget[index].Mode.IsDir() {
-			legacyTarget[index].Size += 8192
-		}
-	}
 	legacy := receipt{
 		SchemaVersion: legacyReceiptVersionV2,
-		SourceDigest:  digestManifestV2(legacySource),
-		TargetDigest:  digestManifestV2(legacyTarget),
+		SourceDigest:  digestManifestV2(sourceEntries),
+		TargetDigest:  digestManifestV2(targetEntries),
 	}
 	data, err := json.MarshalIndent(legacy, "", "  ")
 	if err != nil {
@@ -156,8 +144,71 @@ func TestMigrateAcceptsVersionTwoReceiptAfterDirectorySizeDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Migrate(Options{Source: source, Target: target}); err == nil ||
-		!strings.Contains(err.Error(), "legacy receipt content verification") {
+		!strings.Contains(err.Error(), "cannot be safely verified") {
 		t.Fatalf("tampered version-two target error = %v", err)
+	}
+}
+
+func TestMigrateRejectsDriftedVersionTwoReceiptWithoutDryRunWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	mustWriteFile(t, filepath.Join(source, "nested", "config.json"), []byte("{}"), 0o600)
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	sourceEntries, err := buildManifest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetEntries, err := scanTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range sourceEntries {
+		if sourceEntries[index].Mode.IsDir() {
+			sourceEntries[index].Size += 4096
+		}
+	}
+	for index := range targetEntries {
+		if targetEntries[index].Mode.IsDir() {
+			targetEntries[index].Size += 8192
+		}
+	}
+	legacy := receipt{
+		SchemaVersion: legacyReceiptVersionV2,
+		SourceDigest:  digestManifestV2(sourceEntries),
+		TargetDigest:  digestManifestV2(targetEntries),
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(target, receiptName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(Options{Source: source, Target: target, DryRun: true}); err == nil ||
+		!strings.Contains(err.Error(), "cannot be safely verified") {
+		t.Fatalf("drifted version-two receipt error = %v", err)
+	}
+	after, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("dry run changed migration parent entries: before=%d after=%d", len(before), len(after))
+	}
+	for index := range before {
+		if before[index].Name() != after[index].Name() {
+			t.Fatalf("dry run changed migration parent entries: before=%q after=%q", before[index].Name(), after[index].Name())
+		}
 	}
 }
 

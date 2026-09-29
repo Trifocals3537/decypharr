@@ -115,7 +115,7 @@ func Migrate(options Options) (Result, error) {
 	sourceDigest := digestManifest(entries)
 
 	if _, err := os.Lstat(target); err == nil {
-		if err := verifyExistingTarget(target, source, entries); err != nil {
+		if err := verifyExistingTarget(target, entries); err != nil {
 			return result, err
 		}
 		result.AlreadyMigrated = true
@@ -441,7 +441,7 @@ func writeReceipt(stage, sourceDigest, targetDigest string) error {
 	return nil
 }
 
-func verifyExistingTarget(target, source string, sourceEntries []manifestEntry) error {
+func verifyExistingTarget(target string, sourceEntries []manifestEntry) error {
 	info, err := os.Lstat(target)
 	if err != nil {
 		return err
@@ -475,51 +475,19 @@ func verifyExistingTarget(target, source string, sourceEntries []manifestEntry) 
 		return nil
 	case legacyReceiptVersionV2:
 		// Version 2 included filesystem-dependent directory allocation sizes.
-		// Fast-path an exact legacy match. If allocation sizes drifted, rebuild the
-		// expected transformed tree in a temporary directory and compare stable
-		// content manifests so an old valid receipt remains usable without
-		// weakening source/target verification.
+		// Only its exact recorded hashes provide provenance. Directory allocation
+		// sizes cannot be reconstructed safely after they drift, so require an
+		// explicit recovery instead of accepting a content-only reconstruction.
 		if completed.SourceDigest == digestManifestV2(sourceEntries) &&
 			completed.TargetDigest == digestManifestV2(actual) {
 			return nil
 		}
-		return verifyLegacyReceiptByContent(target, source, sourceEntries, actual)
+		return fmt.Errorf(
+			"version-two migration receipt cannot be safely verified after filesystem metadata drift; recover or remigrate explicitly",
+		)
 	default:
 		return fmt.Errorf("migration target uses unsupported receipt version %d", completed.SchemaVersion)
 	}
-}
-
-func verifyLegacyReceiptByContent(target, source string, sourceEntries, actual []manifestEntry) error {
-	stage, err := os.MkdirTemp(filepath.Dir(target), ".tessarr-migration-verify-")
-	if err != nil {
-		return fmt.Errorf("create legacy receipt verification directory: %w", err)
-	}
-	defer os.RemoveAll(stage)
-
-	if err := copyManifest(source, stage, sourceEntries); err != nil {
-		return fmt.Errorf("rebuild legacy migration state: %w", err)
-	}
-	if err := verifyTree(stage, sourceEntries); err != nil {
-		return fmt.Errorf("verify rebuilt legacy migration state: %w", err)
-	}
-	if err := applyStatePathRebase(stage, source, target); err != nil {
-		return fmt.Errorf("rebase rebuilt legacy migration state: %w", err)
-	}
-	expected, err := scanTarget(stage)
-	if err != nil {
-		return fmt.Errorf("inspect rebuilt legacy migration state: %w", err)
-	}
-	if digestManifest(expected) != digestManifest(actual) {
-		return fmt.Errorf("existing Tessarr state failed legacy receipt content verification")
-	}
-	currentSource, err := buildManifest(source)
-	if err != nil {
-		return fmt.Errorf("reinspect legacy migration source: %w", err)
-	}
-	if digestManifest(currentSource) != digestManifest(sourceEntries) {
-		return fmt.Errorf("source state changed during legacy receipt verification")
-	}
-	return nil
 }
 
 func applyStatePathRebase(stage, source, target string) error {

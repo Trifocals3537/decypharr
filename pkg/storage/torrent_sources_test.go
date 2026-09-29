@@ -184,3 +184,69 @@ func TestTorrentSourceTemporaryNameRecognitionIsExact(t *testing.T) {
 		}
 	}
 }
+
+func TestReplaceTorrentSourceUsesPinnedRoot(t *testing.T) {
+	container := t.TempDir()
+	parentPath := filepath.Join(container, "original")
+	rootPath := filepath.Join(parentPath, "root")
+	if err := os.MkdirAll(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	if err := os.WriteFile(filepath.Join(rootPath, "source.tmp"), []byte("pinned source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "destination.torrent"), []byte("pinned destination"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	movedParent := filepath.Join(container, "moved")
+	movedRoot := filepath.Join(movedParent, "root")
+	if err := os.Rename(parentPath, movedParent); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("Windows keeps the opened root ancestry rename-protected: %v", err)
+		}
+		t.Fatalf("rename parent of opened torrent-source root: %v", err)
+	}
+	if err := os.MkdirAll(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "source.tmp"), []byte("replacement source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "destination.torrent"), []byte("replacement destination"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := replaceTorrentSource(rooted, "source.tmp", "destination.torrent"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(movedRoot, "destination.torrent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "pinned source" {
+		t.Fatalf("pinned destination = %q, want pinned source", got)
+	}
+	if _, err := os.Stat(filepath.Join(movedRoot, "source.tmp")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pinned source still exists: %v", err)
+	}
+	got, err = os.ReadFile(filepath.Join(rootPath, "destination.torrent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "replacement destination" {
+		t.Fatalf("replacement destination changed to %q", got)
+	}
+	got, err = os.ReadFile(filepath.Join(rootPath, "source.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "replacement source" {
+		t.Fatalf("replacement source changed to %q", got)
+	}
+}

@@ -34,6 +34,41 @@ type legacyAdoptionFixture struct {
 	manual    []*storage.Entry
 }
 
+func TestRequireSingleLegacyLinkUsesOpenedArtifact(t *testing.T) {
+	rootPath := t.TempDir()
+	artifactPath := filepath.Join(rootPath, "artifact.bin")
+	linkedPath := filepath.Join(rootPath, "artifact-link.bin")
+	if err := os.WriteFile(artifactPath, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(artifactPath, linkedPath); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	rooted, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rooted.Close()
+	file, _, err := openStableLegacyRegularFile(rooted, "artifact.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	movedPath := filepath.Join(rootPath, "moved-artifact.bin")
+	if err := os.Rename(artifactPath, movedPath); err != nil {
+		t.Fatalf("rename opened artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = requireSingleLegacyLink(file)
+	if err == nil || !strings.Contains(err.Error(), "2 hard links") {
+		t.Fatalf("requireSingleLegacyLink() error = %v, want pinned artifact hard-link rejection", err)
+	}
+}
+
 func newLegacyAdoptionFixture(t *testing.T, action config.DownloadAction) *legacyAdoptionFixture {
 	t.Helper()
 	root := t.TempDir()

@@ -333,6 +333,54 @@ func portableTorrentRelativeKey(relative string) string {
 	return strings.Join(parts, "/")
 }
 
+// normalizeTorrentProviderSourcePath validates a path only for lookup inside a
+// pinned provider mount. Provider-native punctuation is allowed here because
+// it never becomes an output name; traversal, separators inside components,
+// NUL/control bytes, and absolute host paths remain forbidden.
+func normalizeTorrentProviderSourcePath(value string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return "", fmt.Errorf("path contains a NUL byte")
+	}
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("path contains a control character")
+	}
+	value = strings.ReplaceAll(value, `\`, "/")
+	if path.IsAbs(value) || filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
+		return "", fmt.Errorf("path is absolute")
+	}
+	clean := path.Clean(value)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path traverses outside the provider release")
+	}
+	parts := strings.Split(clean, "/")
+	for _, component := range parts {
+		if err := validateTorrentProviderSourceIdentifier(component); err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(parts...), nil
+}
+
+func validateTorrentProviderSourceIdentifier(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("path component is empty or traversal")
+	}
+	if strings.IndexByte(name, 0) >= 0 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return fmt.Errorf("path component contains a NUL or control character")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("path component contains a separator")
+	}
+	return nil
+}
+
+func torrentProviderSourceKey(relative string) string {
+	return strings.ToLower(path.Clean(filepath.ToSlash(relative)))
+}
+
 func safeTorrentFilePath(downloadRoot string, entry *storage.Entry, relative, suffix string) (string, error) {
 	entryPath, err := safeTorrentEntryDownloadPath(downloadRoot, entry)
 	if err != nil {

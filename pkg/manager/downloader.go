@@ -492,9 +492,9 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 		sourceKeys[layout.key] = []string{layout.key}
 		if activePlacement != nil {
 			if providerFile := activePlacement.Files[layout.file.Name]; providerFile != nil {
-				providerRelative, providerErr := normalizeTorrentFileOutputPath(entry, strings.TrimSpace(providerFile.Path))
+				providerRelative, providerErr := normalizeTorrentProviderSourcePath(strings.TrimSpace(providerFile.Path))
 				if providerErr == nil {
-					providerKey := portableTorrentRelativeKey(providerRelative)
+					providerKey := torrentProviderSourceKey(providerRelative)
 					if providerKey != layout.key {
 						sourceKeys[layout.key] = append([]string{providerKey}, sourceKeys[layout.key]...)
 					}
@@ -651,7 +651,7 @@ func scanTorrentMountFiles(mountPath string) (map[string]string, map[string][]st
 					_ = dir.Close()
 					return nil, nil, fmt.Errorf("torrent mount tree exceeds %d entries", torrentOwnershipMaxEntries)
 				}
-				if err := safepath.ValidateIdentifier(item.Name()); err != nil {
+				if err := validateTorrentProviderSourceIdentifier(item.Name()); err != nil {
 					_ = dir.Close()
 					return nil, nil, fmt.Errorf("invalid torrent mount name %q: %w", item.Name(), err)
 				}
@@ -675,12 +675,12 @@ func scanTorrentMountFiles(mountPath string) (map[string]string, map[string][]st
 				if !info.Mode().IsRegular() {
 					continue
 				}
-				normalized, err := normalizeTorrentRelativePath(relative)
+				normalized, err := normalizeTorrentProviderSourcePath(relative)
 				if err != nil {
 					_ = dir.Close()
 					return nil, nil, err
 				}
-				key := portableTorrentRelativeKey(normalized)
+				key := torrentProviderSourceKey(normalized)
 				absolute := filepath.Join(mountPath, relative)
 				if previous, exists := byPath[key]; exists && !sameFilesystemPath(previous, absolute) {
 					_ = dir.Close()

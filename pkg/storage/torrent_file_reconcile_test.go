@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
 
@@ -314,5 +317,138 @@ func TestAddTorrentProviderReconcilesNewPlacementThroughExistingPaths(t *testing
 		if placement.Files[oldName] == nil {
 			t.Fatalf("new placement did not reuse canonical key %q: %#v", oldName, placement.Files)
 		}
+	}
+}
+
+func TestAddTorrentProviderReconcilesUniqueLogicalKeyAcrossReleaseRoots(t *testing.T) {
+	entry := &Entry{
+		InfoHash: "hash",
+		Files: map[string]*File{
+			"Movie.mkv": {ID: "canonical", Name: "Movie.mkv", Path: "Release/Movie.mkv", Size: 123},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {
+				Provider: "primary",
+				Files: map[string]*ProviderFile{
+					"Movie.mkv": {Id: "primary-id", Path: "Release/Movie.mkv"},
+				},
+			},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "fallback-id", Path: "Movie.mkv", Size: 123, Link: "fallback://movie",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 1 || entry.Files["Movie.mkv"] == nil || placement.Files["Movie.mkv"] == nil {
+		t.Fatalf("release-root difference duplicated canonical files: files=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
+func TestAddTorrentProviderRejectsLogicalKeyMatchWithContradictorySize(t *testing.T) {
+	entry := &Entry{
+		Files: map[string]*File{"Episode.mkv": {Name: "Episode.mkv", Path: "Season 01/Episode.mkv", Size: 123}},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Episode.mkv": {Path: "Season 01/Episode.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{Path: "Different/Episode.mkv", Size: 456}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles}); err == nil {
+		t.Fatal("contradictory same-name fallback was accepted")
+	}
+}
+
+func TestUpdateTorrentProviderStatePreservesIdentityAcrossIncompleteSnapshots(t *testing.T) {
+	canonical := &File{Name: "Movie.mkv", Path: "Movie.mkv", Size: 123}
+	providerFile := &ProviderFile{Id: "stable", Path: "Movie.mkv", Link: "provider://movie"}
+	entry := &Entry{
+		Files: map[string]*File{"Movie.mkv": canonical},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", ID: "old-id", Files: map[string]*ProviderFile{"Movie.mkv": providerFile}},
+		},
+	}
+	placement, err := entry.UpdateTorrentProviderState(&debridTypes.Torrent{
+		Id: "new-id", Debrid: "primary", Status: debridTypes.TorrentStatusDownloaded,
+		Files: map[string]debridTypes.File{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Files["Movie.mkv"] != canonical || placement.Files["Movie.mkv"] != providerFile {
+		t.Fatalf("empty snapshot discarded identities: files=%#v placement=%#v", entry.Files, placement.Files)
+	}
+	partial := map[string]debridTypes.File{
+		"Other.mkv": {Name: "Other.mkv", Path: "Other.mkv", Size: 1},
+	}
+	if _, err := entry.UpdateTorrentProviderState(&debridTypes.Torrent{Debrid: "primary", Files: partial}); err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 1 || len(entry.Providers["primary"].Files) != 1 {
+		t.Fatalf("partial snapshot leaked into canonical state: files=%#v placement=%#v", entry.Files, entry.Providers["primary"].Files)
+	}
+}
+
+func TestAddTorrentProviderPreservesOutputAfterRestartWhenArtifactExists(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "stable-1", Path: "Season 01/Episode.mkv", Size: 11},
+		{Id: "stable-2", Path: "Season 02/Episode.mkv", Size: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &Entry{
+		Protocol:   config.ProtocolTorrent,
+		InfoHash:   "hash",
+		SavePath:   t.TempDir(),
+		OutputName: "owned-output",
+		Files: map[string]*File{
+			"Season 01/Episode.mkv": {Name: "Season 01/Episode.mkv", Path: "Season 01/Episode.mkv", Size: 11},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Season 01/Episode.mkv": {Id: "stable-1", Path: "Season 01/Episode.mkv"},
+			}},
+		},
+	}
+	if err := os.MkdirAll(filepath.Clean(entry.DownloadPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Files["Season 01/Episode.mkv"] == nil || placement.Files["Season 01/Episode.mkv"] == nil {
+		t.Fatalf("restart-time artifact identity moved: files=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
+func TestAddTorrentProviderPreservesKnownSizeAcrossIncompleteMetadata(t *testing.T) {
+	entry := &Entry{
+		Files: map[string]*File{"Movie.mkv": {Name: "Movie.mkv", Path: "Movie.mkv", Size: 123}},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Movie.mkv": {Id: "stable", Path: "Movie.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{Id: "stable", Path: "Movie.mkv", Size: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles}); err != nil {
+		t.Fatal(err)
+	}
+	if got := entry.Files["Movie.mkv"].Size; got != 123 {
+		t.Fatalf("known size overwritten with %d", got)
 	}
 }

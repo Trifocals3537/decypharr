@@ -159,6 +159,36 @@ func TestFilesByLogicalNameKeepsLossyDirectoriesDistinct(t *testing.T) {
 	}
 }
 
+func TestFilesByLogicalNameReservesLiteralDirectoryAgainstGeneratedName(t *testing.T) {
+	generated, err := disambiguateProviderDirectoryName("A_", portableProviderPathKey("A?"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []File{
+		{Id: "lossy", Path: "A?/movie.mkv"},
+		{Id: "literal", Path: generated + "/extra.srt"},
+	}
+	files, err := FilesByLogicalName(input)
+	if err != nil {
+		t.Fatalf("generated-looking literal directory rejected: %v", err)
+	}
+	lossy := fileByProviderID(t, files, "lossy")
+	literal := fileByProviderID(t, files, "literal")
+	if strings.Split(lossy.OutputPath, "/")[0] == strings.Split(literal.OutputPath, "/")[0] {
+		t.Fatalf("generated directory stole literal identity: lossy=%q literal=%q", lossy.OutputPath, literal.OutputPath)
+	}
+	if !strings.HasPrefix(literal.OutputPath, generated+"/") {
+		t.Fatalf("literal directory moved to %q", literal.OutputPath)
+	}
+	reversed, err := FilesByLogicalName([]File{input[1], input[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, reversed) {
+		t.Fatalf("directory allocation changed with provider order:\nfirst: %#v\nsecond: %#v", files, reversed)
+	}
+}
+
 func TestFilesByLogicalNameSeparatesFileAndDirectoryOutputPaths(t *testing.T) {
 	input := []File{
 		{Id: "1", Path: "Release/Movie_.mkv"},
@@ -233,6 +263,13 @@ func TestFilesByLogicalNameRejectsTraversal(t *testing.T) {
 func TestFilesByLogicalNameRejectsUnboundedFileSets(t *testing.T) {
 	if _, err := FilesByLogicalName(make([]File, maxProviderFileRecords+1)); err == nil {
 		t.Fatal("expected oversized provider file set to be rejected")
+	}
+}
+
+func TestFilesByLogicalNameRejectsUnboundedPathDepth(t *testing.T) {
+	providerPath := strings.Repeat("nested/", maxProviderOutputDepth+1) + "movie.mkv"
+	if _, err := FilesByLogicalName([]File{{Path: providerPath}}); err == nil || !strings.Contains(err.Error(), "maximum output depth") {
+		t.Fatalf("deep provider path error = %v", err)
 	}
 }
 

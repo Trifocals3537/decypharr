@@ -156,6 +156,40 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 	}
 }
 
+func TestApplyCompletedTorrentFilesDoesNotPublishPartialTreeOverExistingFiles(t *testing.T) {
+	existingFile := &storage.File{Name: "Movie.mkv", Path: "Movie.mkv", Size: 1234}
+	existingProviderFile := &storage.ProviderFile{Id: "movie", Path: "Movie.mkv", Link: "provider://movie"}
+	entry := &storage.Entry{
+		InfoHash:       "existing-canonical-files",
+		Status:         debridTypes.TorrentStatusDownloaded,
+		ActiveProvider: "primary",
+		Files:          map[string]*storage.File{"Movie.mkv": existingFile},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{"Movie.mkv": existingProviderFile}},
+		},
+	}
+	remote := &debridTypes.Torrent{
+		Id: "transfer", InfoHash: entry.InfoHash, Debrid: "primary", Status: debridTypes.TorrentStatusDownloaded,
+		Files: map[string]debridTypes.File{
+			"Other.mkv": {Id: "other", Name: "Other.mkv", Path: "Other.mkv", Size: 55},
+		},
+	}
+	ready, err := applyCompletedTorrentFiles(entry, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("partial provider tree reported ready")
+	}
+	if len(entry.Files) != 1 || entry.Files["Movie.mkv"] != existingFile {
+		t.Fatalf("partial tree changed canonical files: %#v", entry.Files)
+	}
+	placement := entry.Providers["primary"]
+	if len(placement.Files) != 1 || placement.Files["Movie.mkv"] != existingProviderFile {
+		t.Fatalf("partial tree replaced provider identity: %#v", placement.Files)
+	}
+}
+
 func TestTorrentFileLayoutsRejectTraversalAliasesAndAmbiguousBasenames(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -12,7 +12,11 @@ import (
 	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
-const maxProviderFileRecords = 100_000
+const (
+	maxProviderFileRecords   = 100_000
+	maxProviderOutputDepth   = 64
+	maxDirectoryNameAttempts = 16
+)
 
 type providerFileCandidate struct {
 	file                   File
@@ -220,6 +224,13 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 		candidate.providerParts = strings.Split(candidate.fullPath, "/")
 		candidate.outputParts = outputParts
 		leafDepth := len(outputParts) - 1
+		if leafDepth > maxProviderOutputDepth {
+			return fmt.Errorf(
+				"provider file %q exceeds maximum output depth %d",
+				candidate.fullPath,
+				maxProviderOutputDepth,
+			)
+		}
 		filesByDepth[leafDepth] = append(filesByDepth[leafDepth], index)
 		for depth := 0; depth < leafDepth; depth++ {
 			if depth > maxDirectoryDepth {
@@ -261,30 +272,55 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 			groupKeys = append(groupKeys, key)
 		}
 		sort.Strings(groupKeys)
+		reservedPrefixes := make(map[string]string, len(groups))
+		needsGeneratedName := make(map[string]bool, len(groups))
+		// Reserve every literal sibling before allocating generated names. This
+		// prevents a lossy directory's hash-derived candidate from taking a
+		// provider-supplied directory name that merely looks generated.
 		for _, groupKey := range groupKeys {
 			group := groups[groupKey]
 			representative := &candidates[group.members[0]]
 			prefix := strings.Join(representative.outputParts[:depth+1], "/")
-			_, fileConflict := fileKeys[portableProviderPathKey(prefix)]
-			if !group.lossy && !fileConflict {
+			prefixKey := portableProviderPathKey(prefix)
+			_, fileConflict := fileKeys[prefixKey]
+			if group.lossy || fileConflict {
+				needsGeneratedName[groupKey] = true
 				continue
 			}
+			if owner, exists := reservedPrefixes[prefixKey]; exists && owner != group.providerKey {
+				needsGeneratedName[groupKey] = true
+				continue
+			}
+			reservedPrefixes[prefixKey] = group.providerKey
+		}
+		for _, groupKey := range groupKeys {
+			if !needsGeneratedName[groupKey] {
+				continue
+			}
+			group := groups[groupKey]
+			representative := &candidates[group.members[0]]
 			original := representative.outputParts[depth]
 			resolved := ""
-			for attempt := 0; attempt < 16; attempt++ {
+			for attempt := 0; attempt < maxDirectoryNameAttempts; attempt++ {
 				name, err := disambiguateProviderDirectoryName(original, group.providerKey, attempt)
 				if err != nil {
 					return fmt.Errorf("provider directory %q: %w", group.providerKey, err)
 				}
 				parts := append([]string(nil), representative.outputParts[:depth]...)
 				parts = append(parts, name)
-				if _, conflict := fileKeys[portableProviderPathKey(strings.Join(parts, "/"))]; !conflict {
-					resolved = name
-					break
+				prefixKey := portableProviderPathKey(strings.Join(parts, "/"))
+				if _, conflict := fileKeys[prefixKey]; conflict {
+					continue
 				}
+				if owner, conflict := reservedPrefixes[prefixKey]; conflict && owner != group.providerKey {
+					continue
+				}
+				resolved = name
+				reservedPrefixes[prefixKey] = group.providerKey
+				break
 			}
 			if resolved == "" {
-				return fmt.Errorf("provider directory %q cannot be separated safely from a file", group.providerKey)
+				return fmt.Errorf("provider directory %q cannot be assigned a unique portable name", group.providerKey)
 			}
 			for _, index := range group.members {
 				candidates[index].outputParts[group.componentIndex] = resolved

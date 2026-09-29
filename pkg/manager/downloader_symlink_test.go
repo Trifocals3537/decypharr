@@ -113,6 +113,67 @@ func TestCreateTorrentSymlinksUsesProviderPathsForNestedDuplicateBasenames(t *te
 	}
 }
 
+func TestCreateTorrentSymlinksAllowsProviderNativePunctuation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("provider-native punctuation is not representable on Windows filesystems")
+	}
+	config.SetConfigPath(t.TempDir())
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unsafe-native", Path: "Release?/Why?.mkv", Size: 5,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &storage.Entry{
+		InfoHash:       "provider-native-punctuation",
+		Name:           "release",
+		Protocol:       config.ProtocolTorrent,
+		SavePath:       downloadRoot,
+		ActiveProvider: "primary",
+		Files:          make(map[string]*storage.File),
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+		},
+	}
+	var remote debridTypes.File
+	for name, file := range remoteFiles {
+		remote = file
+		entry.Files[name] = &storage.File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: file.Id, Path: file.Path}
+	}
+	target := filepath.Join(mountPath, filepath.FromSlash(remote.Path))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkDir, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	paths, err := downloader.createTorrentSymlinksWhenMountFilesAppear(context.Background(), entry, mountPath, symlinkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("created %d symlinks, want 1", len(paths))
+	}
+	resolved, err := filepath.EvalSymlinks(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFilesystemPath(resolved, target) {
+		t.Fatalf("symlink resolves to %q, want provider-native source %q", resolved, target)
+	}
+	if filepath.Base(paths[0]) == filepath.Base(target) {
+		t.Fatalf("unsafe provider basename leaked into portable output: %q", paths[0])
+	}
+}
+
 func TestCreateUsenetSymlinksSkipsMatchingDirectoryName(t *testing.T) {
 	downloadRoot := t.TempDir()
 	mountPath := t.TempDir()

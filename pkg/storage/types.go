@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"math"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -381,6 +382,44 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) (*Provide
 	return providerEntry, nil
 }
 
+// UpdateTorrentProviderState publishes transfer metadata without treating an
+// incomplete provider file snapshot as authoritative. Existing placement file
+// identities remain available for a later complete refresh; a new placement
+// starts empty and cannot leak partial files into the canonical tree.
+func (e *Entry) UpdateTorrentProviderState(remote *debridTypes.Torrent) (*ProviderEntry, error) {
+	if remote == nil {
+		return nil, fmt.Errorf("provider torrent is nil")
+	}
+	if e.Providers == nil {
+		e.Providers = make(map[string]*ProviderEntry)
+	}
+	previous := e.Providers[remote.Debrid]
+	files := make(map[string]*ProviderFile)
+	var addedAt time.Time
+	var downloadedAt *time.Time
+	if previous != nil {
+		addedAt = previous.AddedAt
+		downloadedAt = previous.DownloadedAt
+		for name, file := range previous.Files {
+			files[name] = file
+		}
+	}
+	if addedAt.IsZero() {
+		addedAt = time.Now()
+	}
+	placement := &ProviderEntry{
+		Provider:     remote.Debrid,
+		ID:           remote.Id,
+		AddedAt:      addedAt,
+		Status:       remote.Status,
+		Progress:     remote.Progress,
+		Files:        files,
+		DownloadedAt: downloadedAt,
+	}
+	e.Providers[remote.Debrid] = placement
+	return placement, nil
+}
+
 func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]string, error) {
 	if remote == nil {
 		return nil, fmt.Errorf("provider torrent is nil")
@@ -467,6 +506,22 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 					return nil, err
 				}
 			}
+		}
+	}
+
+	// Providers commonly disagree about a release-root prefix. After stable ID
+	// and full-path matching, an exact logical key is a safe final cross-provider
+	// identity only when known transfer sizes do not contradict one another.
+	for oldName, canonicalFile := range e.Files {
+		if canonicalFile == nil || canonicalToRemote[oldName] != "" || remoteToCanonical[oldName] != "" {
+			continue
+		}
+		remoteFile, exists := remoteFiles[oldName]
+		if !exists || !torrentFileSizesCompatible(canonicalFile, remoteFile) {
+			continue
+		}
+		if err := addMatch(oldName, oldName); err != nil {
+			return nil, err
 		}
 	}
 
@@ -559,8 +614,10 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		} else if file.Path == "" {
 			file.Path = remoteFile.LocalPath()
 		}
-		file.Size = remoteFile.Size
-		file.ByteRange = remoteFile.ByteRange
+		if remoteFile.Size > 0 || remoteFile.ByteRange != nil || (file.Size <= 0 && file.ByteRange == nil) {
+			file.Size = remoteFile.Size
+			file.ByteRange = remoteFile.ByteRange
+		}
 		file.Deleted = remoteFile.Deleted
 		file.InfoHash = e.InfoHash
 		if file.AddedOn.IsZero() {
@@ -587,7 +644,47 @@ func newCanonicalTorrentFile(entry *Entry, file debridTypes.File) *File {
 }
 
 func torrentArtifactsMayExist(entry *Entry) bool {
-	return entry != nil && (entry.CompletedAt != nil || entry.IsDownloading || entry.SizeDownloaded > 0)
+	if entry == nil {
+		return false
+	}
+	if entry.CompletedAt != nil || entry.IsDownloading || entry.SizeDownloaded > 0 {
+		return true
+	}
+	// IsDownloading is process-local work state and is intentionally cleared
+	// during restart recovery. The owned output directory is durable evidence
+	// that a symlink, STRM, or downloaded file may already exist. Any inspection
+	// error other than nonexistence is handled conservatively to avoid stranding
+	// an artifact behind a renamed logical path.
+	if !filepath.IsAbs(entry.SavePath) {
+		return false
+	}
+	candidate := entry.DownloadPath()
+	relative, err := filepath.Rel(entry.SavePath, candidate)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		// An invalid legacy output identity is never safe to rename implicitly.
+		return true
+	}
+	if _, err := os.Lstat(candidate); err == nil || !os.IsNotExist(err) {
+		return true
+	}
+	return false
+}
+
+func torrentFileSizesCompatible(canonical *File, remote debridTypes.File) bool {
+	canonicalSize := boundedTorrentTransferSize(canonical.Size, canonical.ByteRange)
+	remoteSize := boundedTorrentTransferSize(remote.Size, remote.ByteRange)
+	return canonicalSize <= 0 || remoteSize <= 0 || canonicalSize == remoteSize
+}
+
+func boundedTorrentTransferSize(size int64, byteRange *[2]int64) int64 {
+	if byteRange == nil || byteRange[0] < 0 || byteRange[1] < byteRange[0] {
+		return size
+	}
+	span := byteRange[1] - byteRange[0]
+	if span == math.MaxInt64 {
+		return 0
+	}
+	return span + 1
 }
 
 func matchRefreshedProviderFileName(

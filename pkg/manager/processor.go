@@ -612,6 +612,9 @@ func (m *Manager) processAction(ctx context.Context, entry *storage.Entry) error
 	// torrent on a different provider). The queue entry only knows about the
 	// provider it was queued for, so we need to preserve other placements.
 	if existing, err := m.storage.Get(entry.InfoHash); err == nil && existing != nil {
+		if err := storage.ReconcileCompletedTorrentEntry(existing, entry); err != nil {
+			return err
+		}
 		entry = storage.HandleExistingEntryMerge(existing, entry)
 	}
 
@@ -703,7 +706,7 @@ func applyCompletedTorrentFiles(entry *storage.Entry, torrent *debridTypes.Torre
 		return false, nil
 	}
 	if !isComplete(torrent.Files) {
-		if err := applyDebridTorrentState(entry, torrent); err != nil {
+		if err := applyIncompleteDebridTorrentState(entry, torrent); err != nil {
 			return false, err
 		}
 		entry.Status = debridTypes.TorrentStatusDownloading
@@ -740,12 +743,7 @@ func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.
 	if _, err := torrent.AddTorrentProvider(debridTorrent); err != nil {
 		return err
 	}
-	torrent.ActiveProvider = debridTorrent.Debrid
-	torrent.Bytes = debridTorrent.GetSize()
-	torrent.Size = debridTorrent.GetSize()
-	torrent.Name = debridTorrent.Name
-	torrent.OriginalFilename = debridTorrent.OriginalFilename
-	torrent.UpdatedAt = time.Now()
+	applyDebridTorrentMetadata(torrent, debridTorrent)
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
 		return nil
@@ -756,6 +754,29 @@ func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.
 		placement.Progress = 1.0
 	}
 	return nil
+}
+
+func applyIncompleteDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) error {
+	if _, err := torrent.UpdateTorrentProviderState(debridTorrent); err != nil {
+		return err
+	}
+	applyDebridTorrentMetadata(torrent, debridTorrent)
+	return nil
+}
+
+func applyDebridTorrentMetadata(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {
+	torrent.ActiveProvider = debridTorrent.Debrid
+	if size := debridTorrent.GetSize(); size > 0 || torrent.Size <= 0 {
+		torrent.Bytes = size
+		torrent.Size = size
+	}
+	if debridTorrent.Name != "" {
+		torrent.Name = debridTorrent.Name
+	}
+	if debridTorrent.OriginalFilename != "" {
+		torrent.OriginalFilename = debridTorrent.OriginalFilename
+	}
+	torrent.UpdatedAt = time.Now()
 }
 
 // SendToDebrid submits a magnet to debrid service(s) - replaces debrid.Parse

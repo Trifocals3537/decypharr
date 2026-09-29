@@ -536,6 +536,18 @@ func TestRegularFileOperationsRejectSymlinksAndCrossParentRename(t *testing.T) {
 	if err := RemoveRegularFile(link); err == nil {
 		t.Fatal("regular file removal accepted a symlink")
 	}
+	if err := AtomicWriteFile(link, []byte("replacement"), 0o600); err == nil {
+		t.Fatal("atomic write replaced a symlink")
+	}
+	assertSafePathContents(t, outside, "secret")
+
+	directory := filepath.Join(root, "directory.json")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicWriteFile(directory, []byte("replacement"), 0o600); err == nil {
+		t.Fatal("atomic write replaced a directory")
+	}
 
 	source := filepath.Join(root, "source.json")
 	if err := os.WriteFile(source, []byte("data"), 0o600); err != nil {

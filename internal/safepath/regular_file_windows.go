@@ -2,12 +2,25 @@
 
 package safepath
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 func replaceRootFile(rooted *os.Root, source, destination string) error {
 	// os.Root.Rename uses directory handles plus replace-if-exists semantics on
 	// Windows, so a renamed or swapped parent path cannot redirect replacement.
-	return rooted.Rename(source, destination)
+	// Syncing a newly opened destination handle after the rooted rename retains
+	// the prior write-through guarantee without falling back to an absolute-path
+	// MoveFileEx call that could be redirected by a parent-directory swap.
+	if err := rooted.Rename(source, destination); err != nil {
+		return err
+	}
+	file, err := rooted.OpenFile(destination, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	return errors.Join(file.Sync(), file.Close())
 }
 
 func syncOpenRoot(*os.Root) error {

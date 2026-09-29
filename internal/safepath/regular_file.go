@@ -78,14 +78,18 @@ func OpenRegularFile(path string, flag int, perm os.FileMode) (*os.File, bool, e
 
 // ReadRegularFile reads a bounded regular file without following a symlink.
 func ReadRegularFile(path string, limit int64) ([]byte, error) {
-	if limit < 0 {
-		return nil, fmt.Errorf("regular file read limit must not be negative")
-	}
 	file, _, err := OpenRegularFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	return readBoundedRegularFile(file, limit)
+}
+
+func readBoundedRegularFile(file *os.File, limit int64) ([]byte, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("regular file read limit must not be negative")
+	}
 	reader := io.Reader(file)
 	if limit > 0 {
 		reader = io.LimitReader(file, limit+1)
@@ -122,19 +126,31 @@ func StatRegularFile(path string) (os.FileInfo, error) {
 
 // RemoveRegularFile removes one regular file through its pinned parent.
 func RemoveRegularFile(path string) error {
-	rooted, leaf, absolute, err := openRegularFileParent(path)
+	rooted, leaf, _, err := openRegularFileParent(path)
 	if err != nil {
 		return err
 	}
 	defer rooted.Close()
-	info, err := rooted.Lstat(leaf)
+	return RemoveRootRegularFile(rooted, leaf)
+}
+
+// RemoveRootRegularFile removes one regular, non-symlink file through an
+// already pinned directory.
+func RemoveRootRegularFile(rooted *os.Root, name string) error {
+	if rooted == nil {
+		return fmt.Errorf("pinned filesystem root is nil")
+	}
+	if err := ValidateIdentifier(name); err != nil {
+		return fmt.Errorf("invalid file name: %w", err)
+	}
+	info, err := rooted.Lstat(name)
 	if err != nil {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("file path is not a regular non-symlink file: %s", absolute)
+		return fmt.Errorf("file is not a regular non-symlink file: %s", name)
 	}
-	return rooted.Remove(leaf)
+	return rooted.Remove(name)
 }
 
 // RenameRegularFile renames a regular file within one pinned parent
@@ -183,6 +199,26 @@ func AtomicWriteFile(path string, data []byte, mode os.FileMode) (returnErr erro
 	}
 	defer func() { returnErr = errors.Join(returnErr, rooted.Close()) }()
 
+	return AtomicWriteRootFile(rooted, leaf, data, mode)
+}
+
+// AtomicWriteRootFile crash-safely replaces one regular file through an
+// already pinned directory. Existing symlinks and special files are rejected.
+func AtomicWriteRootFile(rooted *os.Root, name string, data []byte, mode os.FileMode) (returnErr error) {
+	if rooted == nil {
+		return fmt.Errorf("pinned filesystem root is nil")
+	}
+	if err := ValidateIdentifier(name); err != nil {
+		return fmt.Errorf("invalid file name: %w", err)
+	}
+	if destination, err := rooted.Lstat(name); err == nil {
+		if destination.Mode()&os.ModeSymlink != 0 || !destination.Mode().IsRegular() {
+			return fmt.Errorf("destination is not a regular non-symlink file: %s", name)
+		}
+	} else if !isNotExistError(err) {
+		return err
+	}
+
 	temporary, err := randomSiblingName()
 	if err != nil {
 		return err
@@ -220,7 +256,7 @@ func AtomicWriteFile(path string, data []byte, mode os.FileMode) (returnErr erro
 		return err
 	}
 	fileClosed = true
-	if err := replaceRootFile(rooted, temporary, leaf); err != nil {
+	if err := replaceRootFile(rooted, temporary, name); err != nil {
 		return err
 	}
 	removeTemporary = false
@@ -234,6 +270,15 @@ func SyncDirectory(path string) error {
 		return err
 	}
 	defer rooted.Close()
+	return SyncRoot(rooted)
+}
+
+// SyncRoot makes prior namespace operations durable through an already pinned
+// directory where the platform provides such an operation.
+func SyncRoot(rooted *os.Root) error {
+	if rooted == nil {
+		return fmt.Errorf("pinned filesystem root is nil")
+	}
 	return syncOpenRoot(rooted)
 }
 

@@ -28,6 +28,9 @@ var backupSequence atomic.Uint64
 // Before replacing an existing configuration, it stores the last known
 // on-disk version in a small, timestamped backup set.
 func persistConfig(path string, data []byte) error {
+	if len(data) > maxConfigurationFileBytes {
+		return fmt.Errorf("configuration exceeds %d-byte persistence limit", maxConfigurationFileBytes)
+	}
 	persistenceMu.Lock()
 	defer persistenceMu.Unlock()
 
@@ -57,6 +60,9 @@ func persistConfig(path string, data []byte) error {
 // persistAuth applies the same crash-safe replacement as config.json. Auth
 // changes are intentionally not copied into the configuration backup set.
 func persistAuth(path string, data []byte) error {
+	if len(data) > maxConfigurationFileBytes {
+		return fmt.Errorf("authentication configuration exceeds %d-byte persistence limit", maxConfigurationFileBytes)
+	}
 	persistenceMu.Lock()
 	defer persistenceMu.Unlock()
 
@@ -66,16 +72,13 @@ func persistAuth(path string, data []byte) error {
 	return nil
 }
 
-func writeConfigBackup(configPath string, data []byte) error {
+func writeConfigBackup(configPath string, data []byte) (returnErr error) {
 	backupDir := filepath.Join(filepath.Dir(configPath), "backups")
-	if _, err := safepath.EnsureDir(filepath.Dir(configPath), backupDir, privateDirMode); err != nil {
-		return err
-	}
-	backupRoot, _, err := safepath.OpenRoot(backupDir)
+	backupRoot, _, err := safepath.EnsureOpenRoot(backupDir, privateDirMode)
 	if err != nil {
 		return err
 	}
-	defer backupRoot.Close()
+	defer func() { returnErr = errors.Join(returnErr, backupRoot.Close()) }()
 	if err := backupRoot.Chmod(".", privateDirMode); err != nil {
 		return err
 	}
@@ -85,25 +88,20 @@ func writeConfigBackup(configPath string, data []byte) error {
 		time.Now().UTC().Format("20060102T150405.000000000Z"),
 		backupSequence.Add(1),
 	)
-	if err := atomicWriteFile(filepath.Join(backupDir, name), data, privateFileMode); err != nil {
+	if err := safepath.AtomicWriteRootFile(backupRoot, name, data, privateFileMode); err != nil {
 		return err
 	}
 
-	return pruneConfigBackups(backupDir)
+	return pruneConfigBackups(backupRoot)
 }
 
-func pruneConfigBackups(backupDir string) error {
-	rooted, _, err := safepath.OpenRoot(backupDir)
+func pruneConfigBackups(backupRoot *os.Root) error {
+	directory, err := backupRoot.Open(".")
 	if err != nil {
-		return err
-	}
-	directory, err := rooted.Open(".")
-	if err != nil {
-		_ = rooted.Close()
 		return err
 	}
 	entries, err := directory.ReadDir(-1)
-	closeErr := errors.Join(directory.Close(), rooted.Close())
+	closeErr := directory.Close()
 	if err != nil || closeErr != nil {
 		return errors.Join(err, closeErr)
 	}
@@ -125,11 +123,11 @@ func pruneConfigBackups(backupDir string) error {
 	}
 
 	for _, name := range names[:len(names)-maxConfigBackups] {
-		if err := safepath.RemoveRegularFile(filepath.Join(backupDir, name)); err != nil {
+		if err := safepath.RemoveRootRegularFile(backupRoot, name); err != nil {
 			return err
 		}
 	}
-	return safepath.SyncDirectory(backupDir)
+	return safepath.SyncRoot(backupRoot)
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {

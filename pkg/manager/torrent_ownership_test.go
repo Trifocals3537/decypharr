@@ -255,7 +255,7 @@ func TestTorrentFileLayoutsRejectTraversalAliasesAndAmbiguousBasenames(t *testin
 
 func TestTorrentFileLayoutsAcceptFoldCollisionAddedAfterMaterialization(t *testing.T) {
 	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
-		Id: "lower", Path: "a/movie.mkv/extra.srt", Size: 1,
+		Id: "nested", Path: "Release/movie.mkv/extra.srt", Size: 1,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -272,8 +272,8 @@ func TestTorrentFileLayoutsAcceptFoldCollisionAddedAfterMaterialization(t *testi
 		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: file.Id, Path: file.Path}
 	}
 	expanded, err := debridTypes.FilesByLogicalName([]debridTypes.File{
-		{Id: "lower", Path: "a/movie.mkv/extra.srt", Size: 1},
-		{Id: "upper", Path: "A/movie.mkv", Size: 2},
+		{Id: "nested", Path: "Release/movie.mkv/extra.srt", Size: 1},
+		{Id: "file", Path: "Release/Movie.mkv", Size: 2},
 	})
 	if err != nil {
 		t.Fatal(err)

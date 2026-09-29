@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -587,10 +588,35 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		}
 		canonical[newName] = file
 	}
-	for remoteName, remoteFile := range remoteFiles {
+	unmatchedRemoteNames := make([]string, 0, len(remoteFiles))
+	for remoteName := range remoteFiles {
 		if remoteToCanonical[remoteName] != "" {
 			continue
 		}
+		unmatchedRemoteNames = append(unmatchedRemoteNames, remoteName)
+	}
+	sort.Slice(unmatchedRemoteNames, func(i, j int) bool {
+		left := remoteFiles[unmatchedRemoteNames[i]]
+		right := remoteFiles[unmatchedRemoteNames[j]]
+		leftPath := providerPathIdentity(left.Path)
+		rightPath := providerPathIdentity(right.Path)
+		if leftPath != rightPath {
+			return leftPath < rightPath
+		}
+		return unmatchedRemoteNames[i] < unmatchedRemoteNames[j]
+	})
+	if !canChangeLocalIdentity && len(unmatchedRemoteNames) > 0 {
+		if err := reserveMaterializedTorrentOutputPaths(
+			canonical,
+			remoteFiles,
+			canonicalNames,
+			unmatchedRemoteNames,
+		); err != nil {
+			return nil, err
+		}
+	}
+	for _, remoteName := range unmatchedRemoteNames {
+		remoteFile := remoteFiles[remoteName]
 		canonicalName := canonicalNames[remoteName]
 		if _, exists := canonical[canonicalName]; exists {
 			return nil, fmt.Errorf("new provider file %q collides with canonical file %q", remoteName, canonicalName)

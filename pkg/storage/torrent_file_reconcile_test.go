@@ -2,7 +2,9 @@ package storage
 
 import (
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -289,6 +291,97 @@ func TestAddTorrentProviderPreservesMaterializedOutputIdentity(t *testing.T) {
 		if placement.Files[oldName] == nil || placement.Files[oldName].Id != id {
 			t.Fatalf("placement did not map to stable file %q: %#v", oldName, placement.Files)
 		}
+	}
+}
+
+func TestAddTorrentProviderDisambiguatesNewFileFromMaterializedDirectory(t *testing.T) {
+	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "nested", Path: "Release/movie.mkv/extra.srt", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := &Entry{
+		InfoHash:    "hash",
+		CompletedAt: &completed,
+		Files:       make(map[string]*File),
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*ProviderFile)},
+		},
+	}
+	for name, file := range initial {
+		entry.Files[name] = &File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &ProviderFile{Id: file.Id, Path: file.Path}
+	}
+	expanded, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "nested", Path: "Release/movie.mkv/extra.srt", Size: 1},
+		{Id: "file", Path: "Release/Movie.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{
+		Debrid: "primary", Files: expanded,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested := entry.Files["extra.srt"]; nested == nil || nested.Path != "Release/movie.mkv/extra.srt" {
+		t.Fatalf("materialized nested file moved: %#v", nested)
+	}
+	var generatedName string
+	for name, providerFile := range placement.Files {
+		if providerFile != nil && providerFile.Id == "file" {
+			generatedName = name
+			break
+		}
+	}
+	if generatedName == "" || strings.EqualFold(generatedName, "Movie.mkv") || path.Ext(generatedName) != ".mkv" {
+		t.Fatalf("new colliding file was not safely disambiguated: %q", generatedName)
+	}
+	newFile := entry.Files[generatedName]
+	if newFile == nil || path.Base(filepath.ToSlash(newFile.Path)) != generatedName {
+		t.Fatalf("new canonical file does not match its output path: %#v", newFile)
+	}
+	if strings.HasPrefix(
+		portableTorrentStoragePathKey(entry.Files["extra.srt"].Path),
+		portableTorrentStoragePathKey(newFile.Path)+"/",
+	) {
+		t.Fatalf("new file %q still owns the materialized directory prefix", newFile.Path)
+	}
+}
+
+func TestMaterializedTorrentParentDisambiguationUsesDirectoryIdentity(t *testing.T) {
+	first, err := disambiguateMaterializedTorrentComponent(
+		"Extras", "Release/Extras/one.mkv", 1, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := disambiguateMaterializedTorrentComponent(
+		"Extras", "Release/Extras/two.mkv", 1, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("files from one provider directory received different parent names: %q and %q", first, second)
+	}
+	firstLeaf, err := disambiguateMaterializedTorrentComponent(
+		"one.mkv", "Release/Extras/one.mkv", 2, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLeaf, err := disambiguateMaterializedTorrentComponent(
+		"two.mkv", "Release/Extras/two.mkv", 2, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstLeaf == secondLeaf || path.Ext(firstLeaf) != ".mkv" || path.Ext(secondLeaf) != ".mkv" {
+		t.Fatalf("file identities were not distinct with extensions preserved: %q and %q", firstLeaf, secondLeaf)
 	}
 }
 

@@ -61,3 +61,65 @@ func TestReconcileCompletedTorrentEntryBeforeMergePreservesCanonicalIdentity(t *
 		t.Fatalf("completed placement did not reconcile to legacy key: %#v", merged.Providers["primary"].Files)
 	}
 }
+
+func TestReconcileCompletedTorrentEntryMatchesDuplicateFilesAcrossReleaseRoots(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "fallback-one", Path: "Season 01/Episode.mkv", Size: 11, Link: "provider://one"},
+		{Id: "fallback-two", Path: "Season 02/Episode.mkv", Size: 12, Link: "provider://two"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	const (
+		legacyOne = "Old Release/Season 01/Episode.mkv"
+		legacyTwo = "Old Release/Season 02/Episode.mkv"
+	)
+	existing := &Entry{
+		Protocol:       config.ProtocolTorrent,
+		InfoHash:       "same-hash",
+		CompletedAt:    &completed,
+		ActiveProvider: "primary",
+		Files: map[string]*File{
+			legacyOne: {ID: "canonical-one", Name: legacyOne, Path: legacyOne, Size: 11},
+			legacyTwo: {ID: "canonical-two", Name: legacyTwo, Path: legacyTwo, Size: 12},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				legacyOne: {Id: "primary-one", Path: "Old Release/Season 01/Episode.mkv"},
+				legacyTwo: {Id: "primary-two", Path: "Old Release/Season 02/Episode.mkv"},
+			}},
+		},
+	}
+	incoming := &Entry{
+		Protocol:       config.ProtocolTorrent,
+		InfoHash:       existing.InfoHash,
+		ActiveProvider: "fallback",
+		Files:          make(map[string]*File),
+		Providers:      make(map[string]*ProviderEntry),
+	}
+	if _, err := incoming.AddTorrentProvider(&debridTypes.Torrent{
+		Id: "transfer", Debrid: "fallback", Status: debridTypes.TorrentStatusDownloaded, Files: remoteFiles,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, remote := range remoteFiles {
+		incoming.Files[name] = newCanonicalTorrentFile(incoming, remote)
+	}
+	if err := ReconcileCompletedTorrentEntry(existing, incoming); err != nil {
+		t.Fatal(err)
+	}
+	merged := HandleExistingEntryMerge(existing, incoming)
+	if len(merged.Files) != 2 {
+		t.Fatalf("queue merge created duplicate identities: %#v", merged.Files)
+	}
+	for name, id := range map[string]string{legacyOne: "fallback-one", legacyTwo: "fallback-two"} {
+		if merged.Files[name] == nil {
+			t.Fatalf("canonical file %q was not preserved: %#v", name, merged.Files)
+		}
+		providerFile := merged.Providers["fallback"].Files[name]
+		if providerFile == nil || providerFile.Id != id {
+			t.Fatalf("fallback placement did not map %q to %q: %#v", name, id, merged.Providers["fallback"].Files)
+		}
+	}
+}

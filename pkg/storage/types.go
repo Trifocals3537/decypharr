@@ -440,19 +440,17 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 
 	idIndex := make(map[string][]string, len(remoteFiles))
 	pathIndex := make(map[string][]string, len(remoteFiles)*2)
-	relaxedPathIndex := make(map[string][]string, len(remoteFiles)*2)
+	rootIndependentPathIndex := make(map[string][]string, len(remoteFiles)*2)
 	for name, file := range remoteFiles {
 		if file.Id != "" {
 			idIndex[file.Id] = append(idIndex[file.Id], name)
 		}
 		if key := providerPathIdentity(file.Path); key != "" {
 			pathIndex[key] = append(pathIndex[key], name)
+			indexProviderPathVariants(rootIndependentPathIndex, key, name)
 		}
 		if key := providerPathIdentity(file.LocalPath()); key != "" && key != providerPathIdentity(file.Path) {
 			pathIndex[key] = append(pathIndex[key], name)
-		}
-		for _, key := range providerPathRelaxedIdentities(file.Path) {
-			relaxedPathIndex[key] = append(relaxedPathIndex[key], name)
 		}
 	}
 
@@ -479,17 +477,14 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 			if oldFile == nil || e.Files[oldName] == nil {
 				continue
 			}
-			newName, matched, err := matchRefreshedProviderFileName(oldFile, idIndex, pathIndex)
-			if err != nil {
-				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
-			}
-			if matched {
-				if err := addMatch(oldName, newName); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			newName, matched, err = matchRelaxedProviderPath(oldFile.Path, e.Files[oldName], relaxedPathIndex, remoteFiles)
+			newName, matched, err := matchRefreshedProviderFileName(
+				oldFile,
+				e.Files[oldName],
+				idIndex,
+				pathIndex,
+				rootIndependentPathIndex,
+				remoteFiles,
+			)
 			if err != nil {
 				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
 			}
@@ -512,21 +507,18 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 			if oldFile == nil || e.Files[oldName] == nil || canonicalToRemote[oldName] != "" {
 				continue
 			}
-			matches := pathIndex[providerPathIdentity(oldFile.Path)]
-			if len(matches) > 1 {
-				return nil, fmt.Errorf("reconcile provider file %q: provider path %q is ambiguous", oldName, oldFile.Path)
+			match, matched, err := matchProviderFilePath(
+				oldFile.Path,
+				e.Files[oldName],
+				pathIndex,
+				rootIndependentPathIndex,
+				remoteFiles,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
 			}
-			if len(matches) == 0 {
-				newName, matched, err := matchRelaxedProviderPath(oldFile.Path, e.Files[oldName], relaxedPathIndex, remoteFiles)
-				if err != nil {
-					return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
-				}
-				if matched {
-					matches = []string{newName}
-				}
-			}
-			if len(matches) == 1 {
-				if err := addMatch(oldName, matches[0]); err != nil {
+			if matched {
+				if err := addMatch(oldName, match); err != nil {
 					return nil, err
 				}
 			}
@@ -556,12 +548,18 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		if file == nil || canonicalToRemote[oldName] != "" {
 			continue
 		}
-		matches := pathIndex[providerPathIdentity(file.Path)]
-		if len(matches) > 1 {
-			return nil, fmt.Errorf("reconcile canonical file %q: path %q is ambiguous", oldName, file.Path)
+		match, matched, err := matchProviderFilePath(
+			file.Path,
+			file,
+			pathIndex,
+			rootIndependentPathIndex,
+			remoteFiles,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile canonical file %q: %w", oldName, err)
 		}
-		if len(matches) == 1 {
-			if err := addMatch(oldName, matches[0]); err != nil {
+		if matched {
+			if err := addMatch(oldName, match); err != nil {
 				return nil, err
 			}
 		}
@@ -721,7 +719,10 @@ func boundedTorrentTransferSize(size int64, byteRange *[2]int64) int64 {
 
 func matchRefreshedProviderFileName(
 	oldFile *ProviderFile,
+	canonicalFile *File,
 	idIndex, pathIndex map[string][]string,
+	rootIndependentPathIndex map[string][]string,
+	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
 	var idName, pathName string
 	if oldFile.Id != "" {
@@ -733,13 +734,21 @@ func matchRefreshedProviderFileName(
 			idName = matches[0]
 		}
 	}
-	if key := providerPathIdentity(oldFile.Path); key != "" {
-		matches := pathIndex[key]
-		if len(matches) > 1 {
-			return "", false, fmt.Errorf("provider path %q is ambiguous", oldFile.Path)
+	if oldFile.Path != "" {
+		var matched bool
+		var err error
+		pathName, matched, err = matchProviderFilePath(
+			oldFile.Path,
+			canonicalFile,
+			pathIndex,
+			rootIndependentPathIndex,
+			remoteFiles,
+		)
+		if err != nil {
+			return "", false, err
 		}
-		if len(matches) == 1 {
-			pathName = matches[0]
+		if !matched {
+			pathName = ""
 		}
 	}
 	if idName != "" && pathName != "" && idName != pathName {
@@ -754,55 +763,78 @@ func matchRefreshedProviderFileName(
 	return "", false, nil
 }
 
+func matchProviderFilePath(
+	value string,
+	canonicalFile *File,
+	pathIndex, rootIndependentPathIndex map[string][]string,
+	remoteFiles map[string]debridTypes.File,
+) (string, bool, error) {
+	key := providerPathIdentity(value)
+	if key == "" {
+		return "", false, nil
+	}
+	if matches := pathIndex[key]; len(matches) > 1 {
+		return "", false, fmt.Errorf("provider path %q is ambiguous", value)
+	} else if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+
+	keys := []string{key}
+	if rootless := providerPathWithoutFirstComponent(key); rootless != "" {
+		keys = append(keys, rootless)
+	}
+	for _, candidateKey := range keys {
+		matches := rootIndependentPathIndex[candidateKey]
+		if len(matches) == 0 {
+			continue
+		}
+		var sizeMatches []string
+		for _, name := range matches {
+			if torrentFileSizesCompatible(canonicalFile, remoteFiles[name]) {
+				sizeMatches = append(sizeMatches, name)
+			}
+		}
+		if len(sizeMatches) > 1 {
+			return "", false, fmt.Errorf("provider path %q is ambiguous without its release root", value)
+		}
+		if len(sizeMatches) == 1 {
+			return sizeMatches[0], true, nil
+		}
+		return "", false, fmt.Errorf("provider path %q conflicts with refreshed file sizes", value)
+	}
+	return "", false, nil
+}
+
+func indexProviderPathVariants(index map[string][]string, key, name string) {
+	addProviderPathIndex(index, key, name)
+	if rootless := providerPathWithoutFirstComponent(key); rootless != "" {
+		addProviderPathIndex(index, rootless, name)
+	}
+}
+
+func addProviderPathIndex(index map[string][]string, key, name string) {
+	for _, existing := range index[key] {
+		if existing == name {
+			return
+		}
+	}
+	index[key] = append(index[key], name)
+}
+
+func providerPathWithoutFirstComponent(value string) string {
+	_, remainder, found := strings.Cut(value, "/")
+	if !found || remainder == "" {
+		return ""
+	}
+	return remainder
+}
+
 func providerPathIdentity(value string) string {
 	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))
 	if value == "" {
 		return ""
 	}
 	return strings.ToLower(path.Clean(value))
-}
-
-func providerPathRelaxedIdentities(value string) []string {
-	full := providerPathIdentity(value)
-	if full == "" {
-		return nil
-	}
-	identities := []string{full}
-	parts := strings.Split(full, "/")
-	if len(parts) > 1 {
-		withoutReleaseRoot := strings.Join(parts[1:], "/")
-		if withoutReleaseRoot != full {
-			identities = append(identities, withoutReleaseRoot)
-		}
-	}
-	return identities
-}
-
-func matchRelaxedProviderPath(
-	providerPath string,
-	canonical *File,
-	index map[string][]string,
-	remoteFiles map[string]debridTypes.File,
-) (string, bool, error) {
-	for _, identity := range providerPathRelaxedIdentities(providerPath) {
-		matches := index[identity]
-		compatible := make([]string, 0, len(matches))
-		seen := make(map[string]struct{}, len(matches))
-		for _, name := range matches {
-			if _, exists := seen[name]; exists || !torrentFileSizesCompatible(canonical, remoteFiles[name]) {
-				continue
-			}
-			seen[name] = struct{}{}
-			compatible = append(compatible, name)
-		}
-		if len(compatible) > 1 {
-			return "", false, fmt.Errorf("provider path %q is ambiguous after release-root normalization", providerPath)
-		}
-		if len(compatible) == 1 {
-			return compatible[0], true, nil
-		}
-	}
-	return "", false, nil
 }
 
 func providerFileMatchesRemotePath(providerFile *ProviderFile, remoteFile debridTypes.File) bool {

@@ -530,6 +530,15 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		for oldName, file := range placement.Files {
 			newName := oldName
 			if renamed := renames[oldName]; renamed != "" {
+				// Provider IDs are provider-local, and a shared old map key is
+				// not enough to prove that a fallback link is the same media.
+				// Carry a non-refreshed placement across a canonical rename only
+				// when its provider-relative path establishes that association.
+				// Otherwise omit it until that placement is refreshed and can be
+				// reconciled independently.
+				if providerName != remote.Debrid && !providerFileMatchesRemotePath(file, remoteFiles[renamed]) {
+					continue
+				}
 				newName = renamed
 			}
 			if _, exists := files[newName]; exists {
@@ -622,6 +631,17 @@ func providerPathIdentity(value string) string {
 		return ""
 	}
 	return strings.ToLower(path.Clean(value))
+}
+
+func providerFileMatchesRemotePath(providerFile *ProviderFile, remoteFile debridTypes.File) bool {
+	if providerFile == nil {
+		return false
+	}
+	key := providerPathIdentity(providerFile.Path)
+	if key == "" {
+		return false
+	}
+	return key == providerPathIdentity(remoteFile.Path) || key == providerPathIdentity(remoteFile.LocalPath())
 }
 
 // ActivatePlacement switches the active debrid

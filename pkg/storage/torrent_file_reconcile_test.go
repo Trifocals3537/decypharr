@@ -93,6 +93,51 @@ func TestAddTorrentProviderReconcilesByPathWithoutProviderID(t *testing.T) {
 	}
 }
 
+func TestAddTorrentProviderDoesNotTransferUnrelatedFallbackLinkAcrossRename(t *testing.T) {
+	const oldName = "Episode.mkv"
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "primary-1", Path: "Season 01/Episode.mkv", Link: "primary://one"},
+		{Id: "primary-2", Path: "Season 02/Episode.mkv", Link: "primary://two"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var primaryName string
+	for name, file := range remoteFiles {
+		if file.Id == "primary-1" {
+			primaryName = name
+		}
+	}
+	entry := &Entry{
+		Files: map[string]*File{
+			oldName: {Name: oldName, Path: "Season 01/Episode.mkv"},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {
+				Provider: "primary",
+				Files: map[string]*ProviderFile{
+					oldName: {Id: "primary-1", Path: "Season 01/Episode.mkv", Link: "primary://one"},
+				},
+			},
+			"fallback": {
+				Provider: "fallback",
+				Files: map[string]*ProviderFile{
+					oldName: {Id: "fallback-local-id", Path: "Different Release/Episode.mkv", Link: "fallback://wrong"},
+				},
+			},
+		},
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles}); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Files[primaryName] == nil || entry.Files[oldName] != nil {
+		t.Fatalf("primary canonical rename failed: %#v", entry.Files)
+	}
+	if fallback := entry.Providers["fallback"].Files; len(fallback) != 0 {
+		t.Fatalf("unrelated fallback mapping survived canonical rename: %#v", fallback)
+	}
+}
+
 func TestAddTorrentProviderRejectsCanonicalRenameCollision(t *testing.T) {
 	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
 		Id:   "stable",

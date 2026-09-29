@@ -9,11 +9,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 )
 
 func TestMonitorCancellationReleasesConcurrentCallers(t *testing.T) {
+	// CleanupQueueCtx reads the process configuration before issuing its first
+	// request. Initialize that unrelated dependency outside the timed assertion
+	// so a cold configuration load cannot masquerade as a monitor deadlock.
+	previousConfigPath := config.GetMainPath()
+	if err := config.SetConfigPath(t.TempDir()); err != nil {
+		t.Fatalf("set temporary configuration path: %v", err)
+	}
+	config.Reset()
+	t.Cleanup(func() {
+		config.Reset()
+		if err := config.SetConfigPath(previousConfigPath); err != nil {
+			t.Errorf("restore configuration path: %v", err)
+		}
+	})
+	_ = config.Get()
+
 	requestStarted := make(chan struct{})
 	var startedOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

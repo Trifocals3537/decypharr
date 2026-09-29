@@ -864,7 +864,6 @@ func (c *Config) Save() error {
 		return err
 	}
 	if err := persistConfig(c.JsonFile(), data); err != nil {
-		fmt.Printf("Failed to write config file: %v\n", err)
 		return err
 	}
 	return nil

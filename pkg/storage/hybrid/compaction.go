@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 const (
@@ -51,6 +53,9 @@ func pathsForCompaction(path string) (compactionPaths, error) {
 	if base == "." || base == string(filepath.Separator) || base == "" {
 		return compactionPaths{}, fmt.Errorf("append log path must name a file: %s", path)
 	}
+	if err := safepath.ValidateIdentifier(base); err != nil {
+		return compactionPaths{}, fmt.Errorf("invalid append log file name: %w", err)
+	}
 	parent, err := resolveCompactionParent(filepath.Dir(absolute))
 	if err != nil {
 		return compactionPaths{}, fmt.Errorf("resolve append log directory links: %w", err)
@@ -78,18 +83,12 @@ type artifactState struct {
 }
 
 func inspectCompactionArtifact(path string) (artifactState, error) {
-	info, err := os.Lstat(path)
+	info, err := safepath.StatRegularFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return artifactState{}, nil
 	}
 	if err != nil {
 		return artifactState{}, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return artifactState{}, fmt.Errorf("compaction artifact must not be a symlink: %s", path)
-	}
-	if !info.Mode().IsRegular() {
-		return artifactState{}, fmt.Errorf("compaction artifact is not a regular file: %s", path)
 	}
 	return artifactState{exists: true, info: info}, nil
 }
@@ -153,13 +152,13 @@ func recoverCompactionState(paths compactionPaths) error {
 		}
 		changed := false
 		if compact.exists {
-			if err := os.Remove(paths.compact); err != nil {
+			if err := safepath.RemoveRegularFile(paths.compact); err != nil {
 				return fmt.Errorf("remove stale compact log: %w", err)
 			}
 			changed = true
 		}
 		if backup.exists {
-			if err := os.Remove(paths.backup); err != nil {
+			if err := safepath.RemoveRegularFile(paths.backup); err != nil {
 				return fmt.Errorf("remove stale backup log: %w", err)
 			}
 			changed = true
@@ -174,14 +173,14 @@ func recoverCompactionState(paths compactionPaths) error {
 
 	if compact.exists {
 		if compactErr := validateCompactionLog(paths.compact); compactErr == nil {
-			if err := os.Rename(paths.compact, paths.canonical); err != nil {
+			if err := safepath.RenameRegularFile(paths.compact, paths.canonical); err != nil {
 				return fmt.Errorf("promote recovered compact log: %w", err)
 			}
 			if err := syncParentDirectory(paths.parent); err != nil {
 				return fmt.Errorf("sync recovered compact log: %w", err)
 			}
 			if backup.exists {
-				if err := os.Remove(paths.backup); err != nil {
+				if err := safepath.RemoveRegularFile(paths.backup); err != nil {
 					return fmt.Errorf("remove recovered backup log: %w", err)
 				}
 				if err := syncParentDirectory(paths.parent); err != nil {
@@ -198,14 +197,14 @@ func recoverCompactionState(paths compactionPaths) error {
 		if err := validateCompactionLog(paths.backup); err != nil {
 			return fmt.Errorf("backup append log is invalid: %w", err)
 		}
-		if err := os.Rename(paths.backup, paths.canonical); err != nil {
+		if err := safepath.RenameRegularFile(paths.backup, paths.canonical); err != nil {
 			return fmt.Errorf("restore recovered backup log: %w", err)
 		}
 		if err := syncParentDirectory(paths.parent); err != nil {
 			return fmt.Errorf("sync restored backup log: %w", err)
 		}
 		if compact.exists {
-			if err := os.Remove(paths.compact); err != nil {
+			if err := safepath.RemoveRegularFile(paths.compact); err != nil {
 				return fmt.Errorf("remove invalid compact log after backup restore: %w", err)
 			}
 			if err := syncParentDirectory(paths.parent); err != nil {
@@ -223,7 +222,7 @@ func restoreBackupAroundInvalidCanonical(paths compactionPaths, canonicalErr err
 	// validated backup is canonical and its rename is synced. A crash between
 	// either rename is therefore resolved by the ordinary no-canonical recovery
 	// matrix on the next startup.
-	if err := os.Rename(paths.canonical, paths.compact); err != nil {
+	if err := safepath.RenameRegularFile(paths.canonical, paths.compact); err != nil {
 		return errors.Join(
 			fmt.Errorf("canonical append log is invalid: %w", canonicalErr),
 			fmt.Errorf("preserve invalid canonical log for backup restore: %w", err),
@@ -232,13 +231,13 @@ func restoreBackupAroundInvalidCanonical(paths compactionPaths, canonicalErr err
 	if err := syncParentDirectory(paths.parent); err != nil {
 		return fmt.Errorf("sync preserved invalid canonical log: %w", err)
 	}
-	if err := os.Rename(paths.backup, paths.canonical); err != nil {
+	if err := safepath.RenameRegularFile(paths.backup, paths.canonical); err != nil {
 		return fmt.Errorf("restore validated backup around invalid canonical: %w", err)
 	}
 	if err := syncParentDirectory(paths.parent); err != nil {
 		return fmt.Errorf("sync validated backup restoration: %w", err)
 	}
-	if err := os.Remove(paths.compact); err != nil {
+	if err := safepath.RemoveRegularFile(paths.compact); err != nil {
 		return fmt.Errorf("remove preserved invalid canonical after backup restore: %w", err)
 	}
 	if err := syncParentDirectory(paths.parent); err != nil {
@@ -262,12 +261,9 @@ func ensureCanonicalLogIdentity(log *appendLog, canonicalPath string) error {
 	if err != nil {
 		return fmt.Errorf("inspect open canonical log: %w", err)
 	}
-	pathInfo, err := os.Lstat(canonicalPath)
+	pathInfo, err := safepath.StatRegularFile(canonicalPath)
 	if err != nil {
 		return fmt.Errorf("inspect canonical log path: %w", err)
-	}
-	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
-		return fmt.Errorf("canonical log path is not a regular non-symlink file: %s", canonicalPath)
 	}
 	if !os.SameFile(openedInfo, pathInfo) {
 		return fmt.Errorf("canonical log path changed while the store was open: %s", canonicalPath)
@@ -280,7 +276,7 @@ func cleanupUncommittedCompact(log *appendLog, paths compactionPaths) error {
 	if log != nil {
 		closeErr = log.Close()
 	}
-	removeErr := os.Remove(paths.compact)
+	removeErr := safepath.RemoveRegularFile(paths.compact)
 	if errors.Is(removeErr, os.ErrNotExist) {
 		removeErr = nil
 	}

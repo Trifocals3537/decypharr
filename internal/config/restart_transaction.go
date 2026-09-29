@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 var restartTransactionMu sync.Mutex
@@ -146,7 +148,7 @@ func digestRestartBytes(configData, authData []byte) (string, error) {
 }
 
 func loadRestartTransaction() (*restartTransaction, error) {
-	data, err := os.ReadFile(restartTransactionPath())
+	data, err := safepath.ReadRegularFile(restartTransactionPath(), 3*maxConfigurationFileBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -237,11 +239,11 @@ func MarkRestartApplying() error {
 }
 
 func verifyDesiredRestartDigest(tx *restartTransaction) error {
-	configData, err := os.ReadFile(filepath.Join(GetMainPath(), "config.json"))
+	configData, err := safepath.ReadRegularFile(filepath.Join(GetMainPath(), "config.json"), maxConfigurationFileBytes)
 	if err != nil {
 		return fmt.Errorf("read desired configuration: %w", err)
 	}
-	authData, err := os.ReadFile(filepath.Join(GetMainPath(), "auth.json"))
+	authData, err := safepath.ReadRegularFile(filepath.Join(GetMainPath(), "auth.json"), maxConfigurationFileBytes)
 	if err != nil {
 		return fmt.Errorf("read desired authentication: %w", err)
 	}
@@ -308,8 +310,8 @@ func restoreRestartTransaction(tx *restartTransaction) error {
 
 func removeRestartTransaction() error {
 	path := restartTransactionPath()
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := safepath.RemoveRegularFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	return safepath.SyncDirectory(filepath.Dir(path))
 }

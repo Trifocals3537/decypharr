@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 const (
@@ -26,13 +28,16 @@ var backupSequence atomic.Uint64
 // Before replacing an existing configuration, it stores the last known
 // on-disk version in a small, timestamped backup set.
 func persistConfig(path string, data []byte) error {
+	if len(data) > maxConfigurationFileBytes {
+		return fmt.Errorf("configuration exceeds %d-byte persistence limit", maxConfigurationFileBytes)
+	}
 	persistenceMu.Lock()
 	defer persistenceMu.Unlock()
 
-	current, err := os.ReadFile(path)
+	current, err := safepath.ReadRegularFile(path, maxConfigurationFileBytes)
 	switch {
 	case err == nil && bytes.Equal(current, data):
-		if err := os.Chmod(path, privateFileMode); err != nil {
+		if err := safepath.ChmodRegularFile(path, privateFileMode); err != nil {
 			return fmt.Errorf("secure config permissions: %w", err)
 		}
 		return nil
@@ -55,6 +60,9 @@ func persistConfig(path string, data []byte) error {
 // persistAuth applies the same crash-safe replacement as config.json. Auth
 // changes are intentionally not copied into the configuration backup set.
 func persistAuth(path string, data []byte) error {
+	if len(data) > maxConfigurationFileBytes {
+		return fmt.Errorf("authentication configuration exceeds %d-byte persistence limit", maxConfigurationFileBytes)
+	}
 	persistenceMu.Lock()
 	defer persistenceMu.Unlock()
 
@@ -64,12 +72,14 @@ func persistAuth(path string, data []byte) error {
 	return nil
 }
 
-func writeConfigBackup(configPath string, data []byte) error {
+func writeConfigBackup(configPath string, data []byte) (returnErr error) {
 	backupDir := filepath.Join(filepath.Dir(configPath), "backups")
-	if err := os.MkdirAll(backupDir, privateDirMode); err != nil {
+	backupRoot, _, err := safepath.EnsureOpenRoot(backupDir, privateDirMode)
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(backupDir, privateDirMode); err != nil {
+	defer func() { returnErr = errors.Join(returnErr, backupRoot.Close()) }()
+	if err := backupRoot.Chmod(".", privateDirMode); err != nil {
 		return err
 	}
 
@@ -78,17 +88,22 @@ func writeConfigBackup(configPath string, data []byte) error {
 		time.Now().UTC().Format("20060102T150405.000000000Z"),
 		backupSequence.Add(1),
 	)
-	if err := atomicWriteFile(filepath.Join(backupDir, name), data, privateFileMode); err != nil {
+	if err := safepath.AtomicWriteRootFile(backupRoot, name, data, privateFileMode); err != nil {
 		return err
 	}
 
-	return pruneConfigBackups(backupDir)
+	return pruneConfigBackups(backupRoot)
 }
 
-func pruneConfigBackups(backupDir string) error {
-	entries, err := os.ReadDir(backupDir)
+func pruneConfigBackups(backupRoot *os.Root) error {
+	directory, err := backupRoot.Open(".")
 	if err != nil {
 		return err
+	}
+	entries, err := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if err != nil || closeErr != nil {
+		return errors.Join(err, closeErr)
 	}
 
 	names := make([]string, 0, len(entries))
@@ -108,45 +123,16 @@ func pruneConfigBackups(backupDir string) error {
 	}
 
 	for _, name := range names[:len(names)-maxConfigBackups] {
-		if err := os.Remove(filepath.Join(backupDir, name)); err != nil {
+		if err := safepath.RemoveRootRegularFile(backupRoot, name); err != nil {
 			return err
 		}
 	}
-	return syncDirectory(backupDir)
+	return safepath.SyncRoot(backupRoot)
 }
 
-func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, privateDirMode); err != nil {
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	if _, err := safepath.EnsureRoot(filepath.Dir(path), privateDirMode); err != nil {
 		return err
 	}
-
-	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer func() {
-		_ = temp.Close()
-		if err != nil {
-			_ = os.Remove(tempPath)
-		}
-	}()
-
-	if err = temp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err = temp.Write(data); err != nil {
-		return err
-	}
-	if err = temp.Sync(); err != nil {
-		return err
-	}
-	if err = temp.Close(); err != nil {
-		return err
-	}
-	if err = replaceFile(tempPath, path); err != nil {
-		return err
-	}
-	return syncDirectory(dir)
+	return safepath.AtomicWriteFile(path, data, mode)
 }

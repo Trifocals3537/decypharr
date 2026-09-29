@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -107,6 +108,45 @@ func TestPersistAuthCreatesConfigDirectory(t *testing.T) {
 	}
 	if string(got) != string(data) {
 		t.Fatalf("auth = %s, want %s", got, data)
+	}
+}
+
+func TestPersistConfigEnforcesReadableSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	prefix := []byte(`{"padding":"`)
+	suffix := []byte(`"}`)
+	maximum := append(append(prefix, bytes.Repeat([]byte{'x'}, maxConfigurationFileBytes-len(prefix)-len(suffix))...), suffix...)
+	if err := persistConfig(path, maximum); err != nil {
+		t.Fatalf("persist maximum-sized config: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read maximum-sized config: %v", err)
+	}
+	if !bytes.Equal(got, maximum) {
+		t.Fatal("maximum-sized config did not round trip")
+	}
+
+	tooLarge := append(append([]byte(nil), maximum...), 'x')
+	if err := persistConfig(path, tooLarge); err == nil {
+		t.Fatal("oversized config was persisted")
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after rejected update: %v", err)
+	}
+	if !bytes.Equal(got, maximum) {
+		t.Fatal("rejected oversized update changed the persisted config")
+	}
+}
+
+func TestPersistAuthRejectsUnreadableSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := persistAuth(path, make([]byte, maxConfigurationFileBytes+1)); err == nil {
+		t.Fatal("oversized authentication configuration was persisted")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("oversized authentication configuration created a file: %v", err)
 	}
 }
 

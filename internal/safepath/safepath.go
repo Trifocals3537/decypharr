@@ -253,7 +253,7 @@ func openRootChildMode(parent *os.Root, name string, create bool, perm os.FileMo
 
 	for attempt := 0; attempt < 2; attempt++ {
 		before, err := parent.Lstat(name)
-		if os.IsNotExist(err) && create {
+		if isNotExistError(err) && create {
 			if err := parent.Mkdir(name, perm.Perm()); os.IsExist(err) {
 				continue
 			} else if err != nil {
@@ -262,6 +262,9 @@ func openRootChildMode(parent *os.Root, name string, create bool, perm os.FileMo
 			before, err = parent.Lstat(name)
 		}
 		if err != nil {
+			if isNotExistError(err) {
+				return nil, &os.PathError{Op: "inspect", Path: name, Err: os.ErrNotExist}
+			}
 			return nil, fmt.Errorf("inspect directory component %q: %w", name, err)
 		}
 		if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
@@ -699,7 +702,7 @@ func RejectSymlinks(path string) error {
 	for index, component := range components {
 		info, err := rooted.Lstat(component)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if isNotExistError(err) {
 				return nil
 			}
 			return fmt.Errorf("inspect path component %q: %w", component, err)

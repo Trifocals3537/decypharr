@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // scanMetadataDirectory walks a directory with bounded memory. os.ReadDir
@@ -22,7 +24,12 @@ func scanMetadataDirectory(
 		return fmt.Errorf("metadata directory callback is nil")
 	}
 
-	directory, err := os.Open(path)
+	rooted, _, err := safepath.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer rooted.Close()
+	directory, err := rooted.Open(".")
 	if err != nil {
 		return err
 	}

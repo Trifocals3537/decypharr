@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // Log format:
@@ -102,14 +104,14 @@ func openExistingAppendLog(path string) (*appendLog, error) {
 // follow or replace an existing path. In particular, a stale .compact symlink
 // cannot redirect compaction writes into an unrelated file.
 func createAppendLogExclusive(path string) (*appendLog, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
+	file, _, err := safepath.OpenRegularFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		return nil, err
 	}
 	info, statErr := file.Stat()
 	if statErr != nil || !info.Mode().IsRegular() {
 		closeErr := file.Close()
-		removeErr := os.Remove(path)
+		removeErr := safepath.RemoveRegularFile(path)
 		return nil, errors.Join(
 			statErr,
 			closeErr,
@@ -121,53 +123,11 @@ func createAppendLogExclusive(path string) (*appendLog, error) {
 }
 
 func openAppendLogFile(path string, create bool) (*os.File, bool, error) {
-	for attempts := 0; attempts < 2; attempts++ {
-		info, err := os.Lstat(path)
-		switch {
-		case err == nil:
-			if info.Mode()&os.ModeSymlink != 0 {
-				return nil, false, fmt.Errorf("append log path must not be a symlink: %s", path)
-			}
-			if !info.Mode().IsRegular() {
-				return nil, false, fmt.Errorf("append log path is not a regular file: %s", path)
-			}
-
-			file, openErr := os.OpenFile(path, os.O_RDWR, 0)
-			if openErr != nil {
-				return nil, false, openErr
-			}
-			openedInfo, statErr := file.Stat()
-			currentInfo, lstatErr := os.Lstat(path)
-			if statErr != nil || lstatErr != nil ||
-				currentInfo.Mode()&os.ModeSymlink != 0 ||
-				!openedInfo.Mode().IsRegular() ||
-				!os.SameFile(openedInfo, currentInfo) {
-				closeErr := file.Close()
-				return nil, false, errors.Join(
-					statErr,
-					lstatErr,
-					closeErr,
-					fmt.Errorf("append log path changed while opening: %s", path),
-				)
-			}
-			return file, false, nil
-		case !errors.Is(err, os.ErrNotExist):
-			return nil, false, err
-		case !create:
-			return nil, false, err
-		}
-
-		file, createErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
-		if createErr == nil {
-			return file, true, nil
-		}
-		if !errors.Is(createErr, os.ErrExist) {
-			return nil, false, createErr
-		}
-		// A concurrent creator won the race. Inspect the resulting path once,
-		// including the no-symlink and file-identity checks above.
+	flag := os.O_RDWR
+	if create {
+		flag |= os.O_CREATE
 	}
-	return nil, false, fmt.Errorf("append log path changed repeatedly while opening: %s", path)
+	return safepath.OpenRegularFile(path, flag, 0644)
 }
 
 func initializeAppendLog(file *os.File, path string, created bool) (*appendLog, error) {
@@ -187,7 +147,7 @@ func initializeAppendLog(file *os.File, path string, created bool) (*appendLog, 
 		if err := log.writeHeader(); err != nil {
 			closeErr := file.Close()
 			if created {
-				return nil, errors.Join(err, closeErr, os.Remove(path))
+				return nil, errors.Join(err, closeErr, safepath.RemoveRegularFile(path))
 			}
 			return nil, errors.Join(err, closeErr)
 		}

@@ -350,6 +350,31 @@ func TestAddTorrentProviderReconcilesUniqueLogicalKeyAcrossReleaseRoots(t *testi
 	}
 }
 
+func TestAddTorrentProviderRejectsAmbiguousDuplicatePathAcrossReleaseRoots(t *testing.T) {
+	entry := &Entry{
+		Files: map[string]*File{
+			"Old Release/Season 01/Episode.mkv": {
+				Name: "Old Release/Season 01/Episode.mkv", Path: "Old Release/Season 01/Episode.mkv", Size: 123,
+			},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Old Release/Season 01/Episode.mkv": {Path: "Old Release/Season 01/Episode.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "one", Path: "Season 01/Episode.mkv", Size: 123},
+		{Id: "two", Path: "Alternate/Season 01/Episode.mkv", Size: 123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles}); err == nil {
+		t.Fatal("ambiguous root-independent provider paths were accepted")
+	}
+}
+
 func TestAddTorrentProviderRejectsLogicalKeyMatchWithContradictorySize(t *testing.T) {
 	entry := &Entry{
 		Files: map[string]*File{"Episode.mkv": {Name: "Episode.mkv", Path: "Season 01/Episode.mkv", Size: 123}},

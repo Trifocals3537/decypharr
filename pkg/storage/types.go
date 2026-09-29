@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/Trifocals3537/tessarr/pkg/arr"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -664,7 +665,12 @@ func torrentArtifactsMayExist(entry *Entry) bool {
 		// An invalid legacy output identity is never safe to rename implicitly.
 		return true
 	}
-	if _, err := os.Lstat(candidate); err == nil || !os.IsNotExist(err) {
+	rooted, _, err := safepath.OpenRoot(entry.SavePath)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	defer rooted.Close()
+	if _, err := rooted.Lstat(relative); err == nil || !os.IsNotExist(err) {
 		return true
 	}
 	return false

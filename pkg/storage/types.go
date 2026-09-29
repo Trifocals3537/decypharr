@@ -441,7 +441,7 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 
 	idIndex := make(map[string][]string, len(remoteFiles))
 	nativePathIndex := make(map[string][]string, len(remoteFiles))
-	outputAliasIndex := make(map[string][]string, len(remoteFiles))
+	outputPathIndex := make(map[string][]string, len(remoteFiles))
 	for name, file := range remoteFiles {
 		if file.Id != "" {
 			idIndex[file.Id] = append(idIndex[file.Id], name)
@@ -449,8 +449,8 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		if key := providerPathIdentity(file.Path); key != "" {
 			nativePathIndex[key] = append(nativePathIndex[key], name)
 		}
-		if key := providerPathIdentity(file.LocalPath()); key != "" && key != providerPathIdentity(file.Path) {
-			outputAliasIndex[key] = append(outputAliasIndex[key], name)
+		if key := providerPathIdentity(file.LocalPath()); key != "" {
+			outputPathIndex[key] = append(outputPathIndex[key], name)
 		}
 	}
 
@@ -482,7 +482,7 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 				e.Files[oldName],
 				idIndex,
 				nativePathIndex,
-				outputAliasIndex,
+				outputPathIndex,
 				remoteFiles,
 			)
 			if err != nil {
@@ -511,7 +511,7 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 				oldFile.Path,
 				e.Files[oldName],
 				nativePathIndex,
-				outputAliasIndex,
+				outputPathIndex,
 				remoteFiles,
 			)
 			if err != nil {
@@ -532,11 +532,10 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		if file == nil || canonicalToRemote[oldName] != "" {
 			continue
 		}
-		match, matched, err := matchProviderFilePath(
+		match, matched, err := matchProviderOutputPath(
 			file.Path,
 			file,
-			nativePathIndex,
-			outputAliasIndex,
+			outputPathIndex,
 			remoteFiles,
 		)
 		if err != nil {
@@ -728,7 +727,7 @@ func boundedTorrentTransferSize(size int64, byteRange *[2]int64) int64 {
 func matchRefreshedProviderFileName(
 	oldFile *ProviderFile,
 	canonicalFile *File,
-	idIndex, nativePathIndex, outputAliasIndex map[string][]string,
+	idIndex, nativePathIndex, outputPathIndex map[string][]string,
 	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
 	if oldFile.Id != "" {
@@ -750,7 +749,7 @@ func matchRefreshedProviderFileName(
 			oldFile.Path,
 			canonicalFile,
 			nativePathIndex,
-			outputAliasIndex,
+			outputPathIndex,
 			remoteFiles,
 		)
 		if err != nil {
@@ -766,7 +765,7 @@ func matchRefreshedProviderFileName(
 func matchProviderFilePath(
 	value string,
 	canonicalFile *File,
-	nativePathIndex, outputAliasIndex map[string][]string,
+	nativePathIndex, outputPathIndex map[string][]string,
 	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
 	key := providerPathIdentity(value)
@@ -781,10 +780,8 @@ func matchProviderFilePath(
 	// Portable output aliases are weaker evidence than a provider's native
 	// path. A literal native name can equal another file's sanitized alias, so
 	// consult aliases only after proving no native path claims this identity.
-	if matches := outputAliasIndex[key]; len(matches) > 1 {
-		return "", false, fmt.Errorf("provider output alias %q is ambiguous", value)
-	} else if len(matches) == 1 {
-		return matches[0], true, nil
+	if name, matched, err := matchProviderOutputPath(value, canonicalFile, outputPathIndex, remoteFiles); err != nil || matched {
+		return name, matched, err
 	}
 
 	var sizeMatches []string
@@ -810,6 +807,30 @@ func matchProviderFilePath(
 		return "", false, fmt.Errorf("provider path %q conflicts with refreshed file sizes", value)
 	}
 	return "", false, nil
+}
+
+func matchProviderOutputPath(
+	value string,
+	canonicalFile *File,
+	outputPathIndex map[string][]string,
+	remoteFiles map[string]debridTypes.File,
+) (string, bool, error) {
+	key := providerPathIdentity(value)
+	if key == "" {
+		return "", false, nil
+	}
+	matches := outputPathIndex[key]
+	if len(matches) > 1 {
+		return "", false, fmt.Errorf("provider output path %q is ambiguous", value)
+	}
+	if len(matches) == 0 {
+		return "", false, nil
+	}
+	name := matches[0]
+	if !torrentFileSizesCompatible(canonicalFile, remoteFiles[name]) {
+		return "", false, fmt.Errorf("provider output path %q conflicts with refreshed file sizes", value)
+	}
+	return name, true, nil
 }
 
 func providerPathsDifferOnlyByLeadingRoot(left, right string) bool {

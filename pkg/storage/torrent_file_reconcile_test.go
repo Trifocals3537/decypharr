@@ -729,6 +729,46 @@ func TestAddTorrentProviderPrefersExactNativePathOverOutputAlias(t *testing.T) {
 	}
 }
 
+func TestAddTorrentProviderKeepsLegacyOutputPathSeparateFromNativePath(t *testing.T) {
+	unsafeOnly, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unsafe", Path: "Why?.mkv", Size: 11,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generatedLiteral string
+	for _, file := range unsafeOnly {
+		generatedLiteral = file.LocalPath()
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "unsafe", Path: "Why?.mkv", Size: 11, Link: "provider://unsafe"},
+		{Id: "literal", Path: generatedLiteral, Size: 12, Link: "provider://literal"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	const canonicalName = "legacy-output.mkv"
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			canonicalName: {Name: canonicalName, Path: generatedLiteral, Size: 11},
+		},
+		Providers: make(map[string]*ProviderEntry),
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatalf("legacy output path did not reconcile through the output index: %v", err)
+	}
+	if got := placement.Files[canonicalName]; got == nil || got.Id != "unsafe" {
+		t.Fatalf("legacy output path matched a provider-native collision: %#v", placement.Files)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 2 {
+		t.Fatalf("provider files were lost after legacy output reconciliation: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
 func TestUpdateTorrentProviderPreservesCanonicalDeletionState(t *testing.T) {
 	entry := &Entry{
 		InfoHash: "same-hash",

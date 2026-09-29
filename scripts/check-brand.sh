@@ -67,6 +67,43 @@ while IFS= read -r path; do
     fi
 done < <(git ls-files | grep -i 'decypharr' || true)
 
+for workflow in .github/workflows/beta-docker.yml .github/workflows/release.yml; do
+    for expected in \
+        'org.opencontainers.image.title=Tessarr' \
+        'org.opencontainers.image.description=Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs' \
+        'org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
+        'org.opencontainers.image.url=https://github.com/${{ github.repository }}' \
+        'org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md' \
+        'org.opencontainers.image.authors=Tessarr contributors' \
+        'org.opencontainers.image.licenses=MIT'; do
+        if ! grep -Fq "$expected" "$workflow"; then
+            printf 'missing Tessarr image metadata in %s: %s\n' "$workflow" "$expected" >&2
+            failed=1
+        fi
+    done
+done
+
+if grep -Eq '^ENV[[:space:]]+[^#]*(AUTH|PASSWORD|SECRET|TOKEN)' Dockerfile; then
+    printf 'Dockerfile contains an ENV name that Docker will classify as a secret\n' >&2
+    failed=1
+fi
+if ! grep -Fxq '# check=error=true' Dockerfile; then
+    printf 'Dockerfile must fail the build when Docker reports a validation warning\n' >&2
+    failed=1
+fi
+for expected in \
+    'HEALTHCHECK --interval=10s --timeout=35s --start-period=120s --retries=10 CMD ["/container-defaults.sh", "/usr/bin/healthcheck", "--config", "/app"]' \
+    'ENTRYPOINT ["/container-defaults.sh", "/entrypoint.sh"]'; do
+    if ! grep -Fq "$expected" Dockerfile; then
+        printf 'Docker process is missing shared secure defaults: %s\n' "$expected" >&2
+        failed=1
+    fi
+done
+if ! grep -Fxq 'TESSARR_ENABLE_WEBDAV_AUTH=${TESSARR_ENABLE_WEBDAV_AUTH:-true}' scripts/container-defaults.sh; then
+    printf 'container defaults must protect unset and empty WebDAV authentication values\n' >&2
+    failed=1
+fi
+
 if (( failed )); then
     exit 1
 fi

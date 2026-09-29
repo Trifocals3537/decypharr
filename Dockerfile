@@ -1,3 +1,5 @@
+# check=error=true
+
 # xx provides cross-compilation toolchains for CGO builds
 FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
 
@@ -49,8 +51,10 @@ ARG CHANNEL=dev
 
 LABEL version="${VERSION}-${CHANNEL}"
 LABEL org.opencontainers.image.source="https://github.com/Trifocals3537/tessarr"
-LABEL org.opencontainers.image.title="tessarr"
+LABEL org.opencontainers.image.title="Tessarr"
+LABEL org.opencontainers.image.description="Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs"
 LABEL org.opencontainers.image.authors="Tessarr contributors"
+LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/tessarr/blob/beta/README.md"
 
 # Install dependencies including rclone (from binary)
@@ -72,20 +76,20 @@ RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata &&
 # Copy binaries and entrypoint
 COPY --from=builder /tessarr /usr/bin/tessarr
 COPY --from=builder /healthcheck /usr/bin/healthcheck
+COPY scripts/container-defaults.sh /container-defaults.sh
 COPY scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /container-defaults.sh /entrypoint.sh
 
 # Set environment variables
 ENV PUID=1000
 ENV PGID=1000
 ENV LOG_PATH=/app/logs
 ENV TESSARR_BIND_ADDRESS=0.0.0.0
-ENV TESSARR_ENABLE_WEBDAV_AUTH=true
 
 EXPOSE 8282
 VOLUME ["/app"]
 
-HEALTHCHECK --interval=10s --timeout=35s --start-period=120s --retries=10 CMD ["/usr/bin/healthcheck", "--config", "/app"]
+HEALTHCHECK --interval=10s --timeout=35s --start-period=120s --retries=10 CMD ["/container-defaults.sh", "/usr/bin/healthcheck", "--config", "/app"]
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/container-defaults.sh", "/entrypoint.sh"]
 CMD ["/usr/bin/tessarr", "--config", "/app"]

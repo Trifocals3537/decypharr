@@ -35,7 +35,7 @@ func TestMapStoredRARFilesUsesValidatedArchiveMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, exists := files["Video?.mkv"]
+	file, exists := files["Video_.mkv"]
 	if !exists || file.Size != 4 || !file.IsRar || file.ByteRange == nil ||
 		*file.ByteRange != [2]int64{10, 13} || file.Link != "https://restricted.example/archive" ||
 		!file.Generated.Equal(generated) {
@@ -132,11 +132,16 @@ func TestMapStoredRARFilesUsesDeepestUniquePathSuffix(t *testing.T) {
 	if len(files) != len(wants) {
 		t.Fatalf("mapped files = %#v, want %d", files, len(wants))
 	}
-	for name, wantRange := range wants {
-		file, exists := files[name]
-		if !exists || file.ByteRange == nil || *file.ByteRange != wantRange || file.Name != name {
-			t.Fatalf("mapped file %q = %#v, exists=%v", name, file, exists)
+	for name, file := range files {
+		wantRange, exists := wants[file.Path]
+		if !exists || strings.ContainsAny(name, `/\`) || file.ByteRange == nil ||
+			*file.ByteRange != wantRange || file.Name != name {
+			t.Fatalf("mapped file %q = %#v, pathExists=%v", name, file, exists)
 		}
+		delete(wants, file.Path)
+	}
+	if len(wants) != 0 {
+		t.Fatalf("missing mapped provider paths: %#v", wants)
 	}
 }
 

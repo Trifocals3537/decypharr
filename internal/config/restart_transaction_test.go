@@ -192,3 +192,37 @@ func TestRestartTransactionUsesPrivatePermissions(t *testing.T) {
 		t.Fatalf("restart transaction permissions = %o", got)
 	}
 }
+
+func TestStrmUpdateMaterializesSecretBeforeRestartTransaction(t *testing.T) {
+	useRuntimeConfig(t)
+	result, err := Update(func(draft *Config) error {
+		draft.Strm = Strm{
+			Enabled: true,
+			Path:    filepath.Join(t.TempDir(), "strm"),
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired {
+		t.Fatal("enabling STRM did not require restart")
+	}
+	if len(result.Desired.Strm.Secret) != 64 {
+		t.Fatalf("desired STRM secret length = %d, want 64", len(result.Desired.Strm.Secret))
+	}
+	data, err := os.ReadFile(filepath.Join(GetMainPath(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Config
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Strm.Secret != result.Desired.Strm.Secret {
+		t.Fatal("persisted STRM secret differs from restart transaction")
+	}
+	if err := MarkRestartApplying(); err != nil {
+		t.Fatalf("MarkRestartApplying() rejected generated STRM secret: %v", err)
+	}
+}

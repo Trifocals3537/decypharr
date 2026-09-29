@@ -70,6 +70,28 @@ func TestMigrateDryRunMakesNoChanges(t *testing.T) {
 	}
 }
 
+func TestVerifyTreeIgnoresDirectoryAllocationSize(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "nested", "episode.mkv"), []byte("media"), 0o600)
+	expected, err := scanTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedDirectory := false
+	for index := range expected {
+		if expected[index].Mode.IsDir() {
+			expected[index].Size += 4096
+			changedDirectory = true
+		}
+	}
+	if !changedDirectory {
+		t.Fatal("test tree did not contain a directory manifest entry")
+	}
+	if err := verifyTree(root, expected); err != nil {
+		t.Fatalf("verifyTree() rejected equivalent directory contents: %v", err)
+	}
+}
+
 func TestMigrateRebasesOnlyContainedConfigurationPaths(t *testing.T) {
 	t.Parallel()
 

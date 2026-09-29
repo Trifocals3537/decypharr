@@ -76,10 +76,15 @@ func TestFilesForTransferPreservesNestedDuplicateBasenames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"Season 01/Episode.mkv", "Season 02/Episode.mkv"} {
-		if file, exists := files[name]; !exists || file.Name != name || file.Path != name {
-			t.Fatalf("file %q = %#v, exists=%v", name, file, exists)
+	wantPaths := map[string]bool{"Season 01/Episode.mkv": true, "Season 02/Episode.mkv": true}
+	for name, file := range files {
+		if file.Name != name || strings.ContainsAny(name, `/\`) || !wantPaths[file.Path] {
+			t.Fatalf("logical file %q = %#v", name, file)
 		}
+		delete(wantPaths, file.Path)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("missing provider paths: %#v", wantPaths)
 	}
 }
 

@@ -131,6 +131,12 @@ func Update(edit func(*Config) error) (UpdateResult, error) {
 	if err := draft.setDefaultsForPath(GetMainPath(), false); err != nil {
 		return UpdateResult{}, err
 	}
+	// Save materializes generated defaults. Do that before cloning the desired
+	// snapshot or hashing a restart transaction so the persisted document and
+	// the transaction always describe the same STRM signing identity.
+	if err := draft.setStrmDefaults(true); err != nil {
+		return UpdateResult{}, err
+	}
 	published, err := Clone(draft)
 	if err != nil {
 		return UpdateResult{}, err

@@ -366,8 +366,12 @@ func verifyTree(root string, expected []manifestEntry) error {
 	for index := range expected {
 		want := expected[index]
 		got := actual[index]
-		if want.TargetPath != got.TargetPath || want.Mode.Type() != got.Mode.Type() ||
-			want.Mode.Perm() != got.Mode.Perm() || want.Size != got.Size || want.Digest != got.Digest {
+		metadataMismatch := want.TargetPath != got.TargetPath ||
+			want.Mode.Type() != got.Mode.Type() ||
+			want.Mode.Perm() != got.Mode.Perm()
+		contentMismatch := want.Mode.IsRegular() &&
+			(want.Size != got.Size || want.Digest != got.Digest)
+		if metadataMismatch || contentMismatch {
 			return fmt.Errorf("staged entry %q does not match source", want.TargetPath)
 		}
 	}

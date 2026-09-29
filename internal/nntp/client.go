@@ -213,7 +213,9 @@ func normalizeTimeouts(in TimeoutConfig) TimeoutConfig {
 
 // NewClient creates a new connection manager
 func NewClient(cfg *config.Config) (*Client, error) {
-	providers := cfg.Usenet.Providers
+	// Provider ordering and backbone normalization are client-local runtime
+	// concerns. Never mutate the slice owned by the immutable active config.
+	providers := append([]config.UsenetProvider(nil), cfg.Usenet.Providers...)
 	if len(providers) == 0 {
 		return nil, errors.New("no NNTP providers configured")
 	}

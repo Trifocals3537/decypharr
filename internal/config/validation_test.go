@@ -69,6 +69,58 @@ func TestLoadForValidationRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestLoadForValidationRejectsMalformedExistingAuth(t *testing.T) {
+	for _, contents := range []string{`{"username":`, `[]`} {
+		t.Run(contents, func(t *testing.T) {
+			configDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(configDir, "auth.json"), []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadForValidation(configDir); err == nil {
+				t.Fatal("LoadForValidation() accepted malformed auth.json")
+			}
+		})
+	}
+}
+
+func TestLoadForValidationReadsExistingAuthWithoutChangingIt(t *testing.T) {
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"use_auth":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authData := []byte(`{"username":"operator","password":"hash","session_secret":"secret"}`)
+	authPath := filepath.Join(configDir, "auth.json")
+	if err := os.WriteFile(authPath, authData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadForValidation(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth == nil || cfg.Auth.Username != "operator" || cfg.Auth.SessionSecret != "secret" {
+		t.Fatalf("validated auth = %#v", cfg.Auth)
+	}
+	after, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, authData) {
+		t.Fatal("validation changed auth.json")
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(authPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Fatalf("validation changed auth.json mode to %o", info.Mode().Perm())
+		}
+	}
+}
+
 func TestLoadForValidationRequiresExistingConfig(t *testing.T) {
 	configDir := t.TempDir()
 

@@ -777,13 +777,6 @@ func matchProviderFilePath(
 	} else if len(matches) == 1 {
 		return matches[0], true, nil
 	}
-	// Portable output aliases are weaker evidence than a provider's native
-	// path. A literal native name can equal another file's sanitized alias, so
-	// consult aliases only after proving no native path claims this identity.
-	if name, matched, err := matchProviderOutputPath(value, canonicalFile, outputPathIndex, remoteFiles); err != nil || matched {
-		return name, matched, err
-	}
-
 	var sizeMatches []string
 	hadSizeConflict := false
 	for name, remoteFile := range remoteFiles {
@@ -805,6 +798,13 @@ func matchProviderFilePath(
 	}
 	if hadSizeConflict {
 		return "", false, fmt.Errorf("provider path %q conflicts with refreshed file sizes", value)
+	}
+	// Portable output paths are weaker evidence than all forms of a provider's
+	// native path. A source-native path can equal an unrelated file's sanitized
+	// output while the intended file differs only by a release-root prefix, so
+	// consult output paths only after native exact and rooted matches are absent.
+	if name, matched, err := matchProviderOutputPath(value, canonicalFile, outputPathIndex, remoteFiles); err != nil || matched {
+		return name, matched, err
 	}
 	return "", false, nil
 }

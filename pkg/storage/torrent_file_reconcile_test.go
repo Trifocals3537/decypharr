@@ -769,6 +769,54 @@ func TestAddTorrentProviderKeepsLegacyOutputPathSeparateFromNativePath(t *testin
 	}
 }
 
+func TestAddTorrentProviderPrefersRootedNativePathOverOutputAlias(t *testing.T) {
+	const sourcePath = "Season 01/Episode_.mkv"
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "alias", Path: "Season 01/Episode?.mkv", Size: 11, Link: "provider://alias"},
+		{Id: "rooted", Path: "Release/Season 01/Episode_.mkv", Size: 12, Link: "provider://rooted"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aliasOutput string
+	for name, file := range remoteFiles {
+		if file.Id == "alias" {
+			// Model an output path persisted under the earlier portable naming
+			// rules, before duplicate-basename disambiguation was introduced.
+			file.OutputPath = sourcePath
+			remoteFiles[name] = file
+			aliasOutput = file.LocalPath()
+		}
+	}
+	if aliasOutput != sourcePath {
+		t.Fatalf("test fixture did not create the required output alias: got %q", aliasOutput)
+	}
+	completed := time.Now()
+	const canonicalName = "existing-rooted.mkv"
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			canonicalName: {Name: canonicalName, Path: sourcePath, Size: 12},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				canonicalName: {Id: "primary-rooted", Path: sourcePath},
+			}},
+		},
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatalf("rooted native path did not take precedence over output alias: %v", err)
+	}
+	if got := placement.Files[canonicalName]; got == nil || got.Id != "rooted" {
+		t.Fatalf("canonical file matched the output alias instead of rooted native path: %#v", placement.Files)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 2 {
+		t.Fatalf("provider files were lost after rooted native reconciliation: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
 func TestUpdateTorrentProviderPreservesCanonicalDeletionState(t *testing.T) {
 	entry := &Entry{
 		InfoHash: "same-hash",

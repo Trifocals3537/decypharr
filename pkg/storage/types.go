@@ -522,22 +522,6 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		}
 	}
 
-	// Providers commonly disagree about a release-root prefix. After stable ID
-	// and full-path matching, an exact logical key is a safe final cross-provider
-	// identity only when known transfer sizes do not contradict one another.
-	for oldName, canonicalFile := range e.Files {
-		if canonicalFile == nil || canonicalToRemote[oldName] != "" || remoteToCanonical[oldName] != "" {
-			continue
-		}
-		remoteFile, exists := remoteFiles[oldName]
-		if !exists || !torrentFileSizesCompatible(canonicalFile, remoteFile) {
-			continue
-		}
-		if err := addMatch(oldName, oldName); err != nil {
-			return nil, err
-		}
-	}
-
 	// Provider-only legacy rows may not have retained placement paths. Their
 	// canonical local path is still a safe final fallback when it identifies
 	// exactly one refreshed file.

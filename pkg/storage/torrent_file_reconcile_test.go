@@ -425,7 +425,7 @@ func TestAddTorrentProviderReconcilesNewPlacementThroughExistingPaths(t *testing
 	}
 }
 
-func TestAddTorrentProviderReconcilesUniqueLogicalKeyAcrossReleaseRoots(t *testing.T) {
+func TestAddTorrentProviderRejectsUnprovenLogicalKeyAcrossReleaseRoots(t *testing.T) {
 	entry := &Entry{
 		InfoHash: "hash",
 		Files: map[string]*File{
@@ -446,12 +446,33 @@ func TestAddTorrentProviderReconcilesUniqueLogicalKeyAcrossReleaseRoots(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles}); err == nil {
+		t.Fatal("unproven basename-only logical key was accepted across a release-root change")
+	}
+}
+
+func TestAddTorrentProviderDoesNotBypassPathProofWithLogicalKey(t *testing.T) {
+	completed := time.Now()
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			"Episode.mkv": {Name: "Episode.mkv", Path: "Old Show/Season 01/Episode.mkv", Size: 123},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Episode.mkv": {Path: "Old Show/Season 01/Episode.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unrelated", Path: "Another Show/Season 02/Episode.mkv", Size: 123,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entry.Files) != 1 || entry.Files["Movie.mkv"] == nil || placement.Files["Movie.mkv"] == nil {
-		t.Fatalf("release-root difference duplicated canonical files: files=%#v placement=%#v", entry.Files, placement.Files)
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles}); err == nil {
+		t.Fatal("logical-key fallback bypassed provider-path identity proof")
 	}
 }
 

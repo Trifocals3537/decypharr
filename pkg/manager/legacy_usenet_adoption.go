@@ -226,14 +226,14 @@ func (a *legacyUsenetAdopter) adoptEntry(rooted *os.Root, absoluteRoot string, e
 			return true, fmt.Errorf("legacy NZB release is owned by %q, not %q", markerOwner, ownerID)
 		}
 		for _, markerName := range usenetOwnerMarkerNames {
-			markerInfo, statErr := entryRoot.Lstat(markerName)
+			_, statErr := entryRoot.Lstat(markerName)
 			if os.IsNotExist(statErr) {
 				continue
 			}
 			if statErr != nil {
 				return true, fmt.Errorf("inspect existing NZB owner marker: %w", statErr)
 			}
-			if err := requireSingleLegacyLink(entryRoot, markerName, markerInfo); err != nil {
+			if err := requireSingleLegacyNamedRegularLink(entryRoot, markerName); err != nil {
 				return true, fmt.Errorf("verify existing NZB owner marker: %w", err)
 			}
 		}
@@ -293,12 +293,7 @@ func (a *legacyUsenetAdopter) adoptEntry(rooted *os.Root, absoluteRoot string, e
 		}
 		return true, fmt.Errorf("adopted NZB owner marker changed to %q", markerOwner)
 	}
-	markerInfo, err := entryRoot.Lstat(usenetOwnerMarkerName)
-	if err != nil {
-		removeCreatedMarker()
-		return true, fmt.Errorf("inspect adopted NZB owner marker: %w", err)
-	}
-	if err := requireSingleLegacyLink(entryRoot, usenetOwnerMarkerName, markerInfo); err != nil {
+	if err := requireSingleLegacyNamedRegularLink(entryRoot, usenetOwnerMarkerName); err != nil {
 		removeCreatedMarker()
 		return true, fmt.Errorf("verify adopted NZB owner marker: %w", err)
 	}
@@ -413,12 +408,12 @@ func legacyUsenetCheckpointNamedExists(rooted *os.Root, name string) (bool, erro
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return false, fmt.Errorf("legacy adoption checkpoint is not a regular file")
 	}
-	file, stableInfo, err := openStableLegacyRegularFile(rooted, name)
+	file, _, err := openStableLegacyRegularFile(rooted, name)
 	if err != nil {
 		return false, fmt.Errorf("open legacy adoption checkpoint: %w", err)
 	}
 	defer file.Close()
-	if err := requireSingleLegacyLink(rooted, name, stableInfo); err != nil {
+	if err := requireSingleLegacyLink(file); err != nil {
 		return false, fmt.Errorf("verify legacy adoption checkpoint: %w", err)
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, int64(len(usenetLegacyAdoptionCheckpointData)+1)))
@@ -728,7 +723,7 @@ func validateLegacyArtifact(rooted *os.Root, name string, artifact legacyArtifac
 			return fmt.Errorf("inspect downloaded legacy artifact %q: %w", name, err)
 		}
 		defer file.Close()
-		if err := requireSingleLegacyLink(rooted, name, info); err != nil {
+		if err := requireSingleLegacyLink(file); err != nil {
 			return fmt.Errorf("inspect downloaded legacy artifact %q: %w", name, err)
 		}
 		if info.Size() > artifact.size {
@@ -738,12 +733,12 @@ func validateLegacyArtifact(rooted *os.Root, name string, artifact legacyArtifac
 			return fmt.Errorf("completed downloaded legacy artifact %q has size %d, expected %d", name, info.Size(), artifact.size)
 		}
 	case legacyArtifactStrm:
-		file, info, err := openStableLegacyRegularFile(rooted, name)
+		file, _, err := openStableLegacyRegularFile(rooted, name)
 		if err != nil {
 			return fmt.Errorf("inspect STRM legacy artifact %q: %w", name, err)
 		}
 		defer file.Close()
-		if err := requireSingleLegacyLink(rooted, name, info); err != nil {
+		if err := requireSingleLegacyLink(file); err != nil {
 			return fmt.Errorf("inspect STRM legacy artifact %q: %w", name, err)
 		}
 		contents, err := io.ReadAll(io.LimitReader(file, int64(len(artifact.contents)+1)))
@@ -761,7 +756,7 @@ func validateLegacyArtifact(rooted *os.Root, name string, artifact legacyArtifac
 		if before.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("legacy artifact %q is not a symlink", name)
 		}
-		if err := requireSingleLegacyLink(rooted, name, before); err != nil {
+		if err := requireSingleLegacySymlinkLink(rooted, name, before); err != nil {
 			return fmt.Errorf("inspect symlink legacy artifact %q: %w", name, err)
 		}
 		target, err := rooted.Readlink(name)
@@ -851,8 +846,27 @@ func openStableLegacyDirectory(rooted *os.Root, name string, before os.FileInfo)
 	return directory, nil
 }
 
-func requireSingleLegacyLink(rooted *os.Root, name string, info os.FileInfo) error {
-	links, err := legacyUsenetLinkCount(rooted, name, info)
+func requireSingleLegacyLink(file *os.File) error {
+	links, err := legacyUsenetLinkCount(file)
+	if err != nil {
+		return err
+	}
+	if links != 1 {
+		return fmt.Errorf("artifact has %d hard links", links)
+	}
+	return nil
+}
+
+func requireSingleLegacyNamedRegularLink(rooted *os.Root, name string) error {
+	file, _, err := openStableLegacyRegularFile(rooted, name)
+	if err != nil {
+		return err
+	}
+	return errors.Join(requireSingleLegacyLink(file), file.Close())
+}
+
+func requireSingleLegacySymlinkLink(rooted *os.Root, name string, info os.FileInfo) error {
+	links, err := legacyUsenetSymlinkLinkCount(rooted, name, info)
 	if err != nil {
 		return err
 	}

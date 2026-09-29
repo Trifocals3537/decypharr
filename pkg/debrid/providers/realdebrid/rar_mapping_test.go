@@ -35,11 +35,20 @@ func TestMapStoredRARFilesUsesValidatedArchiveMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, exists := files["Video_.mkv"]
-	if !exists || file.Size != 4 || !file.IsRar || file.ByteRange == nil ||
+	if len(files) != 1 {
+		t.Fatalf("mapped files = %#v, want one", files)
+	}
+	var name string
+	var file types.File
+	for name, file = range files {
+	}
+	if strings.ContainsAny(name, `/\?*`) || !strings.HasSuffix(name, ".mkv") ||
+		file.Name != name || file.Path != "Release/Video?.mkv" ||
+		!strings.HasSuffix(file.OutputPath, "/"+name) ||
+		file.Size != 4 || !file.IsRar || file.ByteRange == nil ||
 		*file.ByteRange != [2]int64{10, 13} || file.Link != "https://restricted.example/archive" ||
 		!file.Generated.Equal(generated) {
-		t.Fatalf("mapped file = %#v, exists=%v", file, exists)
+		t.Fatalf("mapped file %q = %#v", name, file)
 	}
 	if selected[0].Size != 999 || selected[0].ByteRange != nil || selected[0].IsRar {
 		t.Fatalf("input selection was mutated: %#v", selected[0])

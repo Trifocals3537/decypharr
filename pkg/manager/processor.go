@@ -705,7 +705,7 @@ func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridType
 	for _, file := range debridTorrent.Files {
 		tFile := &storage.File{
 			Name:      file.Name,
-			Path:      file.Path,
+			Path:      file.LocalPath(),
 			Size:      file.Size,
 			ByteRange: file.ByteRange,
 			Deleted:   file.Deleted,

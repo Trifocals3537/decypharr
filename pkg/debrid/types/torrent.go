@@ -103,6 +103,7 @@ type File struct {
 	TorrentId    string       `json:"torrent_id"`
 	Id           string       `json:"id"`
 	Name         string       `json:"name"`
+	OutputPath   string       `json:"output_path,omitempty"`
 	Size         int64        `json:"size"`
 	IsRar        bool         `json:"is_rar"`
 	ByteRange    *[2]int64    `json:"byte_range,omitempty"`
@@ -112,6 +113,16 @@ type File struct {
 	Generated    time.Time    `json:"generated"`
 	Deleted      bool         `json:"deleted"`
 	DownloadLink DownloadLink `json:"-"`
+}
+
+// LocalPath returns the validated path Tessarr should expose in its managed
+// output tree. Provider paths remain untouched for link resolution. Legacy
+// records created before OutputPath was introduced retain their old layout.
+func (f File) LocalPath() string {
+	if f.OutputPath != "" {
+		return f.OutputPath
+	}
+	return f.Path
 }
 
 func (t *Torrent) Cleanup(remove bool) {

@@ -46,49 +46,48 @@ func TestTorrentFileLayoutsPreserveUnambiguousNestedDuplicateBasenames(t *testin
 
 func TestApplyDebridTorrentPreservesCollisionSafeLogicalNamesAndPaths(t *testing.T) {
 	entry := &storage.Entry{
+		Protocol:  config.ProtocolTorrent,
 		InfoHash:  "torbox-logical-paths",
 		Files:     make(map[string]*storage.File),
 		Providers: make(map[string]*storage.ProviderEntry),
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "11", Path: "Release/Season 01/Episode.mkv", Link: "torbox://42/11"},
+		{Id: "12", Path: "Release/Season 02/Episode.mkv", Link: "torbox://42/12"},
+		{Id: "13", Path: "Release?/Extras/Why?.mkv", Link: "torbox://42/13"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	remote := &debridTypes.Torrent{
 		Id:       "42",
 		InfoHash: entry.InfoHash,
 		Name:     "Release",
 		Debrid:   "torbox",
-		Files: map[string]debridTypes.File{
-			"Release/Season 01/Episode.mkv": {
-				Id:   "11",
-				Name: "Release/Season 01/Episode.mkv",
-				Path: "Release/Season 01/Episode.mkv",
-				Link: "torbox://42/11",
-			},
-			"Release/Season 02/Episode.mkv": {
-				Id:   "12",
-				Name: "Release/Season 02/Episode.mkv",
-				Path: "Release/Season 02/Episode.mkv",
-				Link: "torbox://42/12",
-			},
-		},
+		Files:    remoteFiles,
 	}
 
 	applyDebridTorrentToEntry(entry, remote)
 
-	if len(entry.Files) != 2 {
-		t.Fatalf("managed file count = %d, want 2", len(entry.Files))
+	if len(entry.Files) != 3 {
+		t.Fatalf("managed file count = %d, want 3", len(entry.Files))
 	}
 	placement := entry.Providers["torbox"]
-	if placement == nil || len(placement.Files) != 2 {
-		t.Fatalf("provider files = %#v, want 2", placement)
+	if placement == nil || len(placement.Files) != 3 {
+		t.Fatalf("provider files = %#v, want 3", placement)
 	}
 	for name, remoteFile := range remote.Files {
 		managed := entry.Files[name]
 		provider := placement.Files[name]
-		if managed == nil || managed.Path != remoteFile.Path {
+		if managed == nil || managed.Path != remoteFile.LocalPath() {
 			t.Fatalf("managed file %q = %#v", name, managed)
 		}
 		if provider == nil || provider.Path != remoteFile.Path || provider.Id != remoteFile.Id {
 			t.Fatalf("provider file %q = %#v", name, provider)
 		}
+	}
+	if _, err := torrentEntryFileLayouts(entry); err != nil {
+		t.Fatalf("portable managed layout rejected: %v", err)
 	}
 }
 

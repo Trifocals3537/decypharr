@@ -687,7 +687,7 @@ func (ct *CachedTorrent) ToManagedTorrent() *Entry {
 	for name, f := range ct.Files {
 		mt.Files[name] = &File{
 			Name:      f.Name,
-			Path:      f.Path,
+			Path:      f.LocalPath(),
 			Size:      f.Size,
 			ByteRange: f.ByteRange,
 			InfoHash:  ct.InfoHash, // Track which torrent this file came from

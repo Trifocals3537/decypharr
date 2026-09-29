@@ -499,7 +499,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, providerSnapshots ...uint
 		for _, f := range t.GetFiles() {
 			mt.Files[f.Name] = &storage.File{
 				Name:      f.Name,
-				Path:      f.Path,
+				Path:      f.LocalPath(),
 				Size:      f.Size,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,

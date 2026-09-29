@@ -90,6 +90,75 @@ func TestVerifyTreeIgnoresDirectoryAllocationSize(t *testing.T) {
 	if err := verifyTree(root, expected); err != nil {
 		t.Fatalf("verifyTree() rejected equivalent directory contents: %v", err)
 	}
+	actual, err := scanTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digestManifest(actual) != digestManifest(expected) {
+		t.Fatal("stable manifest digest changed with directory allocation size")
+	}
+	if digestManifestV2(actual) == digestManifestV2(expected) {
+		t.Fatal("legacy digest fixture did not capture the directory-size difference")
+	}
+}
+
+func TestMigrateAcceptsVersionTwoReceiptAfterDirectorySizeDrift(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	mustWriteFile(t, filepath.Join(source, "nested", "config.json"), []byte("{}"), 0o600)
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	sourceEntries, err := buildManifest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetEntries, err := scanTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySource := append([]manifestEntry(nil), sourceEntries...)
+	legacyTarget := append([]manifestEntry(nil), targetEntries...)
+	for index := range legacySource {
+		if legacySource[index].Mode.IsDir() {
+			legacySource[index].Size += 4096
+		}
+	}
+	for index := range legacyTarget {
+		if legacyTarget[index].Mode.IsDir() {
+			legacyTarget[index].Size += 8192
+		}
+	}
+	legacy := receipt{
+		SchemaVersion: legacyReceiptVersionV2,
+		SourceDigest:  digestManifestV2(legacySource),
+		TargetDigest:  digestManifestV2(legacyTarget),
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(target, receiptName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Migrate(Options{Source: source, Target: target})
+	if err != nil {
+		t.Fatalf("Migrate() rejected a valid version-two receipt: %v", err)
+	}
+	if !result.AlreadyMigrated {
+		t.Fatalf("Migrate() result = %+v, want existing migration", result)
+	}
+	if err := os.WriteFile(filepath.Join(target, "nested", "config.json"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(Options{Source: source, Target: target}); err == nil ||
+		!strings.Contains(err.Error(), "legacy receipt content verification") {
+		t.Fatalf("tampered version-two target error = %v", err)
+	}
 }
 
 func TestMigrateRebasesOnlyContainedConfigurationPaths(t *testing.T) {

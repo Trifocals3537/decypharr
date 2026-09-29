@@ -26,6 +26,9 @@ func TestFilesByLogicalNamePreservesUniqueBasenameCompatibility(t *testing.T) {
 	if file.Path != "Release/Season 01/Episode 01.mkv" {
 		t.Fatalf("provider path = %q", file.Path)
 	}
+	if file.OutputPath != "Release/Season 01/Episode 01.mkv" {
+		t.Fatalf("output path = %q", file.OutputPath)
+	}
 }
 
 func TestFilesByLogicalNamePreservesNestedDuplicateBasenames(t *testing.T) {
@@ -44,6 +47,9 @@ func TestFilesByLogicalNamePreservesNestedDuplicateBasenames(t *testing.T) {
 		if file.Name != name || strings.ContainsAny(name, `/\`) || path.Ext(name) != ".mkv" {
 			t.Fatalf("logical file %q = %#v", name, file)
 		}
+		if path.Base(file.OutputPath) != name || strings.Contains(file.OutputPath, `\`) {
+			t.Fatalf("output path for %q = %q", name, file.OutputPath)
+		}
 		if !wantPaths[file.Path] {
 			t.Fatalf("unexpected provider path %q", file.Path)
 		}
@@ -59,8 +65,12 @@ func TestFilesByLogicalNameSanitizesPortablePunctuationAndDetectsCollisions(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if file, exists := files["Why_.mkv"]; !exists || file.Name != "Why_.mkv" {
-		t.Fatalf("sanitized file = %#v, exists=%v", file, exists)
+	first := fileByProviderID(t, files, "1")
+	if strings.ContainsAny(first.Name, `/\?*`) || path.Ext(first.Name) != ".mkv" {
+		t.Fatalf("sanitized file = %#v", first)
+	}
+	if first.Path != "Release/Why?.mkv" || path.Base(first.OutputPath) != first.Name {
+		t.Fatalf("provider/output paths were not separated: %#v", first)
 	}
 	disambiguated, err := FilesByLogicalName([]File{
 		{Id: "1", Path: "Release/Why?.mkv"},
@@ -72,10 +82,58 @@ func TestFilesByLogicalNameSanitizesPortablePunctuationAndDetectsCollisions(t *t
 	if len(disambiguated) != 2 {
 		t.Fatalf("disambiguated file count = %d, want 2", len(disambiguated))
 	}
+	if paired := fileByProviderID(t, disambiguated, "1"); paired.Name != first.Name {
+		t.Fatalf("lossy logical identity changed with siblings: alone=%q paired=%q", first.Name, paired.Name)
+	}
 	for name, file := range disambiguated {
 		if name != file.Name || strings.ContainsAny(name, `/\?*`) || path.Ext(name) != ".mkv" {
 			t.Fatalf("unsafe disambiguated file %q = %#v", name, file)
 		}
+		if path.Base(file.OutputPath) != name || strings.ContainsAny(file.OutputPath, `\?*`) {
+			t.Fatalf("unsafe output path for %q = %q", name, file.OutputPath)
+		}
+	}
+}
+
+func TestFilesByLogicalNameResolvesGeneratedAndLiteralNameConflict(t *testing.T) {
+	duplicates := []File{
+		{Id: "1", Path: "Release/Season 01/Episode.mkv"},
+		{Id: "2", Path: "Release/Season 02/Episode.mkv"},
+	}
+	initial, err := FilesByLogicalName(duplicates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := fileByProviderID(t, initial, "1").Name
+	files, err := FilesByLogicalName(append(duplicates, File{
+		Id:   "3",
+		Path: "Release/Extras/" + generated,
+	}))
+	if err != nil {
+		t.Fatalf("literal generated-looking basename rejected: %v", err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("file count = %d, want 3", len(files))
+	}
+	if literal := fileByProviderID(t, files, "3"); literal.Name == generated {
+		t.Fatalf("literal conflict was not deterministically disambiguated: %#v", literal)
+	}
+}
+
+func TestFilesByLogicalNameSanitizesOutputDirectoriesOnly(t *testing.T) {
+	files, err := FilesByLogicalName([]File{{
+		Id:   "1",
+		Path: "Release?/Season: 01/Episode.mkv",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := fileByProviderID(t, files, "1")
+	if file.Path != "Release?/Season: 01/Episode.mkv" {
+		t.Fatalf("provider path changed to %q", file.Path)
+	}
+	if file.OutputPath != "Release_/Season_ 01/Episode.mkv" {
+		t.Fatalf("output path = %q", file.OutputPath)
 	}
 }
 
@@ -118,4 +176,15 @@ func TestFilesByLogicalNameRejectsUnboundedFileSets(t *testing.T) {
 	if _, err := FilesByLogicalName(make([]File, maxProviderFileRecords+1)); err == nil {
 		t.Fatal("expected oversized provider file set to be rejected")
 	}
+}
+
+func fileByProviderID(t *testing.T, files map[string]File, id string) File {
+	t.Helper()
+	for _, file := range files {
+		if file.Id == id {
+			return file
+		}
+	}
+	t.Fatalf("provider file %q not found in %#v", id, files)
+	return File{}
 }

@@ -379,7 +379,7 @@ func (f *Fixer) MoveTorrentContext(ctx context.Context, entry *storage.Entry, de
 	for _, f := range newDebridTorrent.GetFiles() {
 		if existing, exists := entry.Files[f.Name]; exists {
 			existing.Size = f.Size
-			existing.Path = f.Path
+			existing.Path = f.LocalPath()
 			existing.ByteRange = f.ByteRange
 			existing.Deleted = false
 			existing.InfoHash = entry.InfoHash
@@ -387,7 +387,7 @@ func (f *Fixer) MoveTorrentContext(ctx context.Context, entry *storage.Entry, de
 		} else {
 			entry.Files[f.Name] = &storage.File{
 				Name:      f.Name,
-				Path:      f.Path,
+				Path:      f.LocalPath(),
 				Size:      f.Size,
 				ByteRange: f.ByteRange,
 				Deleted:   false,

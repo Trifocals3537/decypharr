@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	receiptName    = ".tessarr-migration.json"
-	receiptVersion = 2
-	receiptMaxSize = 4096
+	receiptName            = ".tessarr-migration.json"
+	receiptVersion         = 3
+	legacyReceiptVersionV2 = 2
+	receiptMaxSize         = 4096
 )
 
 var exactStateNames = map[string]string{
@@ -114,7 +115,7 @@ func Migrate(options Options) (Result, error) {
 	sourceDigest := digestManifest(entries)
 
 	if _, err := os.Lstat(target); err == nil {
-		if err := verifyExistingTarget(target, sourceDigest); err != nil {
+		if err := verifyExistingTarget(target, source, entries); err != nil {
 			return result, err
 		}
 		result.AlreadyMigrated = true
@@ -440,7 +441,7 @@ func writeReceipt(stage, sourceDigest, targetDigest string) error {
 	return nil
 }
 
-func verifyExistingTarget(target, sourceDigest string) error {
+func verifyExistingTarget(target, source string, sourceEntries []manifestEntry) error {
 	info, err := os.Lstat(target)
 	if err != nil {
 		return err
@@ -456,15 +457,67 @@ func verifyExistingTarget(target, sourceDigest string) error {
 	if err := json.Unmarshal(data, &completed); err != nil {
 		return fmt.Errorf("decode migration receipt: %w", err)
 	}
-	if completed.SchemaVersion != receiptVersion || completed.SourceDigest != sourceDigest || completed.TargetDigest == "" {
+	if completed.TargetDigest == "" {
 		return fmt.Errorf("migration target belongs to different source state")
 	}
 	actual, err := scanTarget(target)
 	if err != nil {
 		return fmt.Errorf("inspect existing Tessarr state: %w", err)
 	}
-	if digestManifest(actual) != completed.TargetDigest {
-		return fmt.Errorf("existing Tessarr state failed receipt verification")
+	switch completed.SchemaVersion {
+	case receiptVersion:
+		if completed.SourceDigest != digestManifest(sourceEntries) {
+			return fmt.Errorf("migration target belongs to different source state")
+		}
+		if digestManifest(actual) != completed.TargetDigest {
+			return fmt.Errorf("existing Tessarr state failed receipt verification")
+		}
+		return nil
+	case legacyReceiptVersionV2:
+		// Version 2 included filesystem-dependent directory allocation sizes.
+		// Fast-path an exact legacy match. If allocation sizes drifted, rebuild the
+		// expected transformed tree in a temporary directory and compare stable
+		// content manifests so an old valid receipt remains usable without
+		// weakening source/target verification.
+		if completed.SourceDigest == digestManifestV2(sourceEntries) &&
+			completed.TargetDigest == digestManifestV2(actual) {
+			return nil
+		}
+		return verifyLegacyReceiptByContent(target, source, sourceEntries, actual)
+	default:
+		return fmt.Errorf("migration target uses unsupported receipt version %d", completed.SchemaVersion)
+	}
+}
+
+func verifyLegacyReceiptByContent(target, source string, sourceEntries, actual []manifestEntry) error {
+	stage, err := os.MkdirTemp(filepath.Dir(target), ".tessarr-migration-verify-")
+	if err != nil {
+		return fmt.Errorf("create legacy receipt verification directory: %w", err)
+	}
+	defer os.RemoveAll(stage)
+
+	if err := copyManifest(source, stage, sourceEntries); err != nil {
+		return fmt.Errorf("rebuild legacy migration state: %w", err)
+	}
+	if err := verifyTree(stage, sourceEntries); err != nil {
+		return fmt.Errorf("verify rebuilt legacy migration state: %w", err)
+	}
+	if err := applyStatePathRebase(stage, source, target); err != nil {
+		return fmt.Errorf("rebase rebuilt legacy migration state: %w", err)
+	}
+	expected, err := scanTarget(stage)
+	if err != nil {
+		return fmt.Errorf("inspect rebuilt legacy migration state: %w", err)
+	}
+	if digestManifest(expected) != digestManifest(actual) {
+		return fmt.Errorf("existing Tessarr state failed legacy receipt content verification")
+	}
+	currentSource, err := buildManifest(source)
+	if err != nil {
+		return fmt.Errorf("reinspect legacy migration source: %w", err)
+	}
+	if digestManifest(currentSource) != digestManifest(sourceEntries) {
+		return fmt.Errorf("source state changed during legacy receipt verification")
 	}
 	return nil
 }
@@ -603,9 +656,21 @@ func readVerifiedReceipt(target string, targetInfo os.FileInfo) ([]byte, error) 
 }
 
 func digestManifest(entries []manifestEntry) string {
+	return digestManifestWithDirectorySizes(entries, false)
+}
+
+func digestManifestV2(entries []manifestEntry) string {
+	return digestManifestWithDirectorySizes(entries, true)
+}
+
+func digestManifestWithDirectorySizes(entries []manifestEntry, includeDirectorySizes bool) string {
 	hash := sha256.New()
 	for _, entry := range entries {
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%o\x00%d\x00%s\n", entry.SourcePath, entry.TargetPath, entry.Mode, entry.Size, entry.Digest)
+		size := entry.Size
+		if entry.Mode.IsDir() && !includeDirectorySizes {
+			size = 0
+		}
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%o\x00%d\x00%s\n", entry.SourcePath, entry.TargetPath, entry.Mode, size, entry.Digest)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }

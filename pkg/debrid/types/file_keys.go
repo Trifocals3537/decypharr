@@ -13,11 +13,21 @@ import (
 
 const maxProviderFileRecords = 100_000
 
+type providerFileCandidate struct {
+	file                   File
+	baseName               string
+	baseKey                string
+	fullPath               string
+	requiresDisambiguation bool
+	logicalName            string
+}
+
 // FilesByLogicalName converts provider file records into Tessarr's
 // name-keyed representation without losing nested files that share a
-// basename. The historical basename key remains unchanged when it is
-// unambiguous. Every member of a basename collision group receives a stable,
-// collision-safe single-component name while retaining its provider path.
+// basename. The historical basename key remains unchanged when it is safe and
+// unambiguous. Unsafe or colliding basenames receive a stable,
+// collision-resistant single-component name. Provider paths remain untouched
+// for API lookups while OutputPath carries a separately validated local layout.
 func FilesByLogicalName(files []File) (map[string]File, error) {
 	if len(files) > maxProviderFileRecords {
 		return nil, fmt.Errorf(
@@ -27,14 +37,7 @@ func FilesByLogicalName(files []File) (map[string]File, error) {
 		)
 	}
 
-	type candidate struct {
-		file     File
-		baseName string
-		baseKey  string
-		fullPath string
-	}
-
-	candidates := make([]candidate, 0, len(files))
+	candidates := make([]providerFileCandidate, 0, len(files))
 	basenameCounts := make(map[string]int, len(files))
 	providerPaths := make(map[string]string, len(files))
 	for _, file := range files {
@@ -52,48 +55,103 @@ func FilesByLogicalName(files []File) (map[string]File, error) {
 		}
 		providerPaths[pathKey] = fullPath
 
-		baseName, err := portableProviderFileName(path.Base(fullPath))
+		originalBaseName := path.Base(fullPath)
+		baseName, err := portableProviderFileName(originalBaseName)
 		if err != nil {
 			return nil, fmt.Errorf("provider file %q: %w", file.Name, err)
 		}
 		baseKey, _ := safepath.PortableNameKey(baseName)
 		file.Path = fullPath
-		candidates = append(candidates, candidate{
-			file:     file,
-			baseName: baseName,
-			baseKey:  baseKey,
-			fullPath: fullPath,
+		candidates = append(candidates, providerFileCandidate{
+			file:                   file,
+			baseName:               baseName,
+			baseKey:                baseKey,
+			fullPath:               fullPath,
+			requiresDisambiguation: baseName != originalBaseName,
 		})
 		basenameCounts[baseKey]++
 	}
 
-	result := make(map[string]File, len(candidates))
-	portableNames := make(map[string]string, len(candidates))
-	for _, candidate := range candidates {
-		logicalName := candidate.baseName
-		if basenameCounts[candidate.baseKey] > 1 {
-			var err error
-			logicalName, err = disambiguateProviderFileName(candidate.baseName, candidate.fullPath)
+	for index := range candidates {
+		if basenameCounts[candidates[index].baseKey] > 1 {
+			candidates[index].requiresDisambiguation = true
+		}
+		if err := assignProviderLogicalName(&candidates[index]); err != nil {
+			return nil, err
+		}
+	}
+
+	// A generated name can be a literal basename supplied by another file.
+	// Resolve that cross-group conflict by giving the literal file its own
+	// path-derived name too. The loop is deterministic and only repeats when a
+	// previously unchanged name joins a generated collision group.
+	for pass := 0; pass <= len(candidates); pass++ {
+		groups := make(map[string][]int, len(candidates))
+		for index := range candidates {
+			key, err := safepath.PortableNameKey(candidates[index].logicalName)
 			if err != nil {
-				return nil, fmt.Errorf("provider file %q: %w", candidate.fullPath, err)
+				return nil, fmt.Errorf("provider file %q: %w", candidates[index].fullPath, err)
+			}
+			groups[key] = append(groups[key], index)
+		}
+
+		changed := false
+		collision := false
+		for _, indices := range groups {
+			if len(indices) < 2 {
+				continue
+			}
+			collision = true
+			for _, index := range indices {
+				if candidates[index].requiresDisambiguation {
+					continue
+				}
+				candidates[index].requiresDisambiguation = true
+				if err := assignProviderLogicalName(&candidates[index]); err != nil {
+					return nil, err
+				}
+				changed = true
 			}
 		}
-		logicalKey, err := safepath.PortableNameKey(logicalName)
+		if !collision {
+			break
+		}
+		if !changed {
+			return nil, fmt.Errorf("provider logical filename digest collision")
+		}
+	}
+
+	result := make(map[string]File, len(candidates))
+	portableOutputs := make(map[string]string, len(candidates))
+	for index := range candidates {
+		candidate := &candidates[index]
+		outputPath, err := portableProviderOutputPath(candidate.fullPath, candidate.logicalName)
 		if err != nil {
 			return nil, fmt.Errorf("provider file %q: %w", candidate.fullPath, err)
 		}
-		if previous, exists := portableNames[logicalKey]; exists {
-			return nil, fmt.Errorf(
-				"provider files %q and %q have the same portable logical path",
-				previous,
-				logicalName,
-			)
+		outputKey := portableProviderPathKey(outputPath)
+		if previous, exists := portableOutputs[outputKey]; exists {
+			return nil, fmt.Errorf("provider files %q and %q have the same portable output path", previous, outputPath)
 		}
-		portableNames[logicalKey] = logicalName
-		candidate.file.Name = logicalName
-		result[logicalName] = candidate.file
+		portableOutputs[outputKey] = outputPath
+		candidate.file.Name = candidate.logicalName
+		candidate.file.OutputPath = outputPath
+		result[candidate.logicalName] = candidate.file
 	}
 	return result, nil
+}
+
+func assignProviderLogicalName(candidate *providerFileCandidate) error {
+	candidate.logicalName = candidate.baseName
+	if !candidate.requiresDisambiguation {
+		return nil
+	}
+	logicalName, err := disambiguateProviderFileName(candidate.baseName, candidate.fullPath)
+	if err != nil {
+		return fmt.Errorf("provider file %q: %w", candidate.fullPath, err)
+	}
+	candidate.logicalName = logicalName
+	return nil
 }
 
 func portableProviderFileName(name string) (string, error) {
@@ -135,6 +193,20 @@ func disambiguateProviderFileName(baseName, fullPath string) (string, error) {
 	digest := sha256.Sum256([]byte(portableProviderPathKey(fullPath)))
 	name := stem + "~" + hex.EncodeToString(digest[:]) + extension
 	return safepath.CompactIdentifier(name, safepath.PortableIdentifierMaxBytes)
+}
+
+func portableProviderOutputPath(fullPath, logicalName string) (string, error) {
+	parts := strings.Split(fullPath, "/")
+	output := make([]string, 0, len(parts))
+	for _, component := range parts[:len(parts)-1] {
+		portable, err := portableProviderFileName(component)
+		if err != nil {
+			return "", fmt.Errorf("invalid output directory %q: %w", component, err)
+		}
+		output = append(output, portable)
+	}
+	output = append(output, logicalName)
+	return strings.Join(output, "/"), nil
 }
 
 func normalizeProviderFilePath(providerPath, fallbackName string) (string, error) {

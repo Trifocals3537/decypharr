@@ -430,6 +430,38 @@ func TestAddTorrentProviderRejectsAmbiguousDuplicatePathAcrossReleaseRoots(t *te
 	}
 }
 
+func TestAddTorrentProviderDoesNotMatchNestedPathsByBasenameAlone(t *testing.T) {
+	entry := &Entry{
+		InfoHash: "same-hash",
+		Files: map[string]*File{
+			"Old Release/Season 01/Episode.mkv": {
+				Name: "Old Release/Season 01/Episode.mkv", Path: "Old Release/Season 01/Episode.mkv", Size: 123,
+			},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Old Release/Season 01/Episode.mkv": {Path: "Old Release/Season 01/Episode.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unrelated", Path: "Another Show/Season 02/Episode.mkv", Size: 123,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 1 {
+		t.Fatalf("unrelated same-basename file was reconciled: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+	if placement.Files["Old Release/Season 01/Episode.mkv"] != nil {
+		t.Fatalf("fallback placement attached to unrelated canonical media: %#v", placement.Files)
+	}
+}
+
 func TestAddTorrentProviderRejectsLogicalKeyMatchWithContradictorySize(t *testing.T) {
 	entry := &Entry{
 		Files: map[string]*File{"Episode.mkv": {Name: "Episode.mkv", Path: "Season 01/Episode.mkv", Size: 123}},

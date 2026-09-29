@@ -785,11 +785,21 @@ func matchProviderFilePath(
 		if len(matches) == 0 {
 			continue
 		}
+		basenameOnly := !strings.Contains(candidateKey, "/")
+		eligibleMatches := 0
 		var sizeMatches []string
 		for _, name := range matches {
+			remoteKey := providerPathIdentity(remoteFiles[name].Path)
+			if basenameOnly && strings.Contains(key, "/") && strings.Contains(remoteKey, "/") {
+				continue
+			}
+			eligibleMatches++
 			if torrentFileSizesCompatible(canonicalFile, remoteFiles[name]) {
 				sizeMatches = append(sizeMatches, name)
 			}
+		}
+		if eligibleMatches == 0 && basenameOnly {
+			continue
 		}
 		if len(sizeMatches) > 1 {
 			return "", false, fmt.Errorf("provider path %q is ambiguous without its release root", value)

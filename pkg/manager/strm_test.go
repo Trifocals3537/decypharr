@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	strmurl "github.com/Trifocals3537/tessarr/pkg/strm"
 )
@@ -309,5 +310,99 @@ func TestStrmRemoveEntryPreservesForeignFiles(t *testing.T) {
 	}
 	if data, err := os.ReadFile(foreignPath); err != nil || string(data) != "foreign" {
 		t.Fatalf("foreign file changed: %q, %v", data, err)
+	}
+}
+
+func TestStrmRemoveNestedEntryPrunesAndRegenerates(t *testing.T) {
+	manager, cfg := newStrmSweepManager(t)
+	entry := addStrmSweepEntry(t, manager)
+	entry.Files = map[string]*storage.File{
+		"Season 01/Episode 01.mkv": {
+			Name: "Season 01/Episode 01.mkv",
+			Size: 100,
+		},
+	}
+	if err := manager.storage.AddOrUpdateDurable(entry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.strm.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(cfg.Strm.Path, entryDirectoryName(entry))
+	file := entry.Files["Season 01/Episode 01.mkv"]
+	target := filepath.Join(dir, mediaRelativePath(file.Name, file.ID, false))
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("nested STRM was not generated: %v", err)
+	}
+
+	if !manager.strm.RemoveEntryAsync(entry) {
+		t.Fatal("entry removal was not scheduled")
+	}
+	manager.background.Wait()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("empty nested entry directory was retained: %v", err)
+	}
+
+	if _, err := manager.strm.Sweep(context.Background()); err != nil {
+		t.Fatalf("regenerate removed nested entry: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("nested STRM was not regenerated: %v", err)
+	}
+}
+
+func TestStrmGeneratedComponentsStayWithinPortableLimit(t *testing.T) {
+	manager, _ := newStrmSweepManager(t)
+	entry := addStrmSweepEntry(t, manager)
+	entry.Name = strings.Repeat("Pokémon-", 50)
+
+	entryName := entryDirectoryName(entry)
+	if len(entryName) > safepath.PortableIdentifierMaxBytes {
+		t.Fatalf("entry component length = %d, want <= %d", len(entryName), safepath.PortableIdentifierMaxBytes)
+	}
+	if err := safepath.ValidateIdentifier(entryName); err != nil {
+		t.Fatalf("entry component is not portable: %v", err)
+	}
+	if entryName != entryDirectoryName(entry) {
+		t.Fatal("entry component compaction is not deterministic")
+	}
+
+	relative := mediaRelativePath(
+		strings.Repeat("Season-", 50)+"/"+strings.Repeat("Episode-", 50)+".mkv",
+		"file-identity",
+		false,
+	)
+	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
+		if len(component) > safepath.PortableIdentifierMaxBytes {
+			t.Fatalf("media component length = %d, want <= %d", len(component), safepath.PortableIdentifierMaxBytes)
+		}
+		if err := safepath.ValidateIdentifier(component); err != nil {
+			t.Fatalf("media component %q is not portable: %v", component, err)
+		}
+	}
+	if filepath.Ext(relative) != ".strm" {
+		t.Fatalf("media path extension = %q, want .strm", filepath.Ext(relative))
+	}
+
+	first, err := disambiguateStrmPath(relative, "aaaaaaaa11111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := disambiguateStrmPath(relative, "bbbbbbbb22222222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("collision disambiguation aliased %q", first)
+	}
+	for _, candidate := range []string{first, second} {
+		base := filepath.Base(candidate)
+		if len(base) > safepath.PortableIdentifierMaxBytes {
+			t.Fatalf("disambiguated component length = %d, want <= %d", len(base), safepath.PortableIdentifierMaxBytes)
+		}
+		if filepath.Ext(base) != ".strm" {
+			t.Fatalf("disambiguated extension = %q, want .strm", filepath.Ext(base))
+		}
 	}
 }

@@ -242,8 +242,15 @@ services:
 Run:
 
 ```bash
+mkdir -p configs
+docker compose run --rm tessarr /usr/bin/tessarr --config /app --set-auth admin
 docker compose up -d
 ```
+
+The one-off command prompts for the administrator password before the
+container publishes its listener. It writes the protected authentication state
+to `./configs/`; the password is not placed in Compose or an environment
+variable. The image also requires authentication on its WebDAV endpoint.
 
 Access at `http://localhost:8282`
 
@@ -287,6 +294,21 @@ unmount/remount. Restarting playback alone cannot replace the container's stale
 mount reference.
 
 ### Docker Run
+
+Initialize the administrator credentials in the persistent configuration
+directory first:
+
+```bash
+mkdir -p config
+docker run --rm -it \
+  -v ./config:/app \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  ghcr.io/trifocals3537/tessarr:beta \
+  /usr/bin/tessarr --config /app --set-auth admin
+```
+
+Then start the service:
 
 ```bash
 docker run -d \

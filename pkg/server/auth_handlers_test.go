@@ -131,6 +131,62 @@ func TestRemoteUnauthenticatedAuthUpdateIsRejected(t *testing.T) {
 	}
 }
 
+func TestAuthUpdateRejectedWhileRestartPending(t *testing.T) {
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/update-auth",
+		strings.NewReader(`{"username":"admin","password":"new-password","confirm_password":"new-password"}`),
+	)
+	response := httptest.NewRecorder()
+
+	(&Server{restartPending: true}).handleUpdateAuth(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
+	}
+	if response.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", response.Header().Get("Retry-After"))
+	}
+}
+
+func TestAuthDisableUsesPendingDesiredListener(t *testing.T) {
+	useServerTestConfig(
+		t,
+		"127.0.0.1",
+		true,
+		&config.Auth{Username: "admin", Password: "hash"},
+	)
+	if _, err := config.Update(func(draft *config.Config) error {
+		draft.BindAddress = "192.0.2.10"
+		draft.EnableWebdavAuth = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/update-auth",
+		strings.NewReader(`{"username":"","password":""}`),
+	)
+	response := httptest.NewRecorder()
+	(&Server{}).handleUpdateAuth(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	persisted, err := config.LoadForValidation(config.GetMainPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted.UseAuth {
+		t.Fatal("authentication was disabled in the pending remote configuration")
+	}
+	if persisted.BindAddress != "192.0.2.10" {
+		t.Fatalf("pending bind address = %q, want 192.0.2.10", persisted.BindAddress)
+	}
+}
+
 func TestRemoteInitialSetupCannotSkipAuthentication(t *testing.T) {
 	cfg := useServerTestConfig(t, "0.0.0.0", true, &config.Auth{})
 	request := httptest.NewRequest(http.MethodPost, "/skip-auth", nil)

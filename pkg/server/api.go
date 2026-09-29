@@ -1244,13 +1244,11 @@ func (s *Server) handleRefreshAPIToken(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
-	cfg := config.Get()
-	if !cfg.UseAuth && !isLoopbackBindAddress(cfg.BindAddress) {
-		http.Error(
-			w,
-			"Authentication must be enabled from the host with --set-auth before remote access",
-			http.StatusForbidden,
-		)
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	if s.restartPending {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "A configuration restart is already in progress", http.StatusConflict)
 		return
 	}
 
@@ -1275,20 +1273,15 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 
 	// Check if trying to disable authentication (both empty)
 	if req.Username == "" && req.Password == "" {
-		if !cfg.UseAuth {
-			http.Error(w, "Authentication is already disabled", http.StatusBadRequest)
-			return
-		}
-		if !isLoopbackBindAddress(cfg.BindAddress) {
-			http.Error(
-				w,
-				"Authentication cannot be disabled on a non-loopback listener",
-				http.StatusForbidden,
-			)
-			return
-		}
-
+		authAlreadyDisabledErr := errors.New("authentication is already disabled")
+		authRemoteDisableErr := errors.New("authentication cannot be disabled on a non-loopback listener")
 		_, err := config.Update(func(draft *config.Config) error {
+			if !draft.UseAuth {
+				return authAlreadyDisabledErr
+			}
+			if !isLoopbackBindAddress(draft.BindAddress) {
+				return authRemoteDisableErr
+			}
 			if draft.Auth == nil {
 				return errors.New("authentication is not configured")
 			}
@@ -1302,6 +1295,14 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if err != nil {
+			if errors.Is(err, authAlreadyDisabledErr) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if errors.Is(err, authRemoteDisableErr) {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
 			s.logger.Error().Err(err).Msg("Failed to save config")
 			http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
 			return
@@ -1322,10 +1323,20 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	remoteAuthBootstrapErr := errors.New(
+		"authentication must be enabled from the host with --set-auth before remote access",
+	)
 	_, err := config.Update(func(draft *config.Config) error {
+		if !draft.UseAuth && !isLoopbackBindAddress(draft.BindAddress) {
+			return remoteAuthBootstrapErr
+		}
 		return draft.ApplyAuthCredentials(req.Username, req.Password)
 	})
 	if err != nil {
+		if errors.Is(err, remoteAuthBootstrapErr) {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		s.logger.Error().Err(err).Msg("Failed to save authentication settings")
 		http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
 		return

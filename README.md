@@ -102,6 +102,20 @@ services:
       - apparmor:unconfined
 ```
 
+Initialize the administrator credentials before the first start. This keeps
+the container's published listener and WebDAV endpoint authenticated without
+placing a password in Compose or the image environment:
+
+```bash
+mkdir -p configs
+docker compose run --rm tessarr /usr/bin/tessarr --config /app --set-auth admin
+docker compose up -d
+```
+
+The command prompts for the password and stores its hash in the protected
+`./configs/auth.json` file. Do not start a remotely published fresh container
+until this initialization succeeds.
+
 If Plex, Jellyfin, Emby, or another consumer runs in a separate Linux
 container, do not use Docker's default `rprivate` bind for the Tessarr mount.
 Mount it read-only with `rslave` so a Tessarr unmount/remount propagates from

@@ -190,8 +190,13 @@ func (s *Strm) ensureEntryDir(root string, cfg *config.Config, entry *storage.En
 }
 
 func entryDirectoryName(entry *storage.Entry) string {
-	name := portableComponent(entry.GetFolder(), "entry")
-	return name + " [" + identitySlug(entry.InfoHash) + "]"
+	suffix := " [" + identitySlug(entry.InfoHash) + "]"
+	name := compactPortableComponent(
+		entry.GetFolder(),
+		"entry",
+		safepath.PortableIdentifierMaxBytes-len(suffix),
+	)
+	return name + suffix
 }
 
 func identitySlug(identity string) string {
@@ -199,7 +204,11 @@ func identitySlug(identity string) string {
 	if len(clean) >= 8 {
 		return clean[:8]
 	}
-	sum := sha256.Sum256([]byte(identity))
+	return digestSlug(identity)
+}
+
+func digestSlug(value string) string {
+	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:4])
 }
 
@@ -219,9 +228,27 @@ func portableComponent(value, fallback string) string {
 		value = fallback
 	}
 	if err := safepath.ValidateIdentifier(value); err != nil {
-		value = fallback + "-" + identitySlug(value)
+		value = fallback + "-" + digestSlug(value)
 	}
 	return value
+}
+
+func compactPortableComponent(value, fallback string, maxBytes int) string {
+	value = portableComponent(value, fallback)
+	compacted, err := safepath.CompactIdentifier(value, maxBytes)
+	if err == nil {
+		return compacted
+	}
+
+	// portableComponent already rejects unsafe values. This fallback only
+	// protects callers from an unexpected compaction failure while retaining a
+	// deterministic digest rather than silently aliasing another component.
+	fallback = fallback + "-" + digestSlug(value)
+	compacted, err = safepath.CompactIdentifier(fallback, maxBytes)
+	if err == nil {
+		return compacted
+	}
+	return "item"
 }
 
 func mediaRelativePath(name, fileID string, keepExtension bool) string {
@@ -230,11 +257,21 @@ func mediaRelativePath(name, fileID string, keepExtension bool) string {
 		parts = []string{"media"}
 	}
 	for index := range parts {
-		parts[index] = portableComponent(parts[index], "media")
+		parts[index] = compactPortableComponent(
+			parts[index],
+			"media",
+			safepath.PortableIdentifierMaxBytes,
+		)
 	}
 	parts[len(parts)-1] = strmurl.FileName(parts[len(parts)-1], keepExtension)
-	if err := safepath.ValidateIdentifier(parts[len(parts)-1]); err != nil {
+	compacted, err := safepath.CompactIdentifier(
+		parts[len(parts)-1],
+		safepath.PortableIdentifierMaxBytes,
+	)
+	if err != nil {
 		parts[len(parts)-1] = "media-" + identitySlug(fileID) + ".strm"
+	} else {
+		parts[len(parts)-1] = compacted
 	}
 	return filepath.Join(parts...)
 }
@@ -266,8 +303,10 @@ func (s *Strm) desired(root string, cfg *config.Config, entry *storage.Entry) ([
 		relative := mediaRelativePath(file.Name, file.ID, cfg.Strm.KeepMediaExtension)
 		portableKey := strings.ToLower(filepath.ToSlash(relative))
 		if _, collision := used[portableKey]; collision {
-			extension := filepath.Ext(relative)
-			relative = strings.TrimSuffix(relative, extension) + " [" + identitySlug(file.ID) + "]" + extension
+			relative, err = disambiguateStrmPath(relative, file.ID)
+			if err != nil {
+				return nil, fmt.Errorf("disambiguate colliding STRM path %q: %w", file.Name, err)
+			}
 			portableKey = strings.ToLower(filepath.ToSlash(relative))
 		}
 		if _, collision := used[portableKey]; collision {
@@ -300,6 +339,21 @@ func (s *Strm) desired(root string, cfg *config.Config, entry *storage.Entry) ([
 		})
 	}
 	return targets, nil
+}
+
+func disambiguateStrmPath(relative, fileID string) (string, error) {
+	directory := filepath.Dir(relative)
+	if directory == "." {
+		directory = ""
+	}
+	base := filepath.Base(relative)
+	extension := filepath.Ext(base)
+	base = strings.TrimSuffix(base, extension) + " [" + identitySlug(fileID) + "]" + extension
+	base, err := safepath.CompactIdentifier(base, safepath.PortableIdentifierMaxBytes)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, base), nil
 }
 
 func (s *Strm) syncEntryLocked(ctx context.Context, root string, cfg *config.Config, entry *storage.Entry, report *StrmReport) []strmTarget {
@@ -650,6 +704,7 @@ func (s *Strm) RemoveEntryAsync(entry *storage.Entry) bool {
 			}
 			return
 		}
+		removedParents := make(map[string]struct{})
 		_ = filepath.WalkDir(dir, func(path string, item fs.DirEntry, walkErr error) error {
 			if walkErr != nil || item.IsDir() || !strings.EqualFold(filepath.Ext(path), ".strm") {
 				return nil
@@ -660,10 +715,22 @@ func (s *Strm) RemoveEntryAsync(entry *storage.Entry) bool {
 			}
 			infohash, _, owned := strmurl.ParseOwnedURL(strings.TrimSpace(string(data)), cfg.Strm.Secret)
 			if owned && infohash == entry.InfoHash {
-				_ = safepath.Remove(root, path)
+				if err := safepath.Remove(root, path); err == nil {
+					removedParents[filepath.Dir(path)] = struct{}{}
+				}
 			}
 			return nil
 		})
+		parents := make([]string, 0, len(removedParents))
+		for parent := range removedParents {
+			parents = append(parents, parent)
+		}
+		sort.Slice(parents, func(i, j int) bool {
+			return len(parents[i]) > len(parents[j])
+		})
+		for _, parent := range parents {
+			pruneEmptyStrmDirs(root, parent)
+		}
 		_ = removeStrmMarkers(root, dir, strmEntryMarkerNames)
 		pruneEmptyStrmDirs(root, dir)
 	})

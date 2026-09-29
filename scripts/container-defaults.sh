@@ -2,10 +2,8 @@
 set -e
 
 # Keep security defaults identical for the main process and Docker healthcheck.
-# Test variable presence rather than truthiness so an explicit value is retained.
-if [ "${TESSARR_ENABLE_WEBDAV_AUTH+x}" != "x" ]; then
-    TESSARR_ENABLE_WEBDAV_AUTH=true
-fi
+# Empty values are not valid overrides and must retain the secure default.
+TESSARR_ENABLE_WEBDAV_AUTH=${TESSARR_ENABLE_WEBDAV_AUTH:-true}
 export TESSARR_ENABLE_WEBDAV_AUTH
 
 exec "$@"

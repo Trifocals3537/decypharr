@@ -99,6 +99,10 @@ for expected in \
         failed=1
     fi
 done
+if ! grep -Fxq 'TESSARR_ENABLE_WEBDAV_AUTH=${TESSARR_ENABLE_WEBDAV_AUTH:-true}' scripts/container-defaults.sh; then
+    printf 'container defaults must protect unset and empty WebDAV authentication values\n' >&2
+    failed=1
+fi
 
 if (( failed )); then
     exit 1

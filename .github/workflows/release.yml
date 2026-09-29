@@ -24,7 +24,7 @@ jobs:
     name: Prepare release metadata
     # The repository ID remains stable when the Tessarr repository is renamed.
     if: github.repository_id == '1173113218'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       channel: ${{ steps.metadata.outputs.channel }}
@@ -83,7 +83,7 @@ jobs:
 
   build-linux:
     name: Linux ${{ matrix.label }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: prepare
     strategy:
       fail-fast: false
@@ -108,9 +108,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.14.1
+        run: bash scripts/install-zig.sh 0.14.1
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y binutils file libfuse-dev
@@ -196,7 +194,7 @@ jobs:
 
   build-windows:
     name: Windows x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: prepare
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -309,7 +307,7 @@ jobs:
 
   docker:
     name: Publish container image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - prepare
       - build-linux
@@ -370,7 +368,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - prepare
       - build-linux

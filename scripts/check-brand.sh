@@ -67,6 +67,26 @@ while IFS= read -r path; do
     fi
 done < <(git ls-files | grep -i 'decypharr' || true)
 
+for workflow in .github/workflows/beta-docker.yml .github/workflows/release.yml; do
+    for expected in \
+        'org.opencontainers.image.title=Tessarr' \
+        'org.opencontainers.image.description=Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs'; do
+        if ! grep -Fq "$expected" "$workflow"; then
+            printf 'missing Tessarr image metadata in %s: %s\n' "$workflow" "$expected" >&2
+            failed=1
+        fi
+    done
+done
+
+if grep -Eq '^ENV[[:space:]]+[^#]*(AUTH|PASSWORD|SECRET|TOKEN)' Dockerfile; then
+    printf 'Dockerfile contains an ENV name that Docker will classify as a secret\n' >&2
+    failed=1
+fi
+if ! grep -Fxq '# check=error=true' Dockerfile; then
+    printf 'Dockerfile must fail the build when Docker reports a validation warning\n' >&2
+    failed=1
+fi
+
 if (( failed )); then
     exit 1
 fi

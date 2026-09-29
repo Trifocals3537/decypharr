@@ -1,3 +1,5 @@
+# check=error=true
+
 # xx provides cross-compilation toolchains for CGO builds
 FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
 
@@ -49,8 +51,10 @@ ARG CHANNEL=dev
 
 LABEL version="${VERSION}-${CHANNEL}"
 LABEL org.opencontainers.image.source="https://github.com/Trifocals3537/tessarr"
-LABEL org.opencontainers.image.title="tessarr"
+LABEL org.opencontainers.image.title="Tessarr"
+LABEL org.opencontainers.image.description="Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs"
 LABEL org.opencontainers.image.authors="Tessarr contributors"
+LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.documentation="https://github.com/Trifocals3537/tessarr/blob/beta/README.md"
 
 # Install dependencies including rclone (from binary)
@@ -80,7 +84,6 @@ ENV PUID=1000
 ENV PGID=1000
 ENV LOG_PATH=/app/logs
 ENV TESSARR_BIND_ADDRESS=0.0.0.0
-ENV TESSARR_ENABLE_WEBDAV_AUTH=true
 
 EXPOSE 8282
 VOLUME ["/app"]

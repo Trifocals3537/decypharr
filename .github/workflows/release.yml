@@ -343,6 +343,14 @@ jobs:
             type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=${{ needs.prepare.outputs.channel }},enable=${{ needs.prepare.outputs.channel != 'stable' }}
             type=raw,value=latest,enable=${{ needs.prepare.outputs.channel == 'stable' }}
+          labels: |
+            org.opencontainers.image.title=Tessarr
+            org.opencontainers.image.description=Self-hosted debrid and Usenet media bridge with qBittorrent and SABnzbd-compatible APIs
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md
+            org.opencontainers.image.authors=Tessarr contributors
+            org.opencontainers.image.licenses=MIT
 
       - name: Build and push multi-platform image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7

@@ -815,7 +815,7 @@ func matchProviderFilePath(
 		var sizeMatches []string
 		for _, name := range matches {
 			remoteKey := providerPathIdentity(remoteFiles[name].Path)
-			if basenameOnly && strings.Contains(key, "/") && strings.Contains(remoteKey, "/") {
+			if basenameOnly && (strings.Contains(key, "/") || strings.Contains(remoteKey, "/")) {
 				continue
 			}
 			eligibleMatches++

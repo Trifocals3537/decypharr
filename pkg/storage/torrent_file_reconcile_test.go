@@ -555,6 +555,40 @@ func TestAddTorrentProviderDoesNotMatchNestedPathsByBasenameAlone(t *testing.T) 
 	}
 }
 
+func TestAddTorrentProviderDoesNotMatchNestedPathToFlatByBasenameAlone(t *testing.T) {
+	completed := time.Now()
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			"Old Release/Season 01/Episode.mkv": {
+				Name: "Old Release/Season 01/Episode.mkv", Path: "Old Release/Season 01/Episode.mkv", Size: 123,
+			},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Old Release/Season 01/Episode.mkv": {Path: "Old Release/Season 01/Episode.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unrelated-flat", Path: "Episode.mkv", Size: 123,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 1 {
+		t.Fatalf("flat same-basename file was reconciled to a nested canonical path: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+	if placement.Files["Old Release/Season 01/Episode.mkv"] != nil {
+		t.Fatalf("flat fallback attached to unrelated nested canonical media: %#v", placement.Files)
+	}
+}
+
 func TestUpdateTorrentProviderPreservesCanonicalDeletionState(t *testing.T) {
 	entry := &Entry{
 		InfoHash: "same-hash",

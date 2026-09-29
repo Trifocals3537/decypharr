@@ -22,7 +22,9 @@ func TestMonitorCancellationReleasesConcurrentCallers(t *testing.T) {
 	if err := config.SetConfigPath(t.TempDir()); err != nil {
 		t.Fatalf("set temporary configuration path: %v", err)
 	}
+	config.Reset()
 	t.Cleanup(func() {
+		config.Reset()
 		if err := config.SetConfigPath(previousConfigPath); err != nil {
 			t.Errorf("restore configuration path: %v", err)
 		}

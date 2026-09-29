@@ -685,6 +685,50 @@ func TestAddTorrentProviderLetsUniqueIDOverrideOutputAliasAmbiguity(t *testing.T
 	}
 }
 
+func TestAddTorrentProviderPrefersExactNativePathOverOutputAlias(t *testing.T) {
+	unsafeOnly, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unsafe", Path: "Why?.mkv", Size: 11,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generatedLiteral string
+	for _, file := range unsafeOnly {
+		generatedLiteral = file.LocalPath()
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "unsafe", Path: "Why?.mkv", Size: 11, Link: "provider://unsafe"},
+		{Id: "literal", Path: generatedLiteral, Size: 12, Link: "provider://literal"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	const canonicalName = "existing-literal.mkv"
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			canonicalName: {Name: canonicalName, Path: generatedLiteral, Size: 12},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				canonicalName: {Id: "primary-literal", Path: generatedLiteral},
+			}},
+		},
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatalf("exact native path was blocked by an output alias: %v", err)
+	}
+	if got := placement.Files[canonicalName]; got == nil || got.Id != "literal" {
+		t.Fatalf("canonical file matched the wrong provider identity: %#v", placement.Files)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 2 {
+		t.Fatalf("provider files were lost after native-path reconciliation: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
 func TestUpdateTorrentProviderPreservesCanonicalDeletionState(t *testing.T) {
 	entry := &Entry{
 		InfoHash: "same-hash",

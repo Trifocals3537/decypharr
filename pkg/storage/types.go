@@ -440,16 +440,17 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 	}
 
 	idIndex := make(map[string][]string, len(remoteFiles))
-	pathIndex := make(map[string][]string, len(remoteFiles)*2)
+	nativePathIndex := make(map[string][]string, len(remoteFiles))
+	outputAliasIndex := make(map[string][]string, len(remoteFiles))
 	for name, file := range remoteFiles {
 		if file.Id != "" {
 			idIndex[file.Id] = append(idIndex[file.Id], name)
 		}
 		if key := providerPathIdentity(file.Path); key != "" {
-			pathIndex[key] = append(pathIndex[key], name)
+			nativePathIndex[key] = append(nativePathIndex[key], name)
 		}
 		if key := providerPathIdentity(file.LocalPath()); key != "" && key != providerPathIdentity(file.Path) {
-			pathIndex[key] = append(pathIndex[key], name)
+			outputAliasIndex[key] = append(outputAliasIndex[key], name)
 		}
 	}
 
@@ -480,7 +481,8 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 				oldFile,
 				e.Files[oldName],
 				idIndex,
-				pathIndex,
+				nativePathIndex,
+				outputAliasIndex,
 				remoteFiles,
 			)
 			if err != nil {
@@ -508,7 +510,8 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 			match, matched, err := matchProviderFilePath(
 				oldFile.Path,
 				e.Files[oldName],
-				pathIndex,
+				nativePathIndex,
+				outputAliasIndex,
 				remoteFiles,
 			)
 			if err != nil {
@@ -532,7 +535,8 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		match, matched, err := matchProviderFilePath(
 			file.Path,
 			file,
-			pathIndex,
+			nativePathIndex,
+			outputAliasIndex,
 			remoteFiles,
 		)
 		if err != nil {
@@ -724,7 +728,7 @@ func boundedTorrentTransferSize(size int64, byteRange *[2]int64) int64 {
 func matchRefreshedProviderFileName(
 	oldFile *ProviderFile,
 	canonicalFile *File,
-	idIndex, pathIndex map[string][]string,
+	idIndex, nativePathIndex, outputAliasIndex map[string][]string,
 	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
 	if oldFile.Id != "" {
@@ -745,7 +749,8 @@ func matchRefreshedProviderFileName(
 		pathName, matched, err := matchProviderFilePath(
 			oldFile.Path,
 			canonicalFile,
-			pathIndex,
+			nativePathIndex,
+			outputAliasIndex,
 			remoteFiles,
 		)
 		if err != nil {
@@ -761,15 +766,23 @@ func matchRefreshedProviderFileName(
 func matchProviderFilePath(
 	value string,
 	canonicalFile *File,
-	pathIndex map[string][]string,
+	nativePathIndex, outputAliasIndex map[string][]string,
 	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
 	key := providerPathIdentity(value)
 	if key == "" {
 		return "", false, nil
 	}
-	if matches := pathIndex[key]; len(matches) > 1 {
+	if matches := nativePathIndex[key]; len(matches) > 1 {
 		return "", false, fmt.Errorf("provider path %q is ambiguous", value)
+	} else if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	// Portable output aliases are weaker evidence than a provider's native
+	// path. A literal native name can equal another file's sanitized alias, so
+	// consult aliases only after proving no native path claims this identity.
+	if matches := outputAliasIndex[key]; len(matches) > 1 {
+		return "", false, fmt.Errorf("provider output alias %q is ambiguous", value)
 	} else if len(matches) == 1 {
 		return matches[0], true, nil
 	}

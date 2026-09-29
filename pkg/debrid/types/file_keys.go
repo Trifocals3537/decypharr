@@ -72,59 +72,61 @@ func FilesByLogicalName(files []File) (map[string]File, error) {
 		basenameCounts[baseKey]++
 	}
 
+	baseOwners := make(map[string][]int, len(candidates))
+	queue := make([]int, 0, len(candidates))
 	for index := range candidates {
+		baseOwners[candidates[index].baseKey] = append(baseOwners[candidates[index].baseKey], index)
 		if basenameCounts[candidates[index].baseKey] > 1 {
 			candidates[index].requiresDisambiguation = true
 		}
-		if err := assignProviderLogicalName(&candidates[index]); err != nil {
-			return nil, err
+		if candidates[index].requiresDisambiguation {
+			if err := assignProviderLogicalName(&candidates[index]); err != nil {
+				return nil, err
+			}
+			queue = append(queue, index)
 		}
 	}
 
-	// A generated name can be a literal basename supplied by another file.
-	// Resolve that cross-group conflict by giving the literal file its own
-	// path-derived name too. The loop is deterministic and only repeats when a
-	// previously unchanged name joins a generated collision group.
-	for pass := 0; pass <= len(candidates); pass++ {
-		groups := make(map[string][]int, len(candidates))
-		for index := range candidates {
-			key, err := safepath.PortableNameKey(candidates[index].logicalName)
-			if err != nil {
-				return nil, fmt.Errorf("provider file %q: %w", candidates[index].fullPath, err)
-			}
-			groups[key] = append(groups[key], index)
+	// Generated names take precedence over a provider-supplied literal that
+	// happens to look generated. Promote that literal into the generated
+	// namespace too. Each candidate is queued at most once, so even a malicious
+	// chain of generated-looking basenames is resolved in linear time.
+	for head := 0; head < len(queue); head++ {
+		generated := &candidates[queue[head]]
+		key, err := safepath.PortableNameKey(generated.logicalName)
+		if err != nil {
+			return nil, fmt.Errorf("provider file %q: %w", generated.fullPath, err)
 		}
-
-		changed := false
-		collision := false
-		for _, indices := range groups {
-			if len(indices) < 2 {
+		for _, owner := range baseOwners[key] {
+			if candidates[owner].requiresDisambiguation {
 				continue
 			}
-			collision = true
-			for _, index := range indices {
-				if candidates[index].requiresDisambiguation {
-					continue
-				}
-				candidates[index].requiresDisambiguation = true
-				if err := assignProviderLogicalName(&candidates[index]); err != nil {
-					return nil, err
-				}
-				changed = true
+			candidates[owner].requiresDisambiguation = true
+			if err := assignProviderLogicalName(&candidates[owner]); err != nil {
+				return nil, err
 			}
+			queue = append(queue, owner)
 		}
-		if !collision {
-			break
-		}
-		if !changed {
-			return nil, fmt.Errorf("provider logical filename digest collision")
+	}
+	for index := range candidates {
+		if candidates[index].logicalName == "" {
+			candidates[index].logicalName = candidates[index].baseName
 		}
 	}
 
 	result := make(map[string]File, len(candidates))
+	portableNames := make(map[string]string, len(candidates))
 	portableOutputs := make(map[string]string, len(candidates))
 	for index := range candidates {
 		candidate := &candidates[index]
+		logicalKey, err := safepath.PortableNameKey(candidate.logicalName)
+		if err != nil {
+			return nil, fmt.Errorf("provider file %q: %w", candidate.fullPath, err)
+		}
+		if previous, exists := portableNames[logicalKey]; exists {
+			return nil, fmt.Errorf("provider files %q and %q have the same generated logical name", previous, candidate.logicalName)
+		}
+		portableNames[logicalKey] = candidate.logicalName
 		outputPath, err := portableProviderOutputPath(candidate.fullPath, candidate.logicalName)
 		if err != nil {
 			return nil, fmt.Errorf("provider file %q: %w", candidate.fullPath, err)

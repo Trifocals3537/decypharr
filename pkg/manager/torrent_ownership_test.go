@@ -67,7 +67,9 @@ func TestApplyDebridTorrentPreservesCollisionSafeLogicalNamesAndPaths(t *testing
 		Files:    remoteFiles,
 	}
 
-	applyDebridTorrentToEntry(entry, remote)
+	if err := applyDebridTorrentToEntry(entry, remote); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(entry.Files) != 3 {
 		t.Fatalf("managed file count = %d, want 3", len(entry.Files))
@@ -108,7 +110,10 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 		Files:    make(map[string]debridTypes.File),
 	}
 
-	if applyCompletedTorrentFiles(entry, remote) {
+	if ready, err := applyCompletedTorrentFiles(entry, remote); err != nil || ready {
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Fatal("applyCompletedTorrentFiles() = ready before provider links exist")
 	}
 	if entry.Status != debridTypes.TorrentStatusDownloading {
@@ -122,7 +127,10 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 		Size: 1234,
 	}
 	remote.Files["Movie.mkv"] = pendingFile
-	if applyCompletedTorrentFiles(entry, remote) {
+	if ready, err := applyCompletedTorrentFiles(entry, remote); err != nil || ready {
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Fatal("applyCompletedTorrentFiles() = ready for a provider file without a link")
 	}
 	if len(entry.Files) != 0 {
@@ -131,7 +139,11 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 
 	pendingFile.Link = "https://provider.example/media"
 	remote.Files["Movie.mkv"] = pendingFile
-	if !applyCompletedTorrentFiles(entry, remote) {
+	ready, err := applyCompletedTorrentFiles(entry, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
 		t.Fatal("applyCompletedTorrentFiles() = not ready after provider link appeared")
 	}
 	managed := entry.Files["Movie.mkv"]

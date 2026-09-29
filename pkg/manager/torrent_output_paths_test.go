@@ -139,7 +139,9 @@ func TestTorrentOutputPathAdmissionKeepsDisplayTitleAndStableProviderIdentity(t 
 		t.Fatal("admission did not preserve title and assign output identity")
 	}
 	outputPath := entry.DownloadPath()
-	applyDebridTorrentState(entry, &debridTypes.Torrent{Id: "provider-id", Debrid: "torbox", Name: "Provider: Renamed", InfoHash: entry.InfoHash})
+	if err := applyDebridTorrentState(entry, &debridTypes.Torrent{Id: "provider-id", Debrid: "torbox", Name: "Provider: Renamed", InfoHash: entry.InfoHash}); err != nil {
+		t.Fatal(err)
+	}
 	if entry.Name != "Provider: Renamed" || entry.DownloadPath() != outputPath {
 		t.Fatal("provider result changed local output instead of only the display title")
 	}

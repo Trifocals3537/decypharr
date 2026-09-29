@@ -5,6 +5,7 @@ import (
 	"math"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
@@ -341,10 +342,16 @@ func (e *Entry) AddUsenetProvider(metadata *NZB) *ProviderEntry {
 	return providerEntry
 }
 
-// AddTorrentProvider adds or updates a providerEntry for a debrid
-func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *ProviderEntry {
+// AddTorrentProvider adds or updates a providerEntry for a debrid. Before a
+// refreshed placement is published, canonical file keys are reconciled by the
+// provider's stable ID or path so naming-rule upgrades cannot strand persisted
+// files behind stale placement keys.
+func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) (*ProviderEntry, error) {
 	if e.Providers == nil {
 		e.Providers = make(map[string]*ProviderEntry)
+	}
+	if err := e.reconcileTorrentFileNames(debridTorrent); err != nil {
+		return nil, err
 	}
 
 	providerEntry := &ProviderEntry{
@@ -363,7 +370,135 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *Provider
 		}
 	}
 	e.Providers[debridTorrent.Debrid] = providerEntry
-	return providerEntry
+	return providerEntry, nil
+}
+
+func (e *Entry) reconcileTorrentFileNames(remote *debridTypes.Torrent) error {
+	if remote == nil || len(e.Files) == 0 {
+		return nil
+	}
+	previous := e.Providers[remote.Debrid]
+	if previous == nil || len(previous.Files) == 0 {
+		return nil
+	}
+
+	idIndex := make(map[string][]string, len(remote.Files))
+	pathIndex := make(map[string][]string, len(remote.Files))
+	for name, file := range remote.Files {
+		if file.Id != "" {
+			idIndex[file.Id] = append(idIndex[file.Id], name)
+		}
+		if key := providerPathIdentity(file.Path); key != "" {
+			pathIndex[key] = append(pathIndex[key], name)
+		}
+	}
+
+	renames := make(map[string]string)
+	for oldName, oldFile := range previous.Files {
+		if oldFile == nil || e.Files[oldName] == nil {
+			continue
+		}
+		newName, matched, err := matchRefreshedProviderFileName(oldFile, idIndex, pathIndex)
+		if err != nil {
+			return fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+		}
+		if matched && newName != oldName {
+			renames[oldName] = newName
+		}
+	}
+	if len(renames) == 0 {
+		return nil
+	}
+
+	canonical := make(map[string]*File, len(e.Files))
+	for oldName, file := range e.Files {
+		newName := oldName
+		if renamed := renames[oldName]; renamed != "" {
+			newName = renamed
+		}
+		if _, exists := canonical[newName]; exists {
+			return fmt.Errorf("canonical file rename %q to %q collides with an existing file", oldName, newName)
+		}
+		canonical[newName] = file
+	}
+
+	providerMaps := make(map[string]map[string]*ProviderFile, len(e.Providers))
+	for providerName, placement := range e.Providers {
+		if placement == nil {
+			continue
+		}
+		files := make(map[string]*ProviderFile, len(placement.Files))
+		for oldName, file := range placement.Files {
+			newName := oldName
+			if renamed := renames[oldName]; renamed != "" {
+				newName = renamed
+			}
+			if _, exists := files[newName]; exists {
+				return fmt.Errorf("provider %q file rename %q to %q collides with an existing file", providerName, oldName, newName)
+			}
+			files[newName] = file
+		}
+		providerMaps[providerName] = files
+	}
+
+	for _, newName := range renames {
+		file := canonical[newName]
+		file.Name = newName
+		if remoteFile, exists := remote.Files[newName]; exists {
+			file.Path = remoteFile.LocalPath()
+			file.Size = remoteFile.Size
+			file.ByteRange = remoteFile.ByteRange
+			file.Deleted = remoteFile.Deleted
+		}
+	}
+	e.Files = canonical
+	for providerName, files := range providerMaps {
+		e.Providers[providerName].Files = files
+	}
+	return nil
+}
+
+func matchRefreshedProviderFileName(
+	oldFile *ProviderFile,
+	idIndex, pathIndex map[string][]string,
+) (string, bool, error) {
+	var idName, pathName string
+	if oldFile.Id != "" {
+		matches := idIndex[oldFile.Id]
+		if len(matches) > 1 {
+			return "", false, fmt.Errorf("provider ID %q is ambiguous", oldFile.Id)
+		}
+		if len(matches) == 1 {
+			idName = matches[0]
+		}
+	}
+	if key := providerPathIdentity(oldFile.Path); key != "" {
+		matches := pathIndex[key]
+		if len(matches) > 1 {
+			return "", false, fmt.Errorf("provider path %q is ambiguous", oldFile.Path)
+		}
+		if len(matches) == 1 {
+			pathName = matches[0]
+		}
+	}
+	if idName != "" && pathName != "" && idName != pathName {
+		return "", false, fmt.Errorf("provider ID and path identify different refreshed files")
+	}
+	if idName != "" {
+		return idName, true, nil
+	}
+	if pathName != "" {
+		return pathName, true, nil
+	}
+	return "", false, nil
+}
+
+func providerPathIdentity(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(path.Clean(value))
 }
 
 // ActivatePlacement switches the active debrid

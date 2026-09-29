@@ -371,7 +371,9 @@ func (f *Fixer) MoveTorrentContext(ctx context.Context, entry *storage.Entry, de
 	}
 
 	// Update entry with new placement
-	_ = entry.AddTorrentProvider(newDebridTorrent)
+	if _, err := entry.AddTorrentProvider(newDebridTorrent); err != nil {
+		return false, rollbackTarget(newDebridTorrent.Id, fmt.Errorf("reconcile target placement files: %w", err))
+	}
 	// Update global file metadata (revives files that previously existed)
 	if entry.Files == nil {
 		entry.Files = make(map[string]*storage.File)

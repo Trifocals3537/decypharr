@@ -510,7 +510,10 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, providerSnapshots ...uint
 	}
 
 	// AddOrUpdate or update placement
-	placement := mt.AddTorrentProvider(t)
+	placement, err := mt.AddTorrentProvider(t)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile provider file identities: %w", err)
+	}
 	placement.Progress = t.Progress
 	if t.Status == types.TorrentStatusDownloaded {
 		downloadedAt := addedOn

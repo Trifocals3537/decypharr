@@ -507,6 +507,19 @@ func TestRegularFileOperationsStayPinnedToParent(t *testing.T) {
 	if string(data) != "second" {
 		t.Fatalf("contents = %q, want second", data)
 	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("make regular file read-only: %v", err)
+	}
+	if err := ChmodRegularFile(path, 0o600); err != nil {
+		t.Fatalf("restore regular file permissions: %v", err)
+	}
+	writable, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open restored regular file for writing: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close restored regular file: %v", err)
+	}
 	if _, err := ReadRegularFile(path, 3); err == nil {
 		t.Fatal("bounded read accepted an oversized file")
 	}

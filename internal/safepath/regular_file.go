@@ -105,13 +105,32 @@ func readBoundedRegularFile(file *os.File, limit int64) ([]byte, error) {
 }
 
 // ChmodRegularFile changes permissions through an already validated file
-// handle rather than performing a second pathname traversal.
+// path and pinned parent. Root.Chmod requests Windows attribute-write access,
+// which lets Tessarr recover a configuration carrying the read-only attribute.
 func ChmodRegularFile(path string, mode os.FileMode) error {
-	file, _, err := OpenRegularFile(path, os.O_RDONLY, 0)
+	rooted, leaf, absolute, err := openRegularFileParent(path)
 	if err != nil {
 		return err
 	}
-	return errors.Join(file.Chmod(mode), file.Close())
+	defer rooted.Close()
+	before, err := rooted.Lstat(leaf)
+	if err != nil {
+		return err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return fmt.Errorf("file path is not a regular non-symlink file: %s", absolute)
+	}
+	if err := rooted.Chmod(leaf, mode); err != nil {
+		return err
+	}
+	after, err := rooted.Lstat(leaf)
+	if err != nil {
+		return err
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return fmt.Errorf("file path changed while setting permissions: %s", absolute)
+	}
+	return nil
 }
 
 // StatRegularFile returns metadata from an opened regular-file handle.

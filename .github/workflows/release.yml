@@ -22,7 +22,8 @@ env:
 jobs:
   prepare:
     name: Prepare release metadata
-    if: github.repository == 'Trifocals3537/tessarr'
+    # The repository ID remains stable when the Tessarr repository is renamed.
+    if: github.repository_id == '1173113218'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}

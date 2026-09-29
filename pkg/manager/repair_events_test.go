@@ -294,7 +294,8 @@ func waitForRepairEventProcessed(t *testing.T, r *Repair, want uint64) RepairEve
 	deadline := time.Now().Add(time.Second)
 	for {
 		status := r.eventQueueStatus()
-		if status.Processed >= want {
+		classified := status.Healthy + status.Broken + status.Incomplete
+		if status.Processed >= want && classified >= want {
 			return status
 		}
 		if time.Now().After(deadline) {

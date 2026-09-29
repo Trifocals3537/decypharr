@@ -2,6 +2,7 @@ package storage
 
 import (
 	"testing"
+	"time"
 
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 )
@@ -156,5 +157,117 @@ func TestAddTorrentProviderAppliesRenameChainsAtomically(t *testing.T) {
 	}
 	if len(entry.Files) != 2 || entry.Files["new-a.mkv"] != first || entry.Files["final-b.mkv"] != second {
 		t.Fatalf("atomic rename chain = %#v", entry.Files)
+	}
+}
+
+func TestAddTorrentProviderUpdatesPortablePathWithoutLogicalRename(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id:   "stable",
+		Path: "Release?/Episode.mkv",
+		Size: 42,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := remoteFiles["Episode.mkv"]
+	entry := &Entry{
+		InfoHash: "hash",
+		Files: map[string]*File{
+			"Episode.mkv": {Name: "Episode.mkv", Path: "Release?/Episode.mkv", Size: 1},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {
+				Provider: "primary",
+				Files: map[string]*ProviderFile{
+					"Episode.mkv": {Id: "stable", Path: "Release?/Episode.mkv"},
+				},
+			},
+		},
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles}); err != nil {
+		t.Fatal(err)
+	}
+	if got := entry.Files["Episode.mkv"]; got == nil || got.Path != remote.LocalPath() || got.Size != 42 {
+		t.Fatalf("same-key portable path was not refreshed: %#v", got)
+	}
+}
+
+func TestAddTorrentProviderPreservesMaterializedOutputIdentity(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "stable-1", Path: "Season 01/Episode.mkv", Size: 11},
+		{Id: "stable-2", Path: "Season 02/Episode.mkv", Size: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	oldNames := map[string]string{
+		"stable-1": "Season 01/Episode.mkv",
+		"stable-2": "Season 02/Episode.mkv",
+	}
+	entry := &Entry{
+		InfoHash:    "hash",
+		CompletedAt: &completed,
+		Files:       make(map[string]*File),
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*ProviderFile)},
+		},
+	}
+	for id, oldName := range oldNames {
+		entry.Files[oldName] = &File{ID: "canonical-" + id, Name: oldName, Path: oldName}
+		entry.Providers["primary"].Files[oldName] = &ProviderFile{Id: id, Path: oldName}
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, oldName := range oldNames {
+		file := entry.Files[oldName]
+		if file == nil || file.Name != oldName || file.Path != oldName || file.ID != "canonical-"+id {
+			t.Fatalf("materialized file %q moved: %#v", oldName, file)
+		}
+		if placement.Files[oldName] == nil || placement.Files[oldName].Id != id {
+			t.Fatalf("placement did not map to stable file %q: %#v", oldName, placement.Files)
+		}
+	}
+}
+
+func TestAddTorrentProviderReconcilesNewPlacementThroughExistingPaths(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "fallback-1", Path: "Season 01/Episode.mkv", Size: 11},
+		{Id: "fallback-2", Path: "Season 02/Episode.mkv", Size: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := &Entry{
+		InfoHash:    "hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			"Season 01/Episode.mkv": {ID: "one", Name: "Season 01/Episode.mkv", Path: "Season 01/Episode.mkv"},
+			"Season 02/Episode.mkv": {ID: "two", Name: "Season 02/Episode.mkv", Path: "Season 02/Episode.mkv"},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {
+				Provider: "primary",
+				Files: map[string]*ProviderFile{
+					"Season 01/Episode.mkv": {Id: "primary-1", Path: "Season 01/Episode.mkv"},
+					"Season 02/Episode.mkv": {Id: "primary-2", Path: "Season 02/Episode.mkv"},
+				},
+			},
+		},
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 2 {
+		t.Fatalf("new placement duplicated canonical files: files=%#v placement=%#v", entry.Files, placement.Files)
+	}
+	for oldName := range entry.Files {
+		if placement.Files[oldName] == nil {
+			t.Fatalf("new placement did not reuse canonical key %q: %#v", oldName, placement.Files)
+		}
 	}
 }

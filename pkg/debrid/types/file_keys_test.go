@@ -132,8 +132,30 @@ func TestFilesByLogicalNameSanitizesOutputDirectoriesOnly(t *testing.T) {
 	if file.Path != "Release?/Season: 01/Episode.mkv" {
 		t.Fatalf("provider path changed to %q", file.Path)
 	}
-	if file.OutputPath != "Release_/Season_ 01/Episode.mkv" {
+	if !strings.HasPrefix(file.OutputPath, "Release_~") ||
+		!strings.Contains(file.OutputPath, "/Season_ 01~") ||
+		!strings.HasSuffix(file.OutputPath, "/Episode.mkv") {
 		t.Fatalf("output path = %q", file.OutputPath)
+	}
+}
+
+func TestFilesByLogicalNameKeepsLossyDirectoriesDistinct(t *testing.T) {
+	files, err := FilesByLogicalName([]File{
+		{Id: "1", Path: "A?/movie.mkv"},
+		{Id: "2", Path: "A*/movie.mkv/extra.srt"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := fileByProviderID(t, files, "1")
+	second := fileByProviderID(t, files, "2")
+	firstRoot := strings.Split(first.OutputPath, "/")[0]
+	secondRoot := strings.Split(second.OutputPath, "/")[0]
+	if firstRoot == secondRoot || !strings.HasPrefix(firstRoot, "A_~") || !strings.HasPrefix(secondRoot, "A_~") {
+		t.Fatalf("lossy directory outputs were merged: first=%q second=%q", first.OutputPath, second.OutputPath)
+	}
+	if first.Path != "A?/movie.mkv" || second.Path != "A*/movie.mkv/extra.srt" {
+		t.Fatalf("provider paths changed: first=%q second=%q", first.Path, second.Path)
 	}
 }
 

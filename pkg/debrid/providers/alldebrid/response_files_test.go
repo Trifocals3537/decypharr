@@ -60,6 +60,34 @@ func TestFlattenFilesPreservesNestedDuplicateBasenames(t *testing.T) {
 	}
 }
 
+func TestFlattenFilesUsesStablePathIdentityAcrossOrdering(t *testing.T) {
+	first := []MagnetFile{
+		{Name: "Season 01", Elements: []MagnetFile{{Name: "Episode.mkv", Size: 1024, Link: "https://download.invalid/1"}}},
+		{Name: "Season 02", Elements: []MagnetFile{{Name: "Episode.mkv", Size: 2048, Link: "https://download.invalid/2"}}},
+	}
+	second := []MagnetFile{first[1], first[0]}
+	firstFiles, err := (&AllDebrid{}).flattenFiles("ad", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFiles, err := (&AllDebrid{}).flattenFiles("ad", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstIDs := make(map[string]string)
+	for _, file := range firstFiles {
+		firstIDs[file.Path] = file.Id
+		if !strings.HasPrefix(file.Id, "path-") {
+			t.Fatalf("file %q has unstable identity %q", file.Path, file.Id)
+		}
+	}
+	for _, file := range secondFiles {
+		if file.Id != firstIDs[file.Path] {
+			t.Fatalf("file %q identity changed with API order: first=%q second=%q", file.Path, firstIDs[file.Path], file.Id)
+		}
+	}
+}
+
 func TestFlattenFilesRejectsExcessiveNesting(t *testing.T) {
 	tree := MagnetFile{Name: "Episode.mkv", Size: 1, Link: "https://download.invalid"}
 	for depth := 0; depth <= allDebridFileTreeMaxDepth; depth++ {

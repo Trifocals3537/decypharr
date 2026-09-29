@@ -484,9 +484,23 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 		return nil, err
 	}
 	remaining := make(map[string]torrentFileLayout, len(layouts))
+	sourceKeys := make(map[string][]string, len(layouts))
 	basenameCounts := make(map[string]int, len(layouts))
+	activePlacement := entry.GetActiveProvider()
 	for _, layout := range layouts {
 		remaining[layout.key] = layout
+		sourceKeys[layout.key] = []string{layout.key}
+		if activePlacement != nil {
+			if providerFile := activePlacement.Files[layout.file.Name]; providerFile != nil {
+				providerRelative, providerErr := normalizeTorrentFileOutputPath(entry, strings.TrimSpace(providerFile.Path))
+				if providerErr == nil {
+					providerKey := portableTorrentRelativeKey(providerRelative)
+					if providerKey != layout.key {
+						sourceKeys[layout.key] = append([]string{providerKey}, sourceKeys[layout.key]...)
+					}
+				}
+			}
+		}
 		basenameCounts[strings.ToLower(filepath.Base(layout.relative))]++
 	}
 
@@ -505,7 +519,12 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 		lastScanErr = scanErr
 		if scanErr == nil {
 			for key, layout := range remaining {
-				source := actualByPath[key]
+				var source string
+				for _, sourceKey := range sourceKeys[key] {
+					if source = actualByPath[sourceKey]; source != "" {
+						break
+					}
+				}
 				if source == "" {
 					baseKey := strings.ToLower(filepath.Base(layout.relative))
 					candidates := actualByBase[baseKey]

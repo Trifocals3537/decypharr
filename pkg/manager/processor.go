@@ -719,18 +719,10 @@ func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridType
 	if err := applyDebridTorrentState(torrent, debridTorrent); err != nil {
 		return err
 	}
-
-	for _, file := range debridTorrent.Files {
-		if existing := torrent.Files[file.Name]; existing != nil {
-			existing.Name = file.Name
-			existing.Path = file.LocalPath()
-			existing.Size = file.Size
-			existing.ByteRange = file.ByteRange
-			existing.Deleted = file.Deleted
-			existing.InfoHash = torrent.InfoHash
-			existing.AddedOn = torrent.AddedOn
-			continue
-		}
+	if len(torrent.Files) != 0 {
+		return nil
+	}
+	for _, file := range debridTorrent.GetFiles() {
 		torrent.Files[file.Name] = &storage.File{
 			Name:      file.Name,
 			Path:      file.LocalPath(),

@@ -29,6 +29,7 @@ type providerDirectoryGroup struct {
 	componentIndex int
 	providerKey    string
 	members        []int
+	lossy          bool
 }
 
 // FilesByLogicalName converts provider file records into Tessarr's
@@ -232,8 +233,14 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 			providerKey := portableProviderPathKey(strings.Join(candidate.providerParts[:depth+1], "/"))
 			group := groups[providerKey]
 			if group == nil {
-				group = &providerDirectoryGroup{componentIndex: depth, providerKey: providerKey}
+				group = &providerDirectoryGroup{
+					componentIndex: depth,
+					providerKey:    providerKey,
+				}
 				groups[providerKey] = group
+			}
+			if candidate.outputParts[depth] != candidate.providerParts[depth] {
+				group.lossy = true
 			}
 			group.members = append(group.members, index)
 		}
@@ -258,7 +265,8 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 			group := groups[groupKey]
 			representative := &candidates[group.members[0]]
 			prefix := strings.Join(representative.outputParts[:depth+1], "/")
-			if _, conflict := fileKeys[portableProviderPathKey(prefix)]; !conflict {
+			_, fileConflict := fileKeys[portableProviderPathKey(prefix)]
+			if !group.lossy && !fileConflict {
 				continue
 			}
 			original := representative.outputParts[depth]
@@ -285,6 +293,7 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 	}
 
 	fileKeys := make(map[string]string, len(candidates))
+	directoryOwners := make(map[string]string)
 	for index := range candidates {
 		outputPath := strings.Join(candidates[index].outputParts, "/")
 		key := portableProviderPathKey(outputPath)
@@ -297,9 +306,15 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 	for index := range candidates {
 		for depth := 0; depth < len(candidates[index].outputParts)-1; depth++ {
 			prefix := strings.Join(candidates[index].outputParts[:depth+1], "/")
-			if file, conflict := fileKeys[portableProviderPathKey(prefix)]; conflict {
+			prefixKey := portableProviderPathKey(prefix)
+			if file, conflict := fileKeys[prefixKey]; conflict {
 				return fmt.Errorf("provider output directory %q conflicts with file %q", prefix, file)
 			}
+			providerKey := portableProviderPathKey(strings.Join(candidates[index].providerParts[:depth+1], "/"))
+			if owner, exists := directoryOwners[prefixKey]; exists && owner != providerKey {
+				return fmt.Errorf("provider directories %q and %q have the same portable output path %q", owner, providerKey, prefix)
+			}
+			directoryOwners[prefixKey] = providerKey
 		}
 	}
 	return nil

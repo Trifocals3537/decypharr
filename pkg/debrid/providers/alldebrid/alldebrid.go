@@ -3,11 +3,14 @@ package alldebrid
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -323,14 +326,12 @@ func getAlldebridStatus(statusCode int) types.TorrentStatus {
 
 func (ad *AllDebrid) flattenFiles(torrentId string, files []MagnetFile) (map[string]types.File, error) {
 	collected := make([]types.File, 0)
-	index := -1
 	visited := 0
 	if err := ad.collectFiles(
 		torrentId,
 		files,
 		"",
 		0,
-		&index,
 		&visited,
 		&collected,
 	); err != nil {
@@ -344,7 +345,6 @@ func (ad *AllDebrid) collectFiles(
 	files []MagnetFile,
 	parentPath string,
 	depth int,
-	index *int,
 	visited *int,
 	collected *[]types.File,
 ) error {
@@ -375,7 +375,6 @@ func (ad *AllDebrid) collectFiles(
 				f.Elements,
 				currentPath,
 				depth+1,
-				index,
 				visited,
 				collected,
 			); err != nil {
@@ -386,10 +385,9 @@ func (ad *AllDebrid) collectFiles(
 				continue
 			}
 
-			(*index)++
 			file := types.File{
 				TorrentId: torrentId,
-				Id:        strconv.Itoa(*index),
+				Id:        allDebridFileID(torrentId, currentPath),
 				Name:      f.Name,
 				Size:      f.Size,
 				Path:      currentPath,
@@ -399,6 +397,12 @@ func (ad *AllDebrid) collectFiles(
 		}
 	}
 	return nil
+}
+
+func allDebridFileID(torrentID, providerPath string) string {
+	normalized := path.Clean(strings.ReplaceAll(providerPath, `\`, "/"))
+	digest := sha256.Sum256([]byte(torrentID + "\x00" + normalized))
+	return "path-" + hex.EncodeToString(digest[:])
 }
 
 func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {

@@ -350,7 +350,8 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) (*Provide
 	if e.Providers == nil {
 		e.Providers = make(map[string]*ProviderEntry)
 	}
-	if err := e.reconcileTorrentFileNames(debridTorrent); err != nil {
+	canonicalNames, err := e.reconcileTorrentFiles(debridTorrent)
+	if err != nil {
 		return nil, err
 	}
 
@@ -363,7 +364,14 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) (*Provide
 	}
 
 	for _, f := range debridTorrent.GetFiles() {
-		providerEntry.Files[f.Name] = &ProviderFile{
+		canonicalName := canonicalNames[f.Name]
+		if canonicalName == "" {
+			return nil, fmt.Errorf("provider file %q has no canonical identity", f.Name)
+		}
+		if _, exists := providerEntry.Files[canonicalName]; exists {
+			return nil, fmt.Errorf("provider files collide at canonical name %q", canonicalName)
+		}
+		providerEntry.Files[canonicalName] = &ProviderFile{
 			Id:   f.Id,
 			Link: f.Link,
 			Path: f.Path,
@@ -373,41 +381,122 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) (*Provide
 	return providerEntry, nil
 }
 
-func (e *Entry) reconcileTorrentFileNames(remote *debridTypes.Torrent) error {
-	if remote == nil || len(e.Files) == 0 {
-		return nil
+func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]string, error) {
+	if remote == nil {
+		return nil, fmt.Errorf("provider torrent is nil")
 	}
-	previous := e.Providers[remote.Debrid]
-	if previous == nil || len(previous.Files) == 0 {
-		return nil
+	if e.Files == nil {
+		e.Files = make(map[string]*File)
+	}
+	remoteFiles := make(map[string]debridTypes.File, len(remote.Files))
+	canonicalNames := make(map[string]string, len(remote.Files))
+	for _, file := range remote.GetFiles() {
+		remoteFiles[file.Name] = file
+		canonicalNames[file.Name] = file.Name
+	}
+	if len(e.Files) == 0 {
+		return canonicalNames, nil
 	}
 
-	idIndex := make(map[string][]string, len(remote.Files))
-	pathIndex := make(map[string][]string, len(remote.Files))
-	for name, file := range remote.Files {
+	idIndex := make(map[string][]string, len(remoteFiles))
+	pathIndex := make(map[string][]string, len(remoteFiles)*2)
+	for name, file := range remoteFiles {
 		if file.Id != "" {
 			idIndex[file.Id] = append(idIndex[file.Id], name)
 		}
 		if key := providerPathIdentity(file.Path); key != "" {
 			pathIndex[key] = append(pathIndex[key], name)
 		}
+		if key := providerPathIdentity(file.LocalPath()); key != "" && key != providerPathIdentity(file.Path) {
+			pathIndex[key] = append(pathIndex[key], name)
+		}
 	}
 
-	renames := make(map[string]string)
-	for oldName, oldFile := range previous.Files {
-		if oldFile == nil || e.Files[oldName] == nil {
-			continue
+	canonicalToRemote := make(map[string]string)
+	remoteToCanonical := make(map[string]string)
+	addMatch := func(canonicalName, remoteName string) error {
+		if canonicalName == "" || remoteName == "" {
+			return nil
 		}
-		newName, matched, err := matchRefreshedProviderFileName(oldFile, idIndex, pathIndex)
-		if err != nil {
-			return fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+		if previous := canonicalToRemote[canonicalName]; previous != "" && previous != remoteName {
+			return fmt.Errorf("canonical file %q matches multiple refreshed files", canonicalName)
 		}
-		if matched && newName != oldName {
-			renames[oldName] = newName
+		if previous := remoteToCanonical[remoteName]; previous != "" && previous != canonicalName {
+			return fmt.Errorf("refreshed provider file %q matches multiple canonical files", remoteName)
+		}
+		canonicalToRemote[canonicalName] = remoteName
+		remoteToCanonical[remoteName] = canonicalName
+		return nil
+	}
+
+	previous := e.Providers[remote.Debrid]
+	if previous != nil {
+		for oldName, oldFile := range previous.Files {
+			if oldFile == nil || e.Files[oldName] == nil {
+				continue
+			}
+			newName, matched, err := matchRefreshedProviderFileName(oldFile, idIndex, pathIndex)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+			}
+			if matched {
+				if err := addMatch(oldName, newName); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
-	if len(renames) == 0 {
-		return nil
+
+	// A newly added provider has no prior placement. Reuse provider-relative
+	// paths from every existing placement so the new placement maps onto the
+	// same canonical files instead of publishing a duplicate set.
+	for _, placement := range e.Providers {
+		if placement == nil {
+			continue
+		}
+		for oldName, oldFile := range placement.Files {
+			if oldFile == nil || e.Files[oldName] == nil || canonicalToRemote[oldName] != "" {
+				continue
+			}
+			matches := pathIndex[providerPathIdentity(oldFile.Path)]
+			if len(matches) > 1 {
+				return nil, fmt.Errorf("reconcile provider file %q: provider path %q is ambiguous", oldName, oldFile.Path)
+			}
+			if len(matches) == 1 {
+				if err := addMatch(oldName, matches[0]); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	// Provider-only legacy rows may not have retained placement paths. Their
+	// canonical local path is still a safe final fallback when it identifies
+	// exactly one refreshed file.
+	for oldName, file := range e.Files {
+		if file == nil || canonicalToRemote[oldName] != "" {
+			continue
+		}
+		matches := pathIndex[providerPathIdentity(file.Path)]
+		if len(matches) > 1 {
+			return nil, fmt.Errorf("reconcile canonical file %q: path %q is ambiguous", oldName, file.Path)
+		}
+		if len(matches) == 1 {
+			if err := addMatch(oldName, matches[0]); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	canChangeLocalIdentity := !torrentArtifactsMayExist(e)
+	renames := make(map[string]string)
+	for oldName, newName := range canonicalToRemote {
+		if canChangeLocalIdentity && oldName != newName {
+			renames[oldName] = newName
+			canonicalNames[newName] = newName
+		} else {
+			canonicalNames[newName] = oldName
+		}
 	}
 
 	canonical := make(map[string]*File, len(e.Files))
@@ -417,9 +506,19 @@ func (e *Entry) reconcileTorrentFileNames(remote *debridTypes.Torrent) error {
 			newName = renamed
 		}
 		if _, exists := canonical[newName]; exists {
-			return fmt.Errorf("canonical file rename %q to %q collides with an existing file", oldName, newName)
+			return nil, fmt.Errorf("canonical file rename %q to %q collides with an existing file", oldName, newName)
 		}
 		canonical[newName] = file
+	}
+	for remoteName, remoteFile := range remoteFiles {
+		if remoteToCanonical[remoteName] != "" {
+			continue
+		}
+		canonicalName := canonicalNames[remoteName]
+		if _, exists := canonical[canonicalName]; exists {
+			return nil, fmt.Errorf("new provider file %q collides with canonical file %q", remoteName, canonicalName)
+		}
+		canonical[canonicalName] = newCanonicalTorrentFile(e, remoteFile)
 	}
 
 	providerMaps := make(map[string]map[string]*ProviderFile, len(e.Providers))
@@ -434,28 +533,52 @@ func (e *Entry) reconcileTorrentFileNames(remote *debridTypes.Torrent) error {
 				newName = renamed
 			}
 			if _, exists := files[newName]; exists {
-				return fmt.Errorf("provider %q file rename %q to %q collides with an existing file", providerName, oldName, newName)
+				return nil, fmt.Errorf("provider %q file rename %q to %q collides with an existing file", providerName, oldName, newName)
 			}
 			files[newName] = file
 		}
 		providerMaps[providerName] = files
 	}
 
-	for _, newName := range renames {
-		file := canonical[newName]
-		file.Name = newName
-		if remoteFile, exists := remote.Files[newName]; exists {
+	for _, remoteName := range canonicalToRemote {
+		canonicalName := canonicalNames[remoteName]
+		file := canonical[canonicalName]
+		remoteFile := remoteFiles[remoteName]
+		if canChangeLocalIdentity {
+			file.Name = canonicalName
 			file.Path = remoteFile.LocalPath()
-			file.Size = remoteFile.Size
-			file.ByteRange = remoteFile.ByteRange
-			file.Deleted = remoteFile.Deleted
+		} else if file.Path == "" {
+			file.Path = remoteFile.LocalPath()
+		}
+		file.Size = remoteFile.Size
+		file.ByteRange = remoteFile.ByteRange
+		file.Deleted = remoteFile.Deleted
+		file.InfoHash = e.InfoHash
+		if file.AddedOn.IsZero() {
+			file.AddedOn = e.AddedOn
 		}
 	}
 	e.Files = canonical
 	for providerName, files := range providerMaps {
 		e.Providers[providerName].Files = files
 	}
-	return nil
+	return canonicalNames, nil
+}
+
+func newCanonicalTorrentFile(entry *Entry, file debridTypes.File) *File {
+	return &File{
+		Name:      file.Name,
+		Path:      file.LocalPath(),
+		Size:      file.Size,
+		ByteRange: file.ByteRange,
+		Deleted:   file.Deleted,
+		InfoHash:  entry.InfoHash,
+		AddedOn:   entry.AddedOn,
+	}
+}
+
+func torrentArtifactsMayExist(entry *Entry) bool {
+	return entry != nil && (entry.CompletedAt != nil || entry.IsDownloading || entry.SizeDownloaded > 0)
 }
 
 func matchRefreshedProviderFileName(

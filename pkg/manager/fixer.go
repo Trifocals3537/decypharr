@@ -365,34 +365,22 @@ func (f *Fixer) MoveTorrentContext(ctx context.Context, entry *storage.Entry, de
 		}
 	}
 
-	addedOn := newDebridTorrent.Added
-	if addedOn.IsZero() {
-		addedOn = time.Now()
-	}
-
 	// Update entry with new placement
 	if _, err := entry.AddTorrentProvider(newDebridTorrent); err != nil {
 		return false, rollbackTarget(newDebridTorrent.Id, fmt.Errorf("reconcile target placement files: %w", err))
 	}
-	// Update global file metadata (revives files that previously existed)
-	if entry.Files == nil {
-		entry.Files = make(map[string]*storage.File)
-	}
-	for _, f := range newDebridTorrent.GetFiles() {
-		if existing, exists := entry.Files[f.Name]; exists {
-			existing.Size = f.Size
-			existing.Path = f.LocalPath()
-			existing.ByteRange = f.ByteRange
-			existing.Deleted = false
-			existing.InfoHash = entry.InfoHash
-			existing.AddedOn = addedOn
-		} else {
-			entry.Files[f.Name] = &storage.File{
-				Name:      f.Name,
-				Path:      f.LocalPath(),
-				Size:      f.Size,
-				ByteRange: f.ByteRange,
-				Deleted:   false,
+	if len(entry.Files) == 0 {
+		addedOn := newDebridTorrent.Added
+		if addedOn.IsZero() {
+			addedOn = time.Now()
+		}
+		for _, file := range newDebridTorrent.GetFiles() {
+			entry.Files[file.Name] = &storage.File{
+				Name:      file.Name,
+				Path:      file.LocalPath(),
+				Size:      file.Size,
+				ByteRange: file.ByteRange,
+				Deleted:   file.Deleted,
 				InfoHash:  entry.InfoHash,
 				AddedOn:   addedOn,
 			}

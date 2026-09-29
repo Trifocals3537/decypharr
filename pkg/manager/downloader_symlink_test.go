@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/safepath"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
 )
@@ -47,6 +49,67 @@ func TestCreateTorrentSymlinksKeepsExistingDestinationCompatibility(t *testing.T
 	}
 	if len(paths) != 1 || paths[0] != existing {
 		t.Fatalf("created paths = %v, want [%s]", paths, existing)
+	}
+}
+
+func TestCreateTorrentSymlinksUsesProviderPathsForNestedDuplicateBasenames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require privileges")
+	}
+	config.SetConfigPath(t.TempDir())
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "one", Path: "Season 01/Episode.mkv", Size: 3},
+		{Id: "two", Path: "Season 02/Episode.mkv", Size: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &storage.Entry{
+		InfoHash:       "nested-duplicate-symlink",
+		Name:           "release",
+		Protocol:       config.ProtocolTorrent,
+		SavePath:       downloadRoot,
+		ActiveProvider: "primary",
+		Files:          make(map[string]*storage.File),
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+		},
+	}
+	for name, remote := range remoteFiles {
+		entry.Files[name] = &storage.File{Name: name, Path: remote.LocalPath(), Size: remote.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: remote.Id, Path: remote.Path}
+		target := filepath.Join(mountPath, filepath.FromSlash(remote.Path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(remote.Id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symlinkDir, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	paths, err := downloader.createTorrentSymlinksWhenMountFilesAppear(context.Background(), entry, mountPath, symlinkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("created %d symlinks, want 2", len(paths))
+	}
+	for name, remote := range remoteFiles {
+		destination := filepath.Join(symlinkDir, filepath.FromSlash(remote.LocalPath()))
+		resolved, err := filepath.EvalSymlinks(destination)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", name, err)
+		}
+		want := filepath.Join(mountPath, filepath.FromSlash(remote.Path))
+		if !sameFilesystemPath(resolved, want) {
+			t.Fatalf("symlink %q resolves to %q, want %q", destination, resolved, want)
+		}
 	}
 }
 

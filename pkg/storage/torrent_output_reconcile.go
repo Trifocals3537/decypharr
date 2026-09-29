@@ -7,6 +7,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Trifocals3537/tessarr/internal/safepath"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -15,6 +17,7 @@ import (
 const maxMaterializedOutputNameAttempts = 16
 
 type torrentOutputNamespace struct {
+	entry        *Entry
 	files        map[string]string
 	directories  map[string]string
 	logicalNames map[string]string
@@ -28,12 +31,14 @@ type torrentOutputNamespace struct {
 // are assigned a deterministic alternate component when their planned path
 // would make a file and directory occupy the same portable location.
 func reserveMaterializedTorrentOutputPaths(
+	entry *Entry,
 	canonical map[string]*File,
 	remoteFiles map[string]debridTypes.File,
 	canonicalNames map[string]string,
 	unmatchedRemoteNames []string,
 ) error {
 	namespace := torrentOutputNamespace{
+		entry:        entry,
 		files:        make(map[string]string, len(canonical)),
 		directories:  make(map[string]string, len(canonical)),
 		logicalNames: make(map[string]string, len(canonical)),
@@ -46,6 +51,7 @@ func reserveMaterializedTorrentOutputPaths(
 		if localPath == "" {
 			localPath = strings.TrimSpace(file.Name)
 		}
+		localPath = materializedTorrentRelativePath(entry, localPath)
 		if err := namespace.reserve(localPath, canonicalName); err != nil {
 			return fmt.Errorf("reserve canonical torrent file %q: %w", canonicalName, err)
 		}
@@ -53,6 +59,9 @@ func reserveMaterializedTorrentOutputPaths(
 
 	for _, remoteName := range unmatchedRemoteNames {
 		remoteFile := remoteFiles[remoteName]
+		if relative := materializedTorrentRelativePath(entry, remoteFile.LocalPath()); relative != remoteFile.LocalPath() {
+			remoteFile.OutputPath = relative
+		}
 		resolved, canonicalName, err := namespace.resolve(remoteFile, canonicalNames[remoteName])
 		if err != nil {
 			return fmt.Errorf("reserve new provider file %q: %w", remoteName, err)
@@ -61,6 +70,28 @@ func reserveMaterializedTorrentOutputPaths(
 		canonicalNames[remoteName] = canonicalName
 	}
 	return nil
+}
+
+// Match the release-root handling used by torrentEntryFileLayouts. Provider
+// source paths are not changed; only their managed output paths are planned.
+func materializedTorrentRelativePath(entry *Entry, raw string) string {
+	if entry == nil {
+		return raw
+	}
+	parts := strings.Split(strings.ReplaceAll(raw, `\`, "/"), "/")
+	if len(parts) < 2 || !entry.TorrentPathFirstComponentIsEntryRoot(parts[0]) {
+		return raw
+	}
+	root := strings.TrimSpace(parts[0])
+	if entry.OutputName == "" {
+		if safepath.ValidateIdentifier(root) != nil {
+			return raw
+		}
+	} else if !utf8.ValidString(root) || strings.IndexFunc(root, unicode.IsControl) >= 0 ||
+		strings.Trim(root, " .") == "" || (len(root) >= 2 && root[1] == ':') {
+		return raw
+	}
+	return strings.Join(parts[1:], "/")
 }
 
 func (namespace *torrentOutputNamespace) resolve(
@@ -136,8 +167,13 @@ func (namespace *torrentOutputNamespace) conflictDepth(parts []string) (int, boo
 
 func (namespace *torrentOutputNamespace) reserve(localPath, logicalName string) error {
 	parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(localPath), `\`, "/"), "/")
-	if len(parts) == 0 || strings.TrimSpace(localPath) == "" {
-		return fmt.Errorf("output path is empty")
+	if len(parts) == 0 || strings.TrimSpace(localPath) == "" || path.Clean(strings.Join(parts, "/")) != strings.Join(parts, "/") {
+		return fmt.Errorf("output path %q is not a clean relative path", localPath)
+	}
+	for _, component := range parts {
+		if err := safepath.ValidateIdentifier(component); err != nil {
+			return fmt.Errorf("output path %q: %w", localPath, err)
+		}
 	}
 	fileKey := portableTorrentStoragePathKey(strings.Join(parts, "/"))
 	if previous, exists := namespace.files[fileKey]; exists {
@@ -154,7 +190,7 @@ func (namespace *torrentOutputNamespace) reserve(localPath, logicalName string) 
 		}
 		namespace.directories[prefixKey] = localPath
 	}
-	logicalKey := portableTorrentStoragePathKey(logicalName)
+	logicalKey := portableTorrentStoragePathKey(materializedTorrentRelativePath(namespace.entry, logicalName))
 	if previous, exists := namespace.logicalNames[logicalKey]; exists {
 		return fmt.Errorf("logical file name %q collides with %q", logicalName, previous)
 	}

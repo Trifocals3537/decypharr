@@ -589,6 +589,7 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 	})
 	if !canChangeLocalIdentity && len(unmatchedRemoteNames) > 0 {
 		if err := reserveMaterializedTorrentOutputPaths(
+			e,
 			canonical,
 			remoteFiles,
 			canonicalNames,

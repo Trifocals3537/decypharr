@@ -20,7 +20,6 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/safepath"
-	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
@@ -114,12 +113,6 @@ func safeTorrentEntryDownloadPath(downloadRoot string, entry *storage.Entry) (st
 		return "", fmt.Errorf("torrent output path %q does not match validated path %q", entry.DownloadPath(), safe)
 	}
 	return safe, nil
-}
-
-func removeTorrentFilenameExtension(name string) string {
-	// Keep this local wrapper so ownership path derivation stays exactly aligned
-	// with storage.Entry.DownloadPath.
-	return utils.RemoveExtension(name)
 }
 
 func isReservedTorrentPrivateName(name string) bool {
@@ -255,7 +248,7 @@ func torrentFileRelativePath(entry *storage.Entry, file *storage.File) (string, 
 func normalizeTorrentFileOutputPath(entry *storage.Entry, raw string) (string, error) {
 	if entry != nil && entry.OutputName != "" {
 		parts := strings.Split(strings.ReplaceAll(raw, `\`, "/"), "/")
-		if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) && validateTorrentRootName(parts[0], false) == nil {
+		if len(parts) > 1 && entry.TorrentPathFirstComponentIsEntryRoot(parts[0]) && validateTorrentRootName(parts[0], false) == nil {
 			raw = strings.Join(parts[1:], "/")
 		}
 		return normalizeTorrentRelativePath(raw)
@@ -265,33 +258,10 @@ func normalizeTorrentFileOutputPath(entry *storage.Entry, raw string) (string, e
 		return "", err
 	}
 	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) {
+	if len(parts) > 1 && entry.TorrentPathFirstComponentIsEntryRoot(parts[0]) {
 		return normalizeTorrentRelativePath(strings.Join(parts[1:], "/"))
 	}
 	return relative, nil
-}
-
-func torrentPathFirstComponentIsEntryRoot(component string, entry *storage.Entry) bool {
-	if entry == nil {
-		return false
-	}
-	component = strings.TrimSpace(component)
-	candidates := []string{
-		entry.Name,
-		entry.OriginalFilename,
-		removeTorrentFilenameExtension(entry.Name),
-		removeTorrentFilenameExtension(entry.OriginalFilename),
-	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(strings.ReplaceAll(candidate, `\`, "/"))
-		if candidate == "" || strings.Contains(candidate, "/") {
-			continue
-		}
-		if strings.EqualFold(component, candidate) {
-			return true
-		}
-	}
-	return false
 }
 
 func normalizeTorrentRelativePath(value string) (string, error) {

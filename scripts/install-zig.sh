@@ -31,11 +31,11 @@ zig_dir="${install_root}/${archive%.tar.xz}"
 curl \
     --fail \
     --location \
-    --retry 3 \
+    --retry 2 \
     --retry-connrefused \
     --retry-delay 2 \
     --connect-timeout 15 \
-    --max-time 300 \
+    --max-time 600 \
     --output "${archive_path}" \
     "${download_url}"
 

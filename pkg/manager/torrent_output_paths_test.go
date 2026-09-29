@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -282,6 +283,56 @@ func TestTorrentOutputPathStripsOnlyRecognizedDisplayRoot(t *testing.T) {
 	entry.Files = map[string]*storage.File{"file": {Name: "movie.mkv", Path: "../movie.mkv", Size: 4}}
 	if _, err := torrentEntryFileLayouts(entry); err == nil {
 		t.Fatal("untrusted entry title authorized stripping traversal")
+	}
+}
+
+func TestMaterializedOutputReservationUsesStrippedReleaseRoot(t *testing.T) {
+	for _, newPath := range []string{"Movie.mkv", "Release/Movie.mkv"} {
+		t.Run(newPath, func(t *testing.T) {
+			completed := time.Now()
+			entry := &storage.Entry{
+				Protocol: config.ProtocolTorrent, InfoHash: "root-conflict", Name: "Release",
+				OutputName:  storage.NewTorrentOutputName("Release", "root-conflict"),
+				CompletedAt: &completed, ActiveProvider: "primary",
+				Files: map[string]*storage.File{
+					"extra.srt": {Name: "extra.srt", Path: "Release/movie.mkv/extra.srt", Size: 1},
+				},
+				Providers: map[string]*storage.ProviderEntry{
+					"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+						"extra.srt": {Id: "existing", Path: "Release/movie.mkv/extra.srt"},
+					}},
+				},
+			}
+			remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+				{Id: "existing", Path: "Release/movie.mkv/extra.srt", Size: 1},
+				{Id: "new", Path: newPath, Size: 2},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles}); err != nil {
+				t.Fatal(err)
+			}
+			layouts, err := torrentEntryFileLayouts(entry)
+			if err != nil {
+				t.Fatalf("provider refresh created an unusable layout: %v", err)
+			}
+			if len(layouts) != 2 {
+				t.Fatalf("layout count = %d, want 2", len(layouts))
+			}
+			var existing, added string
+			for _, layout := range layouts {
+				if layout.file.Size == 1 {
+					existing = filepath.ToSlash(layout.relative)
+				} else {
+					added = filepath.ToSlash(layout.relative)
+				}
+			}
+			if existing != "movie.mkv/extra.srt" || added == "" || strings.EqualFold(added, "movie.mkv") ||
+				strings.HasPrefix(existing, strings.ToLower(added)+"/") || filepath.Ext(added) != ".mkv" {
+				t.Fatalf("existing=%q added=%q, want stable nested file and distinct .mkv", existing, added)
+			}
+		})
 	}
 }
 

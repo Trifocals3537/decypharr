@@ -31,7 +31,9 @@ func TestAddTorrentProviderReconcilesPersistedLogicalNames(t *testing.T) {
 
 	persisted := &File{ID: "file-id", Name: oldName, Path: "Release/Season 01/Episode.mkv", Size: 10}
 	entry := &Entry{
-		Files: map[string]*File{oldName: persisted},
+		SavePath:   t.TempDir(),
+		OutputName: "nonmaterialized",
+		Files:      map[string]*File{oldName: persisted},
 		Providers: map[string]*ProviderEntry{
 			"primary": {
 				Provider: "primary",
@@ -78,7 +80,9 @@ func TestAddTorrentProviderReconcilesByPathWithoutProviderID(t *testing.T) {
 		newName = name
 	}
 	entry := &Entry{
-		Files: map[string]*File{"Why_.mkv": {Name: "Why_.mkv", Path: "Release/Why?.mkv"}},
+		SavePath:   t.TempDir(),
+		OutputName: "nonmaterialized",
+		Files:      map[string]*File{"Why_.mkv": {Name: "Why_.mkv", Path: "Release/Why?.mkv"}},
 		Providers: map[string]*ProviderEntry{
 			"primary": {
 				Provider: "primary",
@@ -112,6 +116,8 @@ func TestAddTorrentProviderDoesNotTransferUnrelatedFallbackLinkAcrossRename(t *t
 		}
 	}
 	entry := &Entry{
+		SavePath:   t.TempDir(),
+		OutputName: "nonmaterialized",
 		Files: map[string]*File{
 			oldName: {Name: oldName, Path: "Season 01/Episode.mkv"},
 		},
@@ -154,6 +160,8 @@ func TestAddTorrentProviderRejectsCanonicalRenameCollision(t *testing.T) {
 		newName = name
 	}
 	entry := &Entry{
+		SavePath:   t.TempDir(),
+		OutputName: "nonmaterialized",
 		Files: map[string]*File{
 			"Why_.mkv": {Name: "Why_.mkv"},
 			newName:    {Name: newName},
@@ -179,6 +187,8 @@ func TestAddTorrentProviderAppliesRenameChainsAtomically(t *testing.T) {
 	first := &File{ID: "first", Name: "old-a.mkv"}
 	second := &File{ID: "second", Name: "new-a.mkv"}
 	entry := &Entry{
+		SavePath:   t.TempDir(),
+		OutputName: "nonmaterialized",
 		Files: map[string]*File{
 			"old-a.mkv": first,
 			"new-a.mkv": second,
@@ -219,7 +229,9 @@ func TestAddTorrentProviderUpdatesPortablePathWithoutLogicalRename(t *testing.T)
 	}
 	remote := remoteFiles["Episode.mkv"]
 	entry := &Entry{
-		InfoHash: "hash",
+		InfoHash:   "hash",
+		SavePath:   t.TempDir(),
+		OutputName: "nonmaterialized",
 		Files: map[string]*File{
 			"Episode.mkv": {Name: "Episode.mkv", Path: "Release?/Episode.mkv", Size: 1},
 		},
@@ -350,6 +362,49 @@ func TestAddTorrentProviderReconcilesUniqueLogicalKeyAcrossReleaseRoots(t *testi
 	}
 }
 
+func TestAddTorrentProviderReconcilesDuplicateBasenamesAcrossReleaseRoots(t *testing.T) {
+	sourceFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "primary-one", Path: "Release/Season 01/Episode.mkv", Size: 11},
+		{Id: "primary-two", Path: "Release/Season 02/Episode.mkv", Size: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := &Entry{
+		InfoHash:       "same-hash",
+		CompletedAt:    &completed,
+		ActiveProvider: "primary",
+		Files:          make(map[string]*File),
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*ProviderFile)},
+		},
+	}
+	for name, file := range sourceFiles {
+		entry.Files[name] = &File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &ProviderFile{Id: file.Id, Path: file.Path}
+	}
+	targetFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "fallback-one", Path: "Season 01/Episode.mkv", Size: 11},
+		{Id: "fallback-two", Path: "Season 02/Episode.mkv", Size: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: targetFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 2 {
+		t.Fatalf("release-root change duplicated files: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+	for canonicalName := range sourceFiles {
+		if placement.Files[canonicalName] == nil {
+			t.Fatalf("fallback placement did not preserve canonical key %q: %#v", canonicalName, placement.Files)
+		}
+	}
+}
+
 func TestAddTorrentProviderRejectsLogicalKeyMatchWithContradictorySize(t *testing.T) {
 	entry := &Entry{
 		Files: map[string]*File{"Episode.mkv": {Name: "Episode.mkv", Path: "Season 01/Episode.mkv", Size: 123}},
@@ -429,6 +484,36 @@ func TestAddTorrentProviderPreservesOutputAfterRestartWhenArtifactExists(t *test
 	}
 	if entry.Files["Season 01/Episode.mkv"] == nil || placement.Files["Season 01/Episode.mkv"] == nil {
 		t.Fatalf("restart-time artifact identity moved: files=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
+func TestAddTorrentProviderTreatsRelativeSavePathAsPotentiallyMaterialized(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "stable-1", Path: "Season 01/Episode.mkv", Size: 11},
+		{Id: "stable-2", Path: "Season 02/Episode.mkv", Size: 12},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacyName = "Season 01/Episode.mkv"
+	entry := &Entry{
+		InfoHash: "hash",
+		SavePath: "relative-downloads",
+		Files: map[string]*File{
+			legacyName: {Name: legacyName, Path: legacyName, Size: 11},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				legacyName: {Id: "stable-1", Path: legacyName},
+			}},
+		},
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Files[legacyName] == nil || placement.Files[legacyName] == nil {
+		t.Fatalf("relative legacy output identity moved: files=%#v placement=%#v", entry.Files, placement.Files)
 	}
 }
 

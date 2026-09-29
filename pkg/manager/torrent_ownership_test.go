@@ -93,6 +93,24 @@ func TestApplyDebridTorrentPreservesCollisionSafeLogicalNamesAndPaths(t *testing
 	}
 }
 
+func TestTorrentFileLayoutsAcceptSanitizedProviderOwnershipNames(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "marker", Path: ".tessarr-torrent-owner-v1", Size: 1},
+		{Id: "partial", Path: ".decypharr-torrent-part-provider/Episode.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := torrentOwnershipTestEntry(t.TempDir(), "reserved-provider-names", config.DownloadActionDownload)
+	entry.Files = make(map[string]*storage.File, len(remoteFiles))
+	for name, file := range remoteFiles {
+		entry.Files[name] = &storage.File{Name: name, Path: file.LocalPath(), Size: file.Size}
+	}
+	if _, err := torrentEntryFileLayouts(entry); err != nil {
+		t.Fatalf("sanitized provider ownership names were rejected: %v", err)
+	}
+}
+
 func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 	entry := &storage.Entry{
 		InfoHash:       "late-provider-links",

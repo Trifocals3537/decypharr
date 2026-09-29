@@ -159,6 +159,46 @@ func TestFilesByLogicalNameKeepsLossyDirectoriesDistinct(t *testing.T) {
 	}
 }
 
+func TestFilesByLogicalNameKeepsPortableFoldedDirectoriesDistinct(t *testing.T) {
+	input := []File{
+		{Id: "trailing-dot", Path: "A./one.mkv"},
+		{Id: "literal", Path: "A/two.mkv"},
+	}
+	files, err := FilesByLogicalName(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRoot := strings.Split(fileByProviderID(t, files, "trailing-dot").OutputPath, "/")[0]
+	secondRoot := strings.Split(fileByProviderID(t, files, "literal").OutputPath, "/")[0]
+	if portableProviderPathKey(firstRoot) == portableProviderPathKey(secondRoot) {
+		t.Fatalf("portable-folded provider directories were merged: %q and %q", firstRoot, secondRoot)
+	}
+	reversed, err := FilesByLogicalName([]File{input[1], input[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, reversed) {
+		t.Fatalf("folded directory allocation changed with provider order:\nfirst: %#v\nsecond: %#v", files, reversed)
+	}
+}
+
+func TestFilesByLogicalNameDisambiguatesOwnershipArtifactNames(t *testing.T) {
+	files, err := FilesByLogicalName([]File{
+		{Id: "marker", Path: ".tessarr-torrent-owner-v1"},
+		{Id: "legacy-part", Path: ".decypharr-torrent-part-provider/Episode.mkv"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		for _, component := range strings.Split(file.OutputPath, "/") {
+			if isReservedProviderOutputName(component) {
+				t.Fatalf("reserved ownership name survived output planning: %#v", file)
+			}
+		}
+	}
+}
+
 func TestFilesByLogicalNameReservesLiteralDirectoryAgainstGeneratedName(t *testing.T) {
 	generated, err := disambiguateProviderDirectoryName("A_", portableProviderPathKey("A?"), 0)
 	if err != nil {

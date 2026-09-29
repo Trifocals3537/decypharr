@@ -200,7 +200,22 @@ func portableProviderFileName(name string) (string, error) {
 		}
 		name = prefixed
 	}
+	if isReservedProviderOutputName(name) {
+		name = "provider-" + name
+	}
 	return safepath.CompactIdentifier(name, safepath.PortableIdentifierMaxBytes)
+}
+
+func isReservedProviderOutputName(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == ".tessarr-torrent-owner-v1" ||
+		lower == ".decypharr-torrent-owner-v1" ||
+		lower == ".tessarr-torrent-ownership.lock" ||
+		lower == ".decypharr-torrent-ownership.lock" ||
+		strings.HasPrefix(lower, ".tessarr-torrent-quarantine-") ||
+		strings.HasPrefix(lower, ".decypharr-torrent-quarantine-") ||
+		strings.HasPrefix(lower, ".tessarr-torrent-part-") ||
+		strings.HasPrefix(lower, ".decypharr-torrent-part-")
 }
 
 func disambiguateProviderFileName(baseName, fullPath string) (string, error) {
@@ -241,7 +256,7 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 				groups = make(map[string]*providerDirectoryGroup)
 				directoryGroupsByDepth[depth] = groups
 			}
-			providerKey := portableProviderPathKey(strings.Join(candidate.providerParts[:depth+1], "/"))
+			providerKey := providerDirectoryIdentityKey(strings.Join(candidate.providerParts[:depth+1], "/"))
 			group := groups[providerKey]
 			if group == nil {
 				group = &providerDirectoryGroup{
@@ -346,7 +361,7 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 			if file, conflict := fileKeys[prefixKey]; conflict {
 				return fmt.Errorf("provider output directory %q conflicts with file %q", prefix, file)
 			}
-			providerKey := portableProviderPathKey(strings.Join(candidates[index].providerParts[:depth+1], "/"))
+			providerKey := providerDirectoryIdentityKey(strings.Join(candidates[index].providerParts[:depth+1], "/"))
 			if owner, exists := directoryOwners[prefixKey]; exists && owner != providerKey {
 				return fmt.Errorf("provider directories %q and %q have the same portable output path %q", owner, providerKey, prefix)
 			}
@@ -410,4 +425,8 @@ func portableProviderPathKey(value string) string {
 		parts[i] = strings.ToLower(strings.TrimRight(parts[i], " ."))
 	}
 	return strings.Join(parts, "/")
+}
+
+func providerDirectoryIdentityKey(value string) string {
+	return path.Clean(strings.ReplaceAll(value, `\`, "/"))
 }

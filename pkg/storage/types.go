@@ -440,6 +440,7 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 
 	idIndex := make(map[string][]string, len(remoteFiles))
 	pathIndex := make(map[string][]string, len(remoteFiles)*2)
+	relaxedPathIndex := make(map[string][]string, len(remoteFiles)*2)
 	for name, file := range remoteFiles {
 		if file.Id != "" {
 			idIndex[file.Id] = append(idIndex[file.Id], name)
@@ -449,6 +450,9 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		}
 		if key := providerPathIdentity(file.LocalPath()); key != "" && key != providerPathIdentity(file.Path) {
 			pathIndex[key] = append(pathIndex[key], name)
+		}
+		for _, key := range providerPathRelaxedIdentities(file.Path) {
+			relaxedPathIndex[key] = append(relaxedPathIndex[key], name)
 		}
 	}
 
@@ -483,6 +487,16 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 				if err := addMatch(oldName, newName); err != nil {
 					return nil, err
 				}
+				continue
+			}
+			newName, matched, err = matchRelaxedProviderPath(oldFile.Path, e.Files[oldName], relaxedPathIndex, remoteFiles)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+			}
+			if matched {
+				if err := addMatch(oldName, newName); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -501,6 +515,15 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 			matches := pathIndex[providerPathIdentity(oldFile.Path)]
 			if len(matches) > 1 {
 				return nil, fmt.Errorf("reconcile provider file %q: provider path %q is ambiguous", oldName, oldFile.Path)
+			}
+			if len(matches) == 0 {
+				newName, matched, err := matchRelaxedProviderPath(oldFile.Path, e.Files[oldName], relaxedPathIndex, remoteFiles)
+				if err != nil {
+					return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+				}
+				if matched {
+					matches = []string{newName}
+				}
 			}
 			if len(matches) == 1 {
 				if err := addMatch(oldName, matches[0]); err != nil {
@@ -657,7 +680,10 @@ func torrentArtifactsMayExist(entry *Entry) bool {
 	// error other than nonexistence is handled conservatively to avoid stranding
 	// an artifact behind a renamed logical path.
 	if !filepath.IsAbs(entry.SavePath) {
-		return false
+		// Relative and empty legacy roots cannot be pinned without consulting
+		// process working-directory state. Treat them as potentially materialized
+		// instead of authorizing an irreversible identity change.
+		return true
 	}
 	candidate := entry.DownloadPath()
 	relative, err := filepath.Rel(entry.SavePath, candidate)
@@ -734,6 +760,49 @@ func providerPathIdentity(value string) string {
 		return ""
 	}
 	return strings.ToLower(path.Clean(value))
+}
+
+func providerPathRelaxedIdentities(value string) []string {
+	full := providerPathIdentity(value)
+	if full == "" {
+		return nil
+	}
+	identities := []string{full}
+	parts := strings.Split(full, "/")
+	if len(parts) > 1 {
+		withoutReleaseRoot := strings.Join(parts[1:], "/")
+		if withoutReleaseRoot != full {
+			identities = append(identities, withoutReleaseRoot)
+		}
+	}
+	return identities
+}
+
+func matchRelaxedProviderPath(
+	providerPath string,
+	canonical *File,
+	index map[string][]string,
+	remoteFiles map[string]debridTypes.File,
+) (string, bool, error) {
+	for _, identity := range providerPathRelaxedIdentities(providerPath) {
+		matches := index[identity]
+		compatible := make([]string, 0, len(matches))
+		seen := make(map[string]struct{}, len(matches))
+		for _, name := range matches {
+			if _, exists := seen[name]; exists || !torrentFileSizesCompatible(canonical, remoteFiles[name]) {
+				continue
+			}
+			seen[name] = struct{}{}
+			compatible = append(compatible, name)
+		}
+		if len(compatible) > 1 {
+			return "", false, fmt.Errorf("provider path %q is ambiguous after release-root normalization", providerPath)
+		}
+		if len(compatible) == 1 {
+			return compatible[0], true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func providerFileMatchesRemotePath(providerFile *ProviderFile, remoteFile debridTypes.File) bool {

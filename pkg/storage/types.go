@@ -441,14 +441,12 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 
 	idIndex := make(map[string][]string, len(remoteFiles))
 	pathIndex := make(map[string][]string, len(remoteFiles)*2)
-	rootIndependentPathIndex := make(map[string][]string, len(remoteFiles)*2)
 	for name, file := range remoteFiles {
 		if file.Id != "" {
 			idIndex[file.Id] = append(idIndex[file.Id], name)
 		}
 		if key := providerPathIdentity(file.Path); key != "" {
 			pathIndex[key] = append(pathIndex[key], name)
-			indexProviderPathVariants(rootIndependentPathIndex, key, name)
 		}
 		if key := providerPathIdentity(file.LocalPath()); key != "" && key != providerPathIdentity(file.Path) {
 			pathIndex[key] = append(pathIndex[key], name)
@@ -483,7 +481,6 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 				e.Files[oldName],
 				idIndex,
 				pathIndex,
-				rootIndependentPathIndex,
 				remoteFiles,
 			)
 			if err != nil {
@@ -512,7 +509,6 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 				oldFile.Path,
 				e.Files[oldName],
 				pathIndex,
-				rootIndependentPathIndex,
 				remoteFiles,
 			)
 			if err != nil {
@@ -553,7 +549,6 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 			file.Path,
 			file,
 			pathIndex,
-			rootIndependentPathIndex,
 			remoteFiles,
 		)
 		if err != nil {
@@ -746,44 +741,35 @@ func matchRefreshedProviderFileName(
 	oldFile *ProviderFile,
 	canonicalFile *File,
 	idIndex, pathIndex map[string][]string,
-	rootIndependentPathIndex map[string][]string,
 	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
-	var idName, pathName string
 	if oldFile.Id != "" {
 		matches := idIndex[oldFile.Id]
 		if len(matches) > 1 {
 			return "", false, fmt.Errorf("provider ID %q is ambiguous", oldFile.Id)
 		}
 		if len(matches) == 1 {
-			idName = matches[0]
+			// A unique provider-local ID is stronger identity evidence than a
+			// provider path. Output-path aliases can legitimately equal another
+			// file's native path after portable sanitization, so consulting the
+			// combined path index here would turn a proven ID match into a false
+			// ambiguity.
+			return matches[0], true, nil
 		}
 	}
 	if oldFile.Path != "" {
-		var matched bool
-		var err error
-		pathName, matched, err = matchProviderFilePath(
+		pathName, matched, err := matchProviderFilePath(
 			oldFile.Path,
 			canonicalFile,
 			pathIndex,
-			rootIndependentPathIndex,
 			remoteFiles,
 		)
 		if err != nil {
 			return "", false, err
 		}
-		if !matched {
-			pathName = ""
+		if matched {
+			return pathName, true, nil
 		}
-	}
-	if idName != "" && pathName != "" && idName != pathName {
-		return "", false, fmt.Errorf("provider ID and path identify different refreshed files")
-	}
-	if idName != "" {
-		return idName, true, nil
-	}
-	if pathName != "" {
-		return pathName, true, nil
 	}
 	return "", false, nil
 }
@@ -791,7 +777,7 @@ func matchRefreshedProviderFileName(
 func matchProviderFilePath(
 	value string,
 	canonicalFile *File,
-	pathIndex, rootIndependentPathIndex map[string][]string,
+	pathIndex map[string][]string,
 	remoteFiles map[string]debridTypes.File,
 ) (string, bool, error) {
 	key := providerPathIdentity(value)
@@ -804,64 +790,37 @@ func matchProviderFilePath(
 		return matches[0], true, nil
 	}
 
-	keys := providerPathSuffixes(key)
-	for _, candidateKey := range keys {
-		matches := rootIndependentPathIndex[candidateKey]
-		if len(matches) == 0 {
+	var sizeMatches []string
+	hadSizeConflict := false
+	for name, remoteFile := range remoteFiles {
+		remoteKey := providerPathIdentity(remoteFile.Path)
+		if !providerPathsDifferOnlyByLeadingRoot(key, remoteKey) {
 			continue
 		}
-		basenameOnly := !strings.Contains(candidateKey, "/")
-		eligibleMatches := 0
-		var sizeMatches []string
-		for _, name := range matches {
-			remoteKey := providerPathIdentity(remoteFiles[name].Path)
-			if basenameOnly && (strings.Contains(key, "/") || strings.Contains(remoteKey, "/")) {
-				continue
-			}
-			eligibleMatches++
-			if torrentFileSizesCompatible(canonicalFile, remoteFiles[name]) {
-				sizeMatches = append(sizeMatches, name)
-			}
+		if torrentFileSizesCompatible(canonicalFile, remoteFile) {
+			sizeMatches = append(sizeMatches, name)
+		} else {
+			hadSizeConflict = true
 		}
-		if eligibleMatches == 0 && basenameOnly {
-			continue
-		}
-		if len(sizeMatches) > 1 {
-			return "", false, fmt.Errorf("provider path %q is ambiguous without its release root", value)
-		}
-		if len(sizeMatches) == 1 {
-			return sizeMatches[0], true, nil
-		}
+	}
+	if len(sizeMatches) > 1 {
+		return "", false, fmt.Errorf("provider path %q is ambiguous without its release root", value)
+	}
+	if len(sizeMatches) == 1 {
+		return sizeMatches[0], true, nil
+	}
+	if hadSizeConflict {
 		return "", false, fmt.Errorf("provider path %q conflicts with refreshed file sizes", value)
 	}
 	return "", false, nil
 }
 
-func indexProviderPathVariants(index map[string][]string, key, name string) {
-	for _, suffix := range providerPathSuffixes(key) {
-		addProviderPathIndex(index, suffix, name)
+func providerPathsDifferOnlyByLeadingRoot(left, right string) bool {
+	if left == "" || right == "" || left == right ||
+		!strings.Contains(left, "/") || !strings.Contains(right, "/") {
+		return false
 	}
-}
-
-func addProviderPathIndex(index map[string][]string, key, name string) {
-	for _, existing := range index[key] {
-		if existing == name {
-			return
-		}
-	}
-	index[key] = append(index[key], name)
-}
-
-func providerPathSuffixes(value string) []string {
-	parts := strings.Split(value, "/")
-	suffixes := make([]string, 0, len(parts))
-	for index := range parts {
-		suffix := strings.Join(parts[index:], "/")
-		if suffix != "" && suffix != "." {
-			suffixes = append(suffixes, suffix)
-		}
-	}
-	return suffixes
+	return strings.HasSuffix(left, "/"+right) || strings.HasSuffix(right, "/"+left)
 }
 
 func providerPathIdentity(value string) string {

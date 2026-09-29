@@ -512,8 +512,8 @@ func TestAddTorrentProviderRejectsAmbiguousDuplicatePathAcrossReleaseRoots(t *te
 		},
 	}
 	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
-		{Id: "one", Path: "Season 01/Episode.mkv", Size: 123},
-		{Id: "two", Path: "Alternate/Season 01/Episode.mkv", Size: 123},
+		{Id: "one", Path: "Old Release/Season 01/Episode.mkv", Size: 123},
+		{Id: "two", Path: "Season 01/Episode.mkv", Size: 123},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -586,6 +586,81 @@ func TestAddTorrentProviderDoesNotMatchNestedPathToFlatByBasenameAlone(t *testin
 	}
 	if placement.Files["Old Release/Season 01/Episode.mkv"] != nil {
 		t.Fatalf("flat fallback attached to unrelated nested canonical media: %#v", placement.Files)
+	}
+}
+
+func TestAddTorrentProviderDoesNotMatchUnprovenQualifiedSuffix(t *testing.T) {
+	completed := time.Now()
+	const oldName = "Release/Show A/Season 01/Episode.mkv"
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			oldName: {Name: oldName, Path: oldName, Size: 123},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				oldName: {Path: oldName},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "different-show", Path: "Other/Show B/Season 01/Episode.mkv", Size: 123,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "fallback", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Files) != 2 || len(placement.Files) != 1 || placement.Files[oldName] != nil {
+		t.Fatalf("unproven common suffix reconciled unrelated media: canonical=%#v placement=%#v", entry.Files, placement.Files)
+	}
+}
+
+func TestAddTorrentProviderLetsUniqueIDOverrideOutputAliasAmbiguity(t *testing.T) {
+	unsafeOnly, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unsafe", Path: "Why?.mkv", Size: 11,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generatedLiteral string
+	for _, file := range unsafeOnly {
+		generatedLiteral = file.LocalPath()
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "unsafe", Path: "Why?.mkv", Size: 11, Link: "provider://unsafe"},
+		{Id: "literal", Path: generatedLiteral, Size: 12, Link: "provider://literal"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := &Entry{
+		InfoHash:    "same-hash",
+		CompletedAt: &completed,
+		Files:       make(map[string]*File),
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*ProviderFile)},
+		},
+	}
+	for name, file := range remoteFiles {
+		entry.Files[name] = &File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &ProviderFile{Id: file.Id, Path: file.Path, Link: "old://" + file.Id}
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles})
+	if err != nil {
+		t.Fatalf("unique stable provider IDs were blocked by output aliases: %v", err)
+	}
+	if len(placement.Files) != 2 {
+		t.Fatalf("provider refresh lost files: %#v", placement.Files)
+	}
+	for _, providerFile := range placement.Files {
+		if providerFile == nil || !strings.HasPrefix(providerFile.Link, "provider://") {
+			t.Fatalf("provider link was not refreshed through stable ID: %#v", placement.Files)
+		}
 	}
 }
 

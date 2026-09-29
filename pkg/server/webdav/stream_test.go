@@ -141,10 +141,14 @@ func TestWriteStreamErrorLogsOnlySecretSafeDiagnostics(t *testing.T) {
 func TestNormalizeStreamErrorPreservesCustomStatusAndSilencesCancellation(t *testing.T) {
 	existing := customerror.NewArticleNotFoundError(errors.New("article missing"))
 	correlated := manager.StreamError{Err: existing, StreamRequestID: "r-article"}
-	if got := normalizeStreamError(correlated, false); got != existing || got.HTTPStatus() != http.StatusGone || got.RequestID() != "r-article" {
+	got := normalizeStreamError(correlated, false)
+	if got == existing || got.HTTPStatus() != http.StatusGone || got.RequestID() != "r-article" {
 		t.Fatalf("custom error was not preserved: %+v", got)
 	}
-	diagnostic := manager.DiagnoseStreamFailure(existing)
+	if existing.RequestID() != "" || existing.HeadersWritten {
+		t.Fatalf("normalization mutated shared source error: %+v", existing)
+	}
+	diagnostic := manager.DiagnoseStreamFailure(got)
 	if diagnostic.RequestID != "r-article" || diagnostic.Status != http.StatusGone {
 		t.Fatalf("custom error diagnostic = %+v, want correlated HTTP 410", diagnostic)
 	}
@@ -153,7 +157,7 @@ func TestNormalizeStreamErrorPreservesCustomStatusAndSilencesCancellation(t *tes
 		logger.WithLogger(zerolog.New(&logs)),
 	)}
 	response := httptest.NewRecorder()
-	handler.writeStreamError("episode", existing, response)
+	handler.writeStreamError("episode", got, response)
 	if response.Code != http.StatusGone ||
 		!strings.Contains(logs.String(), `"status":410`) ||
 		!strings.Contains(logs.String(), `"stream_request_id":"r-article"`) {
@@ -165,6 +169,31 @@ func TestNormalizeStreamErrorPreservesCustomStatusAndSilencesCancellation(t *tes
 	(&Handler{}).writeStreamError("movie", canceled, response)
 	if response.Code != http.StatusOK || response.Body.Len() != 0 {
 		t.Fatalf("cancellation wrote response status/body = %d/%q", response.Code, response.Body.String())
+	}
+}
+
+func TestNormalizeStreamErrorIsolatesSharedSentinelState(t *testing.T) {
+	sentinel := customerror.HosterUnavailableError
+	first := normalizeStreamError(
+		manager.StreamError{Err: sentinel, StreamRequestID: "request-one"},
+		true,
+	)
+	second := normalizeStreamError(
+		manager.StreamError{Err: sentinel, StreamRequestID: "request-two"},
+		false,
+	)
+
+	if first == sentinel || second == sentinel || first == second {
+		t.Fatal("request normalization reused a shared error instance")
+	}
+	if first.RequestID() != "request-one" || !first.HeadersWritten {
+		t.Fatalf("first request state = id %q, headers %t", first.RequestID(), first.HeadersWritten)
+	}
+	if second.RequestID() != "request-two" || second.HeadersWritten {
+		t.Fatalf("second request state = id %q, headers %t", second.RequestID(), second.HeadersWritten)
+	}
+	if sentinel.RequestID() != "" || sentinel.HeadersWritten {
+		t.Fatalf("shared sentinel was mutated: id %q, headers %t", sentinel.RequestID(), sentinel.HeadersWritten)
 	}
 }
 

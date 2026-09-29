@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // Windows does not permit Go's os.Rename to replace an existing destination,
@@ -49,7 +51,7 @@ func (s *Store) installCompactedLog(
 		}
 	}
 
-	if err := os.Rename(paths.canonical, paths.backup); err != nil {
+	if err := safepath.RenameRegularFile(paths.canonical, paths.backup); err != nil {
 		reopened, reopenErr := openExistingAppendLog(paths.canonical)
 		cleanupErr := removeClosedCompact(paths)
 		return compactionInstallResult{
@@ -66,7 +68,7 @@ func (s *Store) installCompactedLog(
 	}
 	s.reachCompactionPhase(compactionPhaseCanonicalBackedUp)
 
-	if err := os.Rename(paths.compact, paths.canonical); err != nil {
+	if err := safepath.RenameRegularFile(paths.compact, paths.canonical); err != nil {
 		return s.rollbackWindowsCompaction(paths, fmt.Errorf("promote compact log: %w", err))
 	}
 	s.reachCompactionPhase(compactionPhaseCanonicalReplaced)
@@ -98,7 +100,7 @@ func (s *Store) installCompactedLog(
 		)
 	}
 
-	removeErr := os.Remove(paths.backup)
+	removeErr := safepath.RemoveRegularFile(paths.backup)
 	var cleanupSyncErr error
 	if removeErr == nil {
 		cleanupSyncErr = syncParentDirectory(paths.parent)
@@ -118,7 +120,7 @@ func (s *Store) installCompactedLog(
 }
 
 func (s *Store) rollbackWindowsCompaction(paths compactionPaths, cause error) compactionInstallResult {
-	rollbackErr := os.Rename(paths.backup, paths.canonical)
+	rollbackErr := safepath.RenameRegularFile(paths.backup, paths.canonical)
 	var syncErr error
 	if rollbackErr == nil {
 		syncErr = syncParentDirectory(paths.parent)
@@ -138,7 +140,7 @@ func (s *Store) rollbackWindowsCompaction(paths compactionPaths, cause error) co
 }
 
 func (s *Store) rollbackWindowsPromotedLog(paths compactionPaths, cause error) compactionInstallResult {
-	moveNewErr := os.Rename(paths.canonical, paths.compact)
+	moveNewErr := safepath.RenameRegularFile(paths.canonical, paths.compact)
 	if moveNewErr != nil {
 		// The promoted compact generation is still canonical. If it can be
 		// reopened, its index must be published despite the rollback failure;
@@ -169,7 +171,7 @@ func (s *Store) rollbackWindowsPromotedLog(paths compactionPaths, cause error) c
 
 	var restoreErr error
 	var syncErr error
-	restoreErr = os.Rename(paths.backup, paths.canonical)
+	restoreErr = safepath.RenameRegularFile(paths.backup, paths.canonical)
 	if restoreErr == nil {
 		syncErr = syncParentDirectory(paths.parent)
 	}
@@ -191,7 +193,7 @@ func (s *Store) rollbackWindowsPromotedLog(paths compactionPaths, cause error) c
 }
 
 func removeClosedCompact(paths compactionPaths) error {
-	removeErr := os.Remove(paths.compact)
+	removeErr := safepath.RemoveRegularFile(paths.compact)
 	if errors.Is(removeErr, os.ErrNotExist) {
 		removeErr = nil
 	}

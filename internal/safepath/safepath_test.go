@@ -1,6 +1,7 @@
 package safepath
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -487,6 +488,69 @@ func TestSymlinkRejectsOutsideParent(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(outside, "episode.mkv")); !os.IsNotExist(err) {
 		t.Fatalf("outside link was created: %v", err)
+	}
+}
+
+func TestRegularFileOperationsStayPinnedToParent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	if err := AtomicWriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("first atomic write: %v", err)
+	}
+	if err := AtomicWriteFile(path, []byte("second"), 0o600); err != nil {
+		t.Fatalf("replacement atomic write: %v", err)
+	}
+	data, err := ReadRegularFile(path, 16)
+	if err != nil {
+		t.Fatalf("read regular file: %v", err)
+	}
+	if string(data) != "second" {
+		t.Fatalf("contents = %q, want second", data)
+	}
+	if _, err := ReadRegularFile(path, 3); err == nil {
+		t.Fatal("bounded read accepted an oversized file")
+	}
+
+	renamed := filepath.Join(root, "auth.json")
+	if err := RenameRegularFile(path, renamed); err != nil {
+		t.Fatalf("rename regular file: %v", err)
+	}
+	if err := RemoveRegularFile(renamed); err != nil {
+		t.Fatalf("remove regular file: %v", err)
+	}
+}
+
+func TestRegularFileOperationsRejectSymlinksAndCrossParentRename(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "config.json")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := ReadRegularFile(link, 32); err == nil {
+		t.Fatal("regular file read followed a symlink")
+	}
+	if err := RemoveRegularFile(link); err == nil {
+		t.Fatal("regular file removal accepted a symlink")
+	}
+
+	source := filepath.Join(root, "source.json")
+	if err := os.WriteFile(source, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenameRegularFile(source, filepath.Join(t.TempDir(), "destination.json")); err == nil {
+		t.Fatal("regular file rename crossed parent directories")
+	}
+}
+
+func TestReadRegularFilePreservesNotExistAcrossMissingParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "removed", "config.json")
+	_, err := ReadRegularFile(path, 32)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file error = %v, want os.ErrNotExist", err)
 	}
 }
 

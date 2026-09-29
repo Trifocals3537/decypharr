@@ -157,7 +157,7 @@ func Update(edit func(*Config) error) (UpdateResult, error) {
 	var previousAuth []byte
 	previousAuthExists := false
 	if authChanged {
-		previousAuth, err = os.ReadFile(draft.AuthFile())
+		previousAuth, err = safepath.ReadRegularFile(draft.AuthFile(), maxConfigurationFileBytes)
 		switch {
 		case err == nil:
 			previousAuthExists = true
@@ -212,10 +212,10 @@ func restoreAuthFile(path string, data []byte, existed bool) error {
 	if existed {
 		return persistAuth(path, data)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := safepath.RemoveRegularFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	return safepath.SyncDirectory(filepath.Dir(path))
 }
 
 // Reset clears only the in-memory snapshot. The next Get reloads the desired

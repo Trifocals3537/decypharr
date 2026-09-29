@@ -19,6 +19,8 @@ import (
 	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
+const maxConfigurationFileBytes = 4 << 20
+
 type (
 	WebDavFolderNaming string
 	MountType          string
@@ -306,11 +308,11 @@ func (c *Config) loadConfig() error {
 	// Load the config file
 	// Read the JSON config file directly
 	configFile := c.JsonFile()
-	fmt.Printf("Loading config from %s\n", configFile)
-	data, err := os.ReadFile(configFile)
+	fmt.Println("Loading configuration")
+	data, err := safepath.ReadRegularFile(configFile, maxConfigurationFileBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Printf("Config file not found, creating a new one at %s\n", configFile)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Println("Configuration file not found; creating a default configuration")
 			// Create a default config file if it doesn't exist
 			if err := c.createConfig(); err != nil {
 				return fmt.Errorf("failed to create config file: %w", err)
@@ -327,7 +329,7 @@ func (c *Config) loadConfig() error {
 		}
 		return fmt.Errorf("error reading config file: %w", err)
 	}
-	if err := os.Chmod(configFile, privateFileMode); err != nil {
+	if err := safepath.ChmodRegularFile(configFile, privateFileMode); err != nil {
 		return fmt.Errorf("secure config file permissions: %w", err)
 	}
 
@@ -365,7 +367,7 @@ func LoadForValidation(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid configuration root: %w", err)
 	}
 	configFile := filepath.Join(path, "config.json")
-	data, err := os.ReadFile(configFile)
+	data, err := safepath.ReadRegularFile(configFile, maxConfigurationFileBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %s: %w", configFile, err)
 	}
@@ -507,7 +509,7 @@ func (c *Config) loadAuth() (*Auth, error) {
 	}
 
 	authFile := c.AuthFile()
-	data, err := os.ReadFile(authFile)
+	data, err := safepath.ReadRegularFile(authFile, maxConfigurationFileBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			c.Auth = &Auth{}
@@ -515,7 +517,7 @@ func (c *Config) loadAuth() (*Auth, error) {
 		}
 		return nil, fmt.Errorf("read auth config %s: %w", authFile, err)
 	}
-	if err := os.Chmod(authFile, privateFileMode); err != nil {
+	if err := safepath.ChmodRegularFile(authFile, privateFileMode); err != nil {
 		return nil, fmt.Errorf("secure auth config permissions: %w", err)
 	}
 

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -105,7 +104,8 @@ func (s *Strm) ensureRoot(cfg *config.Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(root, 0755); err != nil {
+	root, err = safepath.EnsureRoot(root, 0755)
+	if err != nil {
 		return "", fmt.Errorf("create STRM root: %w", err)
 	}
 	if err := safepath.RejectSymlinks(root); err != nil {
@@ -738,26 +738,7 @@ func removeStrmMarkers(root, dir string, names []string) error {
 }
 
 func readRegularFile(path string, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("refusing non-regular file %q", path)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("file %q exceeds %d bytes", path, limit)
-	}
-	return data, nil
+	return safepath.ReadRegularFile(path, limit)
 }
 
 func atomicWrite(root, target string, content []byte) error {
@@ -814,7 +795,7 @@ func pruneEmptyStrmDirs(root, dir string) {
 		if _, err := safepath.ValidateUnderRoot(root, dir); err != nil {
 			return
 		}
-		if err := os.Remove(dir); err != nil {
+		if err := safepath.Remove(root, dir); err != nil {
 			return
 		}
 	}

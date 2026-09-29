@@ -30,10 +30,22 @@ func (e *Error) RequestID() string {
 	return e.requestID
 }
 
+// Clone returns an independent copy that may safely carry request-local
+// response state. Package-level sentinel errors are shared between requests,
+// so callers must clone them before changing HeadersWritten, requestID, or
+// retry classification.
+func (e *Error) Clone() *Error {
+	if e == nil {
+		return nil
+	}
+	clone := *e
+	return &clone
+}
+
 // WithRequestID attaches stream correlation without exposing or rewriting the
 // wrapped provider error.
 func (e *Error) WithRequestID(id string) *Error {
-	if e != nil && e.requestID == "" {
+	if e != nil {
 		e.requestID = id
 	}
 	return e

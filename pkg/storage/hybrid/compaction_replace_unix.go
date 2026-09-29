@@ -5,7 +5,8 @@ package hybrid
 import (
 	"errors"
 	"fmt"
-	"os"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 // installCompactedLog atomically replaces the canonical directory entry on
@@ -24,7 +25,7 @@ func (s *Store) installCompactedLog(
 		}
 	}
 
-	if err := os.Rename(paths.compact, paths.canonical); err != nil {
+	if err := safepath.RenameRegularFile(paths.compact, paths.canonical); err != nil {
 		cleanupErr := cleanupUncommittedCompact(newLog, paths)
 		return compactionInstallResult{
 			log: oldLog,
@@ -53,11 +54,7 @@ func (s *Store) installCompactedLog(
 }
 
 func syncParentDirectory(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	return errors.Join(dir.Sync(), dir.Close())
+	return safepath.SyncDirectory(path)
 }
 
 func wrapCompactionError(operation string, err error) error {

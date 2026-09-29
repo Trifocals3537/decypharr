@@ -16,9 +16,10 @@ func normalizeStreamError(err error, headersWritten bool) *customerror.Error {
 	}
 	var existing *customerror.Error
 	if errors.As(err, &existing) {
-		existing.HeadersWritten = headersWritten
-		existing.WithRequestID(requestID)
-		return existing
+		requestError := existing.Clone()
+		requestError.HeadersWritten = headersWritten
+		requestError.WithRequestID(requestID)
+		return requestError
 	}
 
 	status, retryable := manager.StreamErrorHTTPStatus(err)

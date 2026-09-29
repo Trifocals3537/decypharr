@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 )
 
 const (
@@ -29,10 +31,10 @@ func persistConfig(path string, data []byte) error {
 	persistenceMu.Lock()
 	defer persistenceMu.Unlock()
 
-	current, err := os.ReadFile(path)
+	current, err := safepath.ReadRegularFile(path, maxConfigurationFileBytes)
 	switch {
 	case err == nil && bytes.Equal(current, data):
-		if err := os.Chmod(path, privateFileMode); err != nil {
+		if err := safepath.ChmodRegularFile(path, privateFileMode); err != nil {
 			return fmt.Errorf("secure config permissions: %w", err)
 		}
 		return nil
@@ -66,10 +68,15 @@ func persistAuth(path string, data []byte) error {
 
 func writeConfigBackup(configPath string, data []byte) error {
 	backupDir := filepath.Join(filepath.Dir(configPath), "backups")
-	if err := os.MkdirAll(backupDir, privateDirMode); err != nil {
+	if _, err := safepath.EnsureDir(filepath.Dir(configPath), backupDir, privateDirMode); err != nil {
 		return err
 	}
-	if err := os.Chmod(backupDir, privateDirMode); err != nil {
+	backupRoot, _, err := safepath.OpenRoot(backupDir)
+	if err != nil {
+		return err
+	}
+	defer backupRoot.Close()
+	if err := backupRoot.Chmod(".", privateDirMode); err != nil {
 		return err
 	}
 
@@ -86,9 +93,19 @@ func writeConfigBackup(configPath string, data []byte) error {
 }
 
 func pruneConfigBackups(backupDir string) error {
-	entries, err := os.ReadDir(backupDir)
+	rooted, _, err := safepath.OpenRoot(backupDir)
 	if err != nil {
 		return err
+	}
+	directory, err := rooted.Open(".")
+	if err != nil {
+		_ = rooted.Close()
+		return err
+	}
+	entries, err := directory.ReadDir(-1)
+	closeErr := errors.Join(directory.Close(), rooted.Close())
+	if err != nil || closeErr != nil {
+		return errors.Join(err, closeErr)
 	}
 
 	names := make([]string, 0, len(entries))
@@ -108,45 +125,16 @@ func pruneConfigBackups(backupDir string) error {
 	}
 
 	for _, name := range names[:len(names)-maxConfigBackups] {
-		if err := os.Remove(filepath.Join(backupDir, name)); err != nil {
+		if err := safepath.RemoveRegularFile(filepath.Join(backupDir, name)); err != nil {
 			return err
 		}
 	}
-	return syncDirectory(backupDir)
+	return safepath.SyncDirectory(backupDir)
 }
 
-func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, privateDirMode); err != nil {
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	if _, err := safepath.EnsureRoot(filepath.Dir(path), privateDirMode); err != nil {
 		return err
 	}
-
-	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer func() {
-		_ = temp.Close()
-		if err != nil {
-			_ = os.Remove(tempPath)
-		}
-	}()
-
-	if err = temp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err = temp.Write(data); err != nil {
-		return err
-	}
-	if err = temp.Sync(); err != nil {
-		return err
-	}
-	if err = temp.Close(); err != nil {
-		return err
-	}
-	if err = replaceFile(tempPath, path); err != nil {
-		return err
-	}
-	return syncDirectory(dir)
+	return safepath.AtomicWriteFile(path, data, mode)
 }

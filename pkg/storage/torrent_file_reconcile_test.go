@@ -462,6 +462,34 @@ func TestAddTorrentProviderDoesNotMatchNestedPathsByBasenameAlone(t *testing.T) 
 	}
 }
 
+func TestUpdateTorrentProviderPreservesCanonicalDeletionState(t *testing.T) {
+	entry := &Entry{
+		InfoHash: "same-hash",
+		Files: map[string]*File{
+			"Episode.mkv": {Name: "Episode.mkv", Path: "Episode.mkv", Size: 123, Deleted: true},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"Episode.mkv": {Id: "stable", Path: "Episode.mkv"},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "stable", Path: "Episode.mkv", Size: 123,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{
+		Debrid: "primary", Files: remoteFiles,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if file := entry.Files["Episode.mkv"]; file == nil || !file.Deleted {
+		t.Fatalf("provider refresh revived locally deleted canonical file: %#v", file)
+	}
+}
+
 func TestAddTorrentProviderRejectsLogicalKeyMatchWithContradictorySize(t *testing.T) {
 	entry := &Entry{
 		Files: map[string]*File{"Episode.mkv": {Name: "Episode.mkv", Path: "Season 01/Episode.mkv", Size: 123}},

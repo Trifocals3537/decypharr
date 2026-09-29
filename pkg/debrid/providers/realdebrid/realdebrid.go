@@ -348,8 +348,7 @@ func (r *RealDebrid) getSelectedFiles(t *types.Torrent, data torrentInfo) (map[s
 	return types.FilesByLogicalName(selectedFiles)
 }
 
-func (r *RealDebrid) handleRarFallback(t *types.Torrent, data torrentInfo) map[string]types.File {
-	files := make(map[string]types.File)
+func (r *RealDebrid) handleRarFallback(t *types.Torrent, data torrentInfo) (map[string]types.File, error) {
 	file := types.File{
 		TorrentId: t.Id,
 		Id:        "0",
@@ -361,8 +360,7 @@ func (r *RealDebrid) handleRarFallback(t *types.Torrent, data torrentInfo) map[s
 		Link:      data.Links[0],
 		Generated: time.Now(),
 	}
-	files[file.Name] = file
-	return files
+	return types.FilesByLogicalName([]types.File{file})
 }
 
 type rarPathIndexNode struct {
@@ -534,7 +532,7 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 
 	if !r.config.UnpackRar {
 		r.logger.Debug().Msgf("RAR file detected, but unpacking is disabled: %s. Falling back to single file representation.", t.Name)
-		return r.handleRarFallback(t, data), nil
+		return r.handleRarFallback(t, data)
 	}
 
 	r.logger.Info().Msgf("RAR file detected, unpacking: %s", t.Name)
@@ -543,7 +541,7 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 
 	if err != nil {
 		r.logger.Debug().Err(err).Msgf("Error getting download link for RAR file: %s. Falling back to single file representation.", t.Name)
-		return r.handleRarFallback(t, data), nil
+		return r.handleRarFallback(t, data)
 	}
 
 	dlLink := downloadLinkObj.DownloadLink
@@ -551,21 +549,21 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 
 	if err != nil {
 		r.logger.Debug().Err(err).Msgf("Error creating RAR reader for %s. Falling back to single file representation.", t.Name)
-		return r.handleRarFallback(t, data), nil
+		return r.handleRarFallback(t, data)
 	}
 
 	rarFiles, err := reader.GetFiles()
 
 	if err != nil {
 		r.logger.Debug().Err(err).Msgf("Error reading RAR files for %s. Falling back to single file representation.", t.Name)
-		return r.handleRarFallback(t, data), nil
+		return r.handleRarFallback(t, data)
 	}
 
 	files, err := mapStoredRARFiles(selectedFiles, rarFiles, data.Links[0], time.Now())
 	if err != nil {
 		r.logger.Warn().Err(err).
 			Msgf("RAR archive is not directly streamable: %s. Falling back to single file representation.", t.Name)
-		return r.handleRarFallback(t, data), nil
+		return r.handleRarFallback(t, data)
 	}
 	r.logger.Info().Msgf("Unpacked RAR archive for torrent: %s with %d files", t.Name, len(files))
 	return files, nil

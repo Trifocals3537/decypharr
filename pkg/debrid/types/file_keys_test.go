@@ -182,6 +182,31 @@ func TestFilesByLogicalNameKeepsPortableFoldedDirectoriesDistinct(t *testing.T) 
 	}
 }
 
+func TestFilesByLogicalNameHashesEveryFoldedDirectoryCollisionMember(t *testing.T) {
+	initial, err := FilesByLogicalName([]File{{
+		Id: "lower", Path: "a/movie.mkv/extra.srt",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialRoot := strings.Split(fileByProviderID(t, initial, "lower").OutputPath, "/")[0]
+	expanded, err := FilesByLogicalName([]File{
+		{Id: "lower", Path: "a/movie.mkv/extra.srt"},
+		{Id: "upper", Path: "A/movie.mkv"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerRoot := strings.Split(fileByProviderID(t, expanded, "lower").OutputPath, "/")[0]
+	upperRoot := strings.Split(fileByProviderID(t, expanded, "upper").OutputPath, "/")[0]
+	if lowerRoot == initialRoot || upperRoot == initialRoot {
+		t.Fatalf("folded collision retained a literal winner: initial=%q lower=%q upper=%q", initialRoot, lowerRoot, upperRoot)
+	}
+	if portableProviderPathKey(lowerRoot) == portableProviderPathKey(upperRoot) {
+		t.Fatalf("folded collision members share an output root: lower=%q upper=%q", lowerRoot, upperRoot)
+	}
+}
+
 func TestFilesByLogicalNameDisambiguatesOwnershipArtifactNames(t *testing.T) {
 	files, err := FilesByLogicalName([]File{
 		{Id: "marker", Path: ".tessarr-torrent-owner-v1"},

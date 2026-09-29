@@ -640,7 +640,6 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 			file.Size = remoteFile.Size
 			file.ByteRange = remoteFile.ByteRange
 		}
-		file.Deleted = remoteFile.Deleted
 		file.InfoHash = e.InfoHash
 		if file.AddedOn.IsZero() {
 			file.AddedOn = e.AddedOn

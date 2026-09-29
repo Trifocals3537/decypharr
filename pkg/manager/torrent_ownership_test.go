@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -249,6 +250,45 @@ func TestTorrentFileLayoutsRejectTraversalAliasesAndAmbiguousBasenames(t *testin
 				t.Fatal("unsafe torrent layout was accepted")
 			}
 		})
+	}
+}
+
+func TestTorrentFileLayoutsAcceptFoldCollisionAddedAfterMaterialization(t *testing.T) {
+	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "lower", Path: "a/movie.mkv/extra.srt", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := torrentOwnershipTestEntry(t.TempDir(), "folded-refresh", config.DownloadActionSymlink)
+	entry.CompletedAt = &completed
+	entry.Files = make(map[string]*storage.File)
+	entry.Providers = map[string]*storage.ProviderEntry{
+		"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+	}
+	for name, file := range initial {
+		entry.Files[name] = &storage.File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: file.Id, Path: file.Path}
+	}
+	expanded, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "lower", Path: "a/movie.mkv/extra.srt", Size: 1},
+		{Id: "upper", Path: "A/movie.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{
+		Debrid: "primary", Status: debridTypes.TorrentStatusDownloaded, Files: expanded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	layouts, err := torrentEntryFileLayouts(entry)
+	if err != nil {
+		t.Fatalf("folded-directory refresh produced an invalid materialized layout: %v", err)
+	}
+	if len(layouts) != 2 {
+		t.Fatalf("folded-directory refresh layouts = %#v", layouts)
 	}
 }
 

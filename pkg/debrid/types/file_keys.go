@@ -289,6 +289,7 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 		sort.Strings(groupKeys)
 		reservedPrefixes := make(map[string]string, len(groups))
 		needsGeneratedName := make(map[string]bool, len(groups))
+		groupsByPortablePrefix := make(map[string][]string, len(groups))
 		// Reserve every literal sibling before allocating generated names. This
 		// prevents a lossy directory's hash-derived candidate from taking a
 		// provider-supplied directory name that merely looks generated.
@@ -297,16 +298,31 @@ func assignProviderOutputPaths(candidates []providerFileCandidate) error {
 			representative := &candidates[group.members[0]]
 			prefix := strings.Join(representative.outputParts[:depth+1], "/")
 			prefixKey := portableProviderPathKey(prefix)
+			groupsByPortablePrefix[prefixKey] = append(groupsByPortablePrefix[prefixKey], groupKey)
 			_, fileConflict := fileKeys[prefixKey]
 			if group.lossy || fileConflict {
 				needsGeneratedName[groupKey] = true
+			}
+		}
+		// If multiple provider directories fold to the same portable prefix,
+		// generate a stable identity-derived name for every participant. Leaving
+		// one literal would make the winner depend on which sibling is present.
+		for _, groupKeys := range groupsByPortablePrefix {
+			if len(groupKeys) < 2 {
 				continue
 			}
-			if owner, exists := reservedPrefixes[prefixKey]; exists && owner != group.providerKey {
+			for _, groupKey := range groupKeys {
 				needsGeneratedName[groupKey] = true
+			}
+		}
+		for _, groupKey := range groupKeys {
+			if needsGeneratedName[groupKey] {
 				continue
 			}
-			reservedPrefixes[prefixKey] = group.providerKey
+			group := groups[groupKey]
+			representative := &candidates[group.members[0]]
+			prefix := strings.Join(representative.outputParts[:depth+1], "/")
+			reservedPrefixes[portableProviderPathKey(prefix)] = group.providerKey
 		}
 		for _, groupKey := range groupKeys {
 			if !needsGeneratedName[groupKey] {

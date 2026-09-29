@@ -20,6 +20,28 @@ func storedRARFile(path string, offset, size int64) *rar.File {
 	}
 }
 
+func TestHandleRarFallbackPlansPortableOutputPath(t *testing.T) {
+	provider := &RealDebrid{}
+	files, err := provider.handleRarFallback(
+		&types.Torrent{Id: "torrent", Name: "Movie: Part?"},
+		torrentInfo{Bytes: 123, Links: []string{"restricted"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("fallback files = %#v", files)
+	}
+	for _, file := range files {
+		if file.Path != "Movie: Part?.rar" || file.OutputPath == "" || file.OutputPath == file.Path {
+			t.Fatalf("fallback path planning = %#v", file)
+		}
+		if !strings.HasSuffix(file.OutputPath, ".rar") {
+			t.Fatalf("fallback extension was not preserved: %q", file.OutputPath)
+		}
+	}
+}
+
 func TestMapStoredRARFilesUsesValidatedArchiveMetadata(t *testing.T) {
 	generated := time.Unix(100, 0)
 	selected := []types.File{{

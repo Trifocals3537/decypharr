@@ -60,13 +60,19 @@ func pathsForCompaction(path string) (compactionPaths, error) {
 	if err != nil {
 		return compactionPaths{}, fmt.Errorf("resolve append log directory links: %w", err)
 	}
-	parentInfo, err := os.Stat(parent)
+	parentRoot, validatedParent, err := safepath.OpenRoot(parent)
 	if err != nil {
-		return compactionPaths{}, fmt.Errorf("inspect append log directory: %w", err)
+		return compactionPaths{}, fmt.Errorf("pin append log directory: %w", err)
+	}
+	parentInfo, statErr := parentRoot.Stat(".")
+	closeErr := parentRoot.Close()
+	if statErr != nil || closeErr != nil {
+		return compactionPaths{}, fmt.Errorf("inspect append log directory: %w", errors.Join(statErr, closeErr))
 	}
 	if !parentInfo.IsDir() {
-		return compactionPaths{}, fmt.Errorf("append log parent is not a directory: %s", parent)
+		return compactionPaths{}, fmt.Errorf("append log parent is not a directory")
 	}
+	parent = validatedParent
 	absolute = filepath.Join(parent, base)
 
 	return compactionPaths{

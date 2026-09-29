@@ -779,10 +779,7 @@ func matchProviderFilePath(
 		return matches[0], true, nil
 	}
 
-	keys := []string{key}
-	if rootless := providerPathWithoutFirstComponent(key); rootless != "" {
-		keys = append(keys, rootless)
-	}
+	keys := providerPathSuffixes(key)
 	for _, candidateKey := range keys {
 		matches := rootIndependentPathIndex[candidateKey]
 		if len(matches) == 0 {
@@ -806,9 +803,8 @@ func matchProviderFilePath(
 }
 
 func indexProviderPathVariants(index map[string][]string, key, name string) {
-	addProviderPathIndex(index, key, name)
-	if rootless := providerPathWithoutFirstComponent(key); rootless != "" {
-		addProviderPathIndex(index, rootless, name)
+	for _, suffix := range providerPathSuffixes(key) {
+		addProviderPathIndex(index, suffix, name)
 	}
 }
 
@@ -821,12 +817,16 @@ func addProviderPathIndex(index map[string][]string, key, name string) {
 	index[key] = append(index[key], name)
 }
 
-func providerPathWithoutFirstComponent(value string) string {
-	_, remainder, found := strings.Cut(value, "/")
-	if !found || remainder == "" {
-		return ""
+func providerPathSuffixes(value string) []string {
+	parts := strings.Split(value, "/")
+	suffixes := make([]string, 0, len(parts))
+	for index := range parts {
+		suffix := strings.Join(parts[index:], "/")
+		if suffix != "" && suffix != "." {
+			suffixes = append(suffixes, suffix)
+		}
 	}
-	return remainder
+	return suffixes
 }
 
 func providerPathIdentity(value string) string {

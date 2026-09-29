@@ -362,10 +362,10 @@ func TestAddTorrentProviderReconcilesUniqueLogicalKeyAcrossReleaseRoots(t *testi
 	}
 }
 
-func TestAddTorrentProviderReconcilesDuplicateBasenamesAcrossReleaseRoots(t *testing.T) {
+func TestAddTorrentProviderReconcilesDuplicateBasenamesAcrossNestedReleaseRoots(t *testing.T) {
 	sourceFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
-		{Id: "primary-one", Path: "Release/Season 01/Episode.mkv", Size: 11},
-		{Id: "primary-two", Path: "Release/Season 02/Episode.mkv", Size: 12},
+		{Id: "primary-one", Path: "downloads/Old Release/Season 01/Episode.mkv", Size: 11},
+		{Id: "primary-two", Path: "downloads/Old Release/Season 02/Episode.mkv", Size: 12},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -408,13 +408,13 @@ func TestAddTorrentProviderReconcilesDuplicateBasenamesAcrossReleaseRoots(t *tes
 func TestAddTorrentProviderRejectsAmbiguousDuplicatePathAcrossReleaseRoots(t *testing.T) {
 	entry := &Entry{
 		Files: map[string]*File{
-			"Old Release/Season 01/Episode.mkv": {
-				Name: "Old Release/Season 01/Episode.mkv", Path: "Old Release/Season 01/Episode.mkv", Size: 123,
+			"downloads/Old Release/Season 01/Episode.mkv": {
+				Name: "downloads/Old Release/Season 01/Episode.mkv", Path: "downloads/Old Release/Season 01/Episode.mkv", Size: 123,
 			},
 		},
 		Providers: map[string]*ProviderEntry{
 			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
-				"Old Release/Season 01/Episode.mkv": {Path: "Old Release/Season 01/Episode.mkv"},
+				"downloads/Old Release/Season 01/Episode.mkv": {Path: "downloads/Old Release/Season 01/Episode.mkv"},
 			}},
 		},
 	}

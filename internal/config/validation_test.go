@@ -162,6 +162,23 @@ func TestSetDefaultsPreservesExplicitBindAddress(t *testing.T) {
 	}
 }
 
+func TestContainerRemoteDefaultsProtectWebDAV(t *testing.T) {
+	t.Setenv("TESSARR_BIND_ADDRESS", "0.0.0.0")
+	t.Setenv("TESSARR_ENABLE_WEBDAV_AUTH", "true")
+
+	cfg := &Config{UseAuth: true}
+	cfg.applyEnvOverrides()
+	if cfg.BindAddress != "0.0.0.0" {
+		t.Fatalf("BindAddress = %q, want container listener", cfg.BindAddress)
+	}
+	if !cfg.EnableWebdavAuth {
+		t.Fatal("container environment did not protect WebDAV")
+	}
+	if err := cfg.ValidateDeployment(); err != nil {
+		t.Fatalf("container defaults failed deployment validation: %v", err)
+	}
+}
+
 func TestValidateLogLevel(t *testing.T) {
 	base := Config{
 		Debrids:        []Debrid{{Name: "primary", Provider: "realdebrid", APIKey: "test-key"}},

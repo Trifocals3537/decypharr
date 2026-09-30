@@ -44,6 +44,11 @@ func TestReconcileCompletedTorrentEntryBeforeMergePreservesCanonicalIdentity(t *
 	}); err != nil {
 		t.Fatal(err)
 	}
+	queuedAt := completed.Add(-time.Hour)
+	incomingPlacement := incoming.GetActiveProvider()
+	incomingPlacement.AddedAt = queuedAt
+	incomingPlacement.Progress = 1.0
+	incomingPlacement.DownloadedAt = &completed
 	for name, remote := range remoteFiles {
 		incoming.Files[name] = newCanonicalTorrentFile(incoming, remote)
 	}
@@ -59,6 +64,11 @@ func TestReconcileCompletedTorrentEntryBeforeMergePreservesCanonicalIdentity(t *
 	}
 	if merged.Providers["primary"].Files[legacyName] == nil {
 		t.Fatalf("completed placement did not reconcile to legacy key: %#v", merged.Providers["primary"].Files)
+	}
+	placement := merged.Providers["primary"]
+	if !placement.AddedAt.Equal(queuedAt) || placement.Progress != 1.0 ||
+		placement.DownloadedAt == nil || !placement.DownloadedAt.Equal(completed) {
+		t.Fatalf("completed queue transfer metadata was lost: %#v", placement)
 	}
 }
 

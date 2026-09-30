@@ -105,9 +105,7 @@ func materializedTorrentRelativePath(entry *Entry, raw string) string {
 // the interpretation of an already materialized output tree. New files can be
 // given pinned local paths, but existing files must retain their old paths.
 func (entry *Entry) CanApplyTorrentTitle(remote *debridTypes.Torrent) bool {
-	if entry == nil || remote == nil ||
-		(entry.SavePath == "" && entry.CompletedAt == nil && !entry.IsDownloading && entry.SizeDownloaded == 0) ||
-		!torrentArtifactsMayExist(entry) {
+	if entry == nil || remote == nil || !torrentArtifactsMayExist(entry) {
 		return true
 	}
 	projected := *entry

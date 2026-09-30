@@ -437,6 +437,45 @@ func TestMaterializedOutputKeepsWebDAVFolderAcrossProviderRename(t *testing.T) {
 	}
 }
 
+func TestLegacyUnknownSavePathKeepsTitleAcrossProviderRename(t *testing.T) {
+	for _, tc := range []struct{ name, savePath string }{
+		{name: "empty"},
+		{name: "relative", savePath: "relative-legacy-root"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := &storage.Entry{
+				Protocol: config.ProtocolTorrent, InfoHash: "legacy-title", Name: "Old",
+				OriginalFilename: "Old Original", SavePath: tc.savePath,
+				ActiveProvider: "primary",
+				Files: map[string]*storage.File{
+					"movie.mkv": {Name: "movie.mkv", Path: "Release/movie.mkv", Size: 1},
+				},
+				Providers: map[string]*storage.ProviderEntry{
+					"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+						"movie.mkv": {Id: "existing", Path: "Release/movie.mkv"},
+					}},
+				},
+			}
+			remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+				Id: "existing", Path: "Release/movie.mkv", Size: 1,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applyDebridTorrentState(entry, &debridTypes.Torrent{
+				Id: "transfer", Debrid: "primary", Name: "Release",
+				OriginalFilename: "Release Original", Files: remoteFiles,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if entry.Name != "Old" || entry.OriginalFilename != "Old Original" ||
+				entry.Files["movie.mkv"].Path != "Release/movie.mkv" {
+				t.Fatalf("unknown-root legacy identity changed: %#v", entry)
+			}
+		})
+	}
+}
+
 func TestMaterializedDirectoryOwnerIsNotMergedWithLiteralGeneratedName(t *testing.T) {
 	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
 		Id: "old", Path: "A?/old.mkv", Size: 1,

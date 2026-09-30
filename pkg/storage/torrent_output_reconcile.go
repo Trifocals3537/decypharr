@@ -20,6 +20,7 @@ type torrentOutputNamespace struct {
 	entry        *Entry
 	files        map[string]string
 	directories  map[string]string
+	dirOwners    map[string]string
 	logicalNames map[string]string
 }
 
@@ -35,12 +36,14 @@ func reserveMaterializedTorrentOutputPaths(
 	canonical map[string]*File,
 	remoteFiles map[string]debridTypes.File,
 	canonicalNames map[string]string,
+	canonicalToRemote map[string]string,
 	unmatchedRemoteNames []string,
 ) error {
 	namespace := torrentOutputNamespace{
 		entry:        entry,
 		files:        make(map[string]string, len(canonical)),
 		directories:  make(map[string]string, len(canonical)),
+		dirOwners:    make(map[string]string, len(canonical)),
 		logicalNames: make(map[string]string, len(canonical)),
 	}
 	for canonicalName, file := range canonical {
@@ -52,7 +55,11 @@ func reserveMaterializedTorrentOutputPaths(
 			localPath = strings.TrimSpace(file.Name)
 		}
 		localPath = materializedTorrentRelativePath(entry, localPath)
-		if err := namespace.reserve(localPath, canonicalName); err != nil {
+		nativePath := ""
+		if remoteName := canonicalToRemote[canonicalName]; remoteName != "" {
+			nativePath = remoteFiles[remoteName].Path
+		}
+		if err := namespace.reserve(localPath, canonicalName, nativePath); err != nil {
 			return fmt.Errorf("reserve canonical torrent file %q: %w", canonicalName, err)
 		}
 	}
@@ -112,12 +119,12 @@ func (namespace *torrentOutputNamespace) resolve(
 	baseParts := append([]string(nil), parts...)
 	attempts := make(map[int]int, len(parts))
 	for {
-		conflictDepth, conflict := namespace.conflictDepth(parts)
+		conflictDepth, conflict := namespace.conflictDepth(parts, file.Path)
 		if !conflict {
 			resolvedPath := strings.Join(parts, "/")
 			file.OutputPath = resolvedPath
 			file.Name = canonicalName
-			if err := namespace.reserve(resolvedPath, canonicalName); err != nil {
+			if err := namespace.reserve(resolvedPath, canonicalName, file.Path); err != nil {
 				return file, "", err
 			}
 			return file, canonicalName, nil
@@ -148,11 +155,17 @@ func (namespace *torrentOutputNamespace) resolve(
 	}
 }
 
-func (namespace *torrentOutputNamespace) conflictDepth(parts []string) (int, bool) {
+func (namespace *torrentOutputNamespace) conflictDepth(parts []string, nativePath string) (int, bool) {
 	for depth := 0; depth < len(parts)-1; depth++ {
 		prefixKey := portableTorrentStoragePathKey(strings.Join(parts[:depth+1], "/"))
 		if _, exists := namespace.files[prefixKey]; exists {
 			return depth, true
+		}
+		if owner, exists := namespace.dirOwners[prefixKey]; exists {
+			incoming := namespace.nativeDirectoryOwner(nativePath, depth, len(parts))
+			if owner == "" || incoming == "" || owner != incoming {
+				return depth, true
+			}
 		}
 	}
 	fileKey := portableTorrentStoragePathKey(strings.Join(parts, "/"))
@@ -165,7 +178,7 @@ func (namespace *torrentOutputNamespace) conflictDepth(parts []string) (int, boo
 	return 0, false
 }
 
-func (namespace *torrentOutputNamespace) reserve(localPath, logicalName string) error {
+func (namespace *torrentOutputNamespace) reserve(localPath, logicalName, nativePath string) error {
 	parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(localPath), `\`, "/"), "/")
 	if len(parts) == 0 || strings.TrimSpace(localPath) == "" || path.Clean(strings.Join(parts, "/")) != strings.Join(parts, "/") {
 		return fmt.Errorf("output path %q is not a clean relative path", localPath)
@@ -189,6 +202,14 @@ func (namespace *torrentOutputNamespace) reserve(localPath, logicalName string) 
 			return fmt.Errorf("output directory %q conflicts with file %q", prefix, previous)
 		}
 		namespace.directories[prefixKey] = localPath
+		owner := namespace.nativeDirectoryOwner(nativePath, depth, len(parts))
+		if previous, exists := namespace.dirOwners[prefixKey]; !exists {
+			namespace.dirOwners[prefixKey] = owner
+		} else if previous != owner {
+			// Existing materialized files are immutable. An ambiguous owner
+			// may remain readable, but no new native directory may join it.
+			namespace.dirOwners[prefixKey] = ""
+		}
 	}
 	logicalKey := portableTorrentStoragePathKey(materializedTorrentRelativePath(namespace.entry, logicalName))
 	if previous, exists := namespace.logicalNames[logicalKey]; exists {
@@ -197,6 +218,15 @@ func (namespace *torrentOutputNamespace) reserve(localPath, logicalName string) 
 	namespace.files[fileKey] = localPath
 	namespace.logicalNames[logicalKey] = logicalName
 	return nil
+}
+
+func (namespace *torrentOutputNamespace) nativeDirectoryOwner(nativePath string, depth, localParts int) string {
+	nativePath = materializedTorrentRelativePath(namespace.entry, nativePath)
+	parts := strings.Split(strings.ReplaceAll(nativePath, `\`, "/"), "/")
+	if nativePath == "" || len(parts) != localParts || depth >= len(parts)-1 {
+		return ""
+	}
+	return path.Clean(strings.Join(parts[:depth+1], "/"))
 }
 
 func disambiguateMaterializedTorrentComponent(

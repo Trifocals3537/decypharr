@@ -772,10 +772,10 @@ func preserveMaterializedTorrentTitle(entry *storage.Entry, remote *debridTypes.
 	}
 	// The provider's current title is not allowed to reinterpret paths already
 	// exposed to an Arr. Keep the existing owned output identity stable.
-	stable := *remote
+	stable := remote.Copy()
 	stable.Name = ""
 	stable.OriginalFilename = ""
-	return &stable
+	return stable
 }
 
 func applyDebridTorrentMetadata(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {

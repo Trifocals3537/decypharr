@@ -591,11 +591,13 @@ func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]s
 		// Manager applies non-empty provider titles after this reconciliation.
 		// Reserve against the identity that the final output layout will see.
 		outputEntry := *e
-		if remote.Name != "" {
-			outputEntry.Name = remote.Name
-		}
-		if remote.OriginalFilename != "" {
-			outputEntry.OriginalFilename = remote.OriginalFilename
+		if e.CanApplyTorrentTitle(remote) {
+			if remote.Name != "" {
+				outputEntry.Name = remote.Name
+			}
+			if remote.OriginalFilename != "" {
+				outputEntry.OriginalFilename = remote.OriginalFilename
+			}
 		}
 		if err := reserveMaterializedTorrentOutputPaths(
 			&outputEntry,

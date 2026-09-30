@@ -101,6 +101,41 @@ func materializedTorrentRelativePath(entry *Entry, raw string) string {
 	return strings.Join(parts[1:], "/")
 }
 
+// CanApplyTorrentTitle keeps mutable provider display metadata from changing
+// the interpretation of an already materialized output tree. New files can be
+// given pinned local paths, but existing files must retain their old paths.
+func (entry *Entry) CanApplyTorrentTitle(remote *debridTypes.Torrent) bool {
+	if entry == nil || remote == nil ||
+		(entry.SavePath == "" && entry.CompletedAt == nil && !entry.IsDownloading && entry.SizeDownloaded == 0) ||
+		!torrentArtifactsMayExist(entry) {
+		return true
+	}
+	projected := *entry
+	if remote.Name != "" {
+		projected.Name = remote.Name
+	}
+	if remote.OriginalFilename != "" {
+		projected.OriginalFilename = remote.OriginalFilename
+	}
+	if entry.OutputComponent() != projected.OutputComponent() {
+		return false
+	}
+	for _, file := range entry.Files {
+		if file == nil {
+			continue
+		}
+		localPath := strings.TrimSpace(file.Path)
+		if localPath == "" {
+			localPath = strings.TrimSpace(file.Name)
+		}
+		if materializedTorrentRelativePath(entry, localPath) != materializedTorrentRelativePath(&projected, localPath) ||
+			materializedTorrentRelativePath(entry, file.Name) != materializedTorrentRelativePath(&projected, file.Name) {
+			return false
+		}
+	}
+	return true
+}
+
 func (namespace *torrentOutputNamespace) resolve(
 	file debridTypes.File,
 	canonicalName string,
@@ -118,8 +153,15 @@ func (namespace *torrentOutputNamespace) resolve(
 
 	baseParts := append([]string(nil), parts...)
 	attempts := make(map[int]int, len(parts))
+	generatedLeaf := false
 	for {
 		conflictDepth, conflict := namespace.conflictDepth(parts, file.Path)
+		if !conflict && generatedLeaf {
+			logicalKey := portableTorrentStoragePathKey(materializedTorrentRelativePath(namespace.entry, canonicalName))
+			if _, occupied := namespace.logicalNames[logicalKey]; occupied {
+				conflictDepth, conflict = len(parts)-1, true
+			}
+		}
 		if !conflict {
 			resolvedPath := strings.Join(parts, "/")
 			file.OutputPath = resolvedPath
@@ -151,6 +193,7 @@ func (namespace *torrentOutputNamespace) resolve(
 		attempts[conflictDepth] = attempt + 1
 		if conflictDepth == len(parts)-1 {
 			canonicalName = generated
+			generatedLeaf = true
 		}
 	}
 }
@@ -221,9 +264,18 @@ func (namespace *torrentOutputNamespace) reserve(localPath, logicalName, nativeP
 }
 
 func (namespace *torrentOutputNamespace) nativeDirectoryOwner(nativePath string, depth, localParts int) string {
-	nativePath = materializedTorrentRelativePath(namespace.entry, nativePath)
-	parts := strings.Split(strings.ReplaceAll(nativePath, `\`, "/"), "/")
-	if nativePath == "" || len(parts) != localParts || depth >= len(parts)-1 {
+	raw := strings.ReplaceAll(nativePath, `\`, "/")
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(materializedTorrentRelativePath(namespace.entry, raw), "/")
+	if len(parts) != localParts {
+		// A lossy native release root can remain as a sanitized local
+		// directory. In that case stripping only the native root loses a
+		// component that still exists in the materialized output layout.
+		parts = strings.Split(raw, "/")
+	}
+	if len(parts) != localParts || depth >= len(parts)-1 {
 		return ""
 	}
 	return path.Clean(strings.Join(parts[:depth+1], "/"))

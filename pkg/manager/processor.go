@@ -740,6 +740,7 @@ func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridType
 }
 
 func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) error {
+	debridTorrent = preserveMaterializedTorrentTitle(torrent, debridTorrent)
 	if _, err := torrent.AddTorrentProvider(debridTorrent); err != nil {
 		return err
 	}
@@ -757,11 +758,24 @@ func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.
 }
 
 func applyIncompleteDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) error {
+	debridTorrent = preserveMaterializedTorrentTitle(torrent, debridTorrent)
 	if _, err := torrent.UpdateTorrentProviderState(debridTorrent); err != nil {
 		return err
 	}
 	applyDebridTorrentMetadata(torrent, debridTorrent)
 	return nil
+}
+
+func preserveMaterializedTorrentTitle(entry *storage.Entry, remote *debridTypes.Torrent) *debridTypes.Torrent {
+	if entry.CanApplyTorrentTitle(remote) {
+		return remote
+	}
+	// The provider's current title is not allowed to reinterpret paths already
+	// exposed to an Arr. Keep the existing owned output identity stable.
+	stable := *remote
+	stable.Name = ""
+	stable.OriginalFilename = ""
+	return &stable
 }
 
 func applyDebridTorrentMetadata(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {

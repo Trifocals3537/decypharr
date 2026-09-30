@@ -352,6 +352,51 @@ func TestAddTorrentProviderDisambiguatesNewFileFromMaterializedDirectory(t *test
 	}
 }
 
+func TestMaterializedOutputRetriesLogicalNameCollision(t *testing.T) {
+	firstGenerated, err := disambiguateMaterializedTorrentComponent("foo", "foo", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := &Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "logical-collision", Name: "Release",
+		OutputName:  NewTorrentOutputName("Release", "logical-collision"),
+		CompletedAt: &completed,
+		Files: map[string]*File{
+			"bar.mkv":      {Name: "bar.mkv", Path: "foo/bar.mkv", Size: 1},
+			firstGenerated: {Name: firstGenerated, Path: "other/" + firstGenerated, Size: 2},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"bar.mkv":      {Id: "old-bar", Path: "foo/bar.mkv"},
+				firstGenerated: {Id: "literal", Path: "other/" + firstGenerated},
+			}},
+		},
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "old-bar", Path: "foo/bar.mkv", Size: 1},
+		{Id: "literal", Path: "other/" + firstGenerated, Size: 2},
+		{Id: "new", Path: "foo", Size: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generatedName string
+	for name, file := range placement.Files {
+		if file != nil && file.Id == "new" {
+			generatedName = name
+		}
+	}
+	if generatedName == "" || generatedName == firstGenerated || entry.Files[generatedName] == nil ||
+		entry.Files[generatedName].Path != generatedName {
+		t.Fatalf("new file did not retry the occupied logical name: generated=%q files=%#v", generatedName, entry.Files)
+	}
+}
+
 func TestMaterializedTorrentParentDisambiguationUsesDirectoryIdentity(t *testing.T) {
 	first, err := disambiguateMaterializedTorrentComponent(
 		"Extras", "Release/Extras/one.mkv", 1, 0,

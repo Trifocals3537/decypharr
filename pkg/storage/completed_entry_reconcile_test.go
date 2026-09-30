@@ -72,6 +72,53 @@ func TestReconcileCompletedTorrentEntryBeforeMergePreservesCanonicalIdentity(t *
 	}
 }
 
+func TestReconcileCompletedTorrentEntryPreservesMaterializedTitleAndPath(t *testing.T) {
+	completed := time.Now()
+	existing := &Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "same-hash", Name: "Old",
+		OriginalFilename: "Old Original",
+		OutputName:       NewTorrentOutputName("Old", "same-hash"),
+		CompletedAt:      &completed,
+		ActiveProvider:   "primary",
+		Files: map[string]*File{
+			"movie.mkv": {Name: "movie.mkv", Path: "Release/movie.mkv", Size: 1},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*ProviderFile{
+				"movie.mkv": {Id: "existing", Path: "Release/movie.mkv"},
+			}},
+		},
+	}
+	beforePath := materializedTorrentRelativePath(existing, existing.Files["movie.mkv"].Path)
+	beforeFolder := GetTorrentFolder(config.WebDavUseFileName, existing)
+	incoming := &Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: existing.InfoHash, Name: "Release",
+		OriginalFilename: "Release Original", ActiveProvider: "primary",
+		Files: map[string]*File{
+			"movie.mkv": {Name: "movie.mkv", Path: "Release/movie.mkv", Size: 1},
+		},
+		Providers: map[string]*ProviderEntry{
+			"primary": {Provider: "primary", ID: "transfer", Status: debridTypes.TorrentStatusDownloaded,
+				Progress: 1.0, DownloadedAt: &completed, Files: map[string]*ProviderFile{
+					"movie.mkv": {Id: "existing", Path: "Release/movie.mkv"},
+				}},
+		},
+	}
+	if err := ReconcileCompletedTorrentEntry(existing, incoming); err != nil {
+		t.Fatal(err)
+	}
+	merged := HandleExistingEntryMerge(existing, incoming)
+	if merged.Name != "Old" || merged.OriginalFilename != "Old Original" {
+		t.Fatalf("completed queue title changed materialized identity: name=%q original=%q", merged.Name, merged.OriginalFilename)
+	}
+	if got := materializedTorrentRelativePath(merged, merged.Files["movie.mkv"].Path); got != beforePath {
+		t.Fatalf("materialized relative path changed from %q to %q", beforePath, got)
+	}
+	if got := GetTorrentFolder(config.WebDavUseFileName, merged); got != beforeFolder {
+		t.Fatalf("WebDAV folder changed from %q to %q", beforeFolder, got)
+	}
+}
+
 func TestReconcileCompletedTorrentEntryMatchesDuplicateFilesAcrossReleaseRoots(t *testing.T) {
 	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
 		{Id: "fallback-one", Path: "Season 01/Episode.mkv", Size: 11, Link: "provider://one"},

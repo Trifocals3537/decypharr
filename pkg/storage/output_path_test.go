@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,5 +125,29 @@ func TestTorrentOutputMergeKeepsExistingPathIncludingLegacy(t *testing.T) {
 	PreserveTorrentOutputPath(providerOnly, incoming)
 	if incoming.SavePath != "new-root" || incoming.OutputName != "new-output" {
 		t.Fatal("provider-only entry without local output erased the admission path")
+	}
+}
+
+func TestTorrentArtifactsMayExistRecognizesWrappedNotFound(t *testing.T) {
+	base := t.TempDir()
+	entry := &Entry{
+		Protocol: config.ProtocolTorrent, Name: "Old.mkv", InfoHash: "missing-root",
+		SavePath:   filepath.Join(base, "missing"),
+		OutputName: NewTorrentOutputName("Old.mkv", "missing-root"),
+	}
+	if torrentArtifactsMayExist(entry) {
+		t.Fatal("a missing output root was treated as materialized")
+	}
+	if err := os.MkdirAll(entry.SavePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if torrentArtifactsMayExist(entry) {
+		t.Fatal("a missing output directory was treated as materialized")
+	}
+	if err := os.MkdirAll(entry.DownloadPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !torrentArtifactsMayExist(entry) {
+		t.Fatal("an existing output directory was not treated as materialized")
 	}
 }

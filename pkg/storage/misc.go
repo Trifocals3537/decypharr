@@ -73,6 +73,11 @@ func ReconcileCompletedTorrentEntry(existing, incoming *Entry) error {
 		Progress:         placement.Progress,
 		Debrid:           placement.Provider,
 	}
+	preserveTitle := !existing.CanApplyTorrentTitle(remote)
+	if preserveTitle {
+		remote.Name = existing.Name
+		remote.OriginalFilename = existing.OriginalFilename
+	}
 	reconciled, err := existing.AddTorrentProvider(remote)
 	if err != nil {
 		return fmt.Errorf("reconcile completed queue placement: %w", err)
@@ -84,6 +89,10 @@ func ReconcileCompletedTorrentEntry(existing, incoming *Entry) error {
 	reconciled.RemovedAt = placement.RemovedAt
 	reconciled.Progress = placement.Progress
 	reconciled.DownloadedAt = placement.DownloadedAt
+	if preserveTitle {
+		incoming.Name = existing.Name
+		incoming.OriginalFilename = existing.OriginalFilename
+	}
 	existing.ActiveProvider = incoming.ActiveProvider
 	incoming.Files = existing.Files
 	incoming.Providers = existing.Providers

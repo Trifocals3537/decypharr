@@ -117,6 +117,12 @@ func (entry *Entry) CanApplyTorrentTitle(remote *debridTypes.Torrent) bool {
 	if remote.OriginalFilename != "" {
 		projected.OriginalFilename = remote.OriginalFilename
 	}
+	// A materialized title can be the WebDAV folder embedded in existing STRM
+	// URLs (or the source folder for symlinks). OutputName only pins local
+	// artifacts, so freeze both title fields after either may be exposed.
+	if entry.Name != projected.Name || entry.OriginalFilename != projected.OriginalFilename {
+		return false
+	}
 	if entry.OutputComponent() != projected.OutputComponent() {
 		return false
 	}

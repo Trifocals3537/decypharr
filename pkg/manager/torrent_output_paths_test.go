@@ -140,7 +140,11 @@ func TestTorrentOutputPathAdmissionKeepsDisplayTitleAndStableProviderIdentity(t 
 		t.Fatal("admission did not preserve title and assign output identity")
 	}
 	outputPath := entry.DownloadPath()
-	if err := applyDebridTorrentState(entry, &debridTypes.Torrent{Id: "provider-id", Debrid: "torbox", Name: "Provider: Renamed", InfoHash: entry.InfoHash}); err != nil {
+	remote := &debridTypes.Torrent{Id: "provider-id", Debrid: "torbox", Name: "Provider: Renamed", InfoHash: entry.InfoHash}
+	if !entry.CanApplyTorrentTitle(remote) {
+		t.Fatalf("newly admitted queue entry cannot accept provider title: save_path=%q completed=%v downloading=%t size_downloaded=%d files=%d", entry.SavePath, entry.CompletedAt, entry.IsDownloading, entry.SizeDownloaded, len(entry.Files))
+	}
+	if err := applyDebridTorrentState(entry, remote); err != nil {
 		t.Fatal(err)
 	}
 	if entry.Name != "Provider: Renamed" || entry.DownloadPath() != outputPath {
@@ -381,6 +385,54 @@ func TestMaterializedOutputReservationPreservesReleaseRootAcrossTitleChange(t *t
 	for _, layout := range layouts {
 		if layout.file == entry.Files["extra.srt"] && layout.relative != oldRelative {
 			t.Fatalf("materialized path moved from %q to %q", oldRelative, layout.relative)
+		}
+	}
+}
+
+func TestMaterializedOutputKeepsWebDAVFolderAcrossProviderRename(t *testing.T) {
+	completed := time.Now()
+	entry := &storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "strm-title", Name: "Old.mkv",
+		OriginalFilename: "Original.mkv",
+		OutputName:       storage.NewTorrentOutputName("Old.mkv", "strm-title"),
+		CompletedAt:      &completed,
+		ActiveProvider:   "primary",
+		Files: map[string]*storage.File{
+			"movie.mkv": {Name: "movie.mkv", Path: "movie.mkv", Size: 1},
+		},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+				"movie.mkv": {Id: "existing", Path: "movie.mkv"},
+			}},
+		},
+	}
+	namingModes := []config.WebDavFolderNaming{
+		config.WebDavUseFileName, config.WebDavUseOriginalName,
+		config.WebDavUseFileNameNoExt, config.WebDavUseOriginalNameNoExt,
+		config.WebdavUseHash,
+	}
+	before := make(map[config.WebDavFolderNaming]string, len(namingModes))
+	for _, mode := range namingModes {
+		before[mode] = storage.GetTorrentFolder(mode, entry)
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "existing", Path: "movie.mkv", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDebridTorrentState(entry, &debridTypes.Torrent{
+		Id: "transfer", Debrid: "primary", Name: "New.mkv",
+		OriginalFilename: "New Original.mkv", Files: remoteFiles,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != "Old.mkv" || entry.OriginalFilename != "Original.mkv" {
+		t.Fatalf("provider rename changed exposed folder identity: name=%q original=%q", entry.Name, entry.OriginalFilename)
+	}
+	for _, mode := range namingModes {
+		if got := storage.GetTorrentFolder(mode, entry); got != before[mode] {
+			t.Errorf("WebDAV folder mode %q changed from %q to %q", mode, before[mode], got)
 		}
 	}
 }

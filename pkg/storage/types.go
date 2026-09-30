@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -711,10 +712,10 @@ func torrentArtifactsMayExist(entry *Entry) bool {
 	}
 	rooted, _, err := safepath.OpenRoot(entry.SavePath)
 	if err != nil {
-		return !os.IsNotExist(err)
+		return !errors.Is(err, os.ErrNotExist)
 	}
 	defer rooted.Close()
-	if _, err := rooted.Lstat(relative); err == nil || !os.IsNotExist(err) {
+	if _, err := rooted.Lstat(relative); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return true
 	}
 	return false

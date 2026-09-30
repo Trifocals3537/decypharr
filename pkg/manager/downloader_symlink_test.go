@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/safepath"
+	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 	"github.com/rs/zerolog"
 )
@@ -47,6 +49,128 @@ func TestCreateTorrentSymlinksKeepsExistingDestinationCompatibility(t *testing.T
 	}
 	if len(paths) != 1 || paths[0] != existing {
 		t.Fatalf("created paths = %v, want [%s]", paths, existing)
+	}
+}
+
+func TestCreateTorrentSymlinksUsesProviderPathsForNestedDuplicateBasenames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require privileges")
+	}
+	config.SetConfigPath(t.TempDir())
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "one", Path: "Season 01/Episode.mkv", Size: 3},
+		{Id: "two", Path: "Season 02/Episode.mkv", Size: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &storage.Entry{
+		InfoHash:       "nested-duplicate-symlink",
+		Name:           "release",
+		Protocol:       config.ProtocolTorrent,
+		SavePath:       downloadRoot,
+		ActiveProvider: "primary",
+		Files:          make(map[string]*storage.File),
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+		},
+	}
+	for name, remote := range remoteFiles {
+		entry.Files[name] = &storage.File{Name: name, Path: remote.LocalPath(), Size: remote.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: remote.Id, Path: remote.Path}
+		target := filepath.Join(mountPath, filepath.FromSlash(remote.Path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(remote.Id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symlinkDir, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	paths, err := downloader.createTorrentSymlinksWhenMountFilesAppear(context.Background(), entry, mountPath, symlinkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("created %d symlinks, want 2", len(paths))
+	}
+	for name, remote := range remoteFiles {
+		destination := filepath.Join(symlinkDir, filepath.FromSlash(remote.LocalPath()))
+		resolved, err := filepath.EvalSymlinks(destination)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", name, err)
+		}
+		want := filepath.Join(mountPath, filepath.FromSlash(remote.Path))
+		if !sameFilesystemPath(resolved, want) {
+			t.Fatalf("symlink %q resolves to %q, want %q", destination, resolved, want)
+		}
+	}
+}
+
+func TestCreateTorrentSymlinksAllowsProviderNativePunctuation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("provider-native punctuation is not representable on Windows filesystems")
+	}
+	config.SetConfigPath(t.TempDir())
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "unsafe-native", Path: "Release?/Why?.mkv", Size: 5,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &storage.Entry{
+		InfoHash:       "provider-native-punctuation",
+		Name:           "release",
+		Protocol:       config.ProtocolTorrent,
+		SavePath:       downloadRoot,
+		ActiveProvider: "primary",
+		Files:          make(map[string]*storage.File),
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+		},
+	}
+	var remote debridTypes.File
+	for name, file := range remoteFiles {
+		remote = file
+		entry.Files[name] = &storage.File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: file.Id, Path: file.Path}
+	}
+	target := filepath.Join(mountPath, filepath.FromSlash(remote.Path))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkDir, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	paths, err := downloader.createTorrentSymlinksWhenMountFilesAppear(context.Background(), entry, mountPath, symlinkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("created %d symlinks, want 1", len(paths))
+	}
+	resolved, err := filepath.EvalSymlinks(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFilesystemPath(resolved, target) {
+		t.Fatalf("symlink resolves to %q, want provider-native source %q", resolved, target)
+	}
+	if filepath.Base(paths[0]) == filepath.Base(target) {
+		t.Fatalf("unsafe provider basename leaked into portable output: %q", paths[0])
 	}
 }
 

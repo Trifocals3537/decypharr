@@ -48,9 +48,42 @@ func TestFlattenFilesPreservesNestedDuplicateBasenames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"Season 01/Episode.mkv", "Season 02/Episode.mkv"} {
-		if file, exists := files[name]; !exists || file.Name != name || file.Path != name {
-			t.Fatalf("file %q = %#v, exists=%v", name, file, exists)
+	wantPaths := map[string]bool{"Season 01/Episode.mkv": true, "Season 02/Episode.mkv": true}
+	for name, file := range files {
+		if file.Name != name || strings.ContainsAny(name, `/\`) || !wantPaths[file.Path] {
+			t.Fatalf("logical file %q = %#v", name, file)
+		}
+		delete(wantPaths, file.Path)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("missing provider paths: %#v", wantPaths)
+	}
+}
+
+func TestFlattenFilesUsesStablePathIdentityAcrossOrdering(t *testing.T) {
+	first := []MagnetFile{
+		{Name: "Season 01", Elements: []MagnetFile{{Name: "Episode.mkv", Size: 1024, Link: "https://download.invalid/1"}}},
+		{Name: "Season 02", Elements: []MagnetFile{{Name: "Episode.mkv", Size: 2048, Link: "https://download.invalid/2"}}},
+	}
+	second := []MagnetFile{first[1], first[0]}
+	firstFiles, err := (&AllDebrid{}).flattenFiles("ad", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFiles, err := (&AllDebrid{}).flattenFiles("ad", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstIDs := make(map[string]string)
+	for _, file := range firstFiles {
+		firstIDs[file.Path] = file.Id
+		if !strings.HasPrefix(file.Id, "path-") {
+			t.Fatalf("file %q has unstable identity %q", file.Path, file.Id)
+		}
+	}
+	for _, file := range secondFiles {
+		if file.Id != firstIDs[file.Path] {
+			t.Fatalf("file %q identity changed with API order: first=%q second=%q", file.Path, firstIDs[file.Path], file.Id)
 		}
 	}
 }

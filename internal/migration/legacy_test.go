@@ -70,6 +70,148 @@ func TestMigrateDryRunMakesNoChanges(t *testing.T) {
 	}
 }
 
+func TestVerifyTreeIgnoresDirectoryAllocationSize(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "nested", "episode.mkv"), []byte("media"), 0o600)
+	expected, err := scanTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedDirectory := false
+	for index := range expected {
+		if expected[index].Mode.IsDir() {
+			expected[index].Size += 4096
+			changedDirectory = true
+		}
+	}
+	if !changedDirectory {
+		t.Fatal("test tree did not contain a directory manifest entry")
+	}
+	if err := verifyTree(root, expected); err != nil {
+		t.Fatalf("verifyTree() rejected equivalent directory contents: %v", err)
+	}
+	actual, err := scanTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digestManifest(actual) != digestManifest(expected) {
+		t.Fatal("stable manifest digest changed with directory allocation size")
+	}
+	if digestManifestV2(actual) == digestManifestV2(expected) {
+		t.Fatal("legacy digest fixture did not capture the directory-size difference")
+	}
+}
+
+func TestMigrateAcceptsExactVersionTwoReceipt(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	mustWriteFile(t, filepath.Join(source, "nested", "config.json"), []byte("{}"), 0o600)
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	sourceEntries, err := buildManifest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetEntries, err := scanTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := receipt{
+		SchemaVersion: legacyReceiptVersionV2,
+		SourceDigest:  digestManifestV2(sourceEntries),
+		TargetDigest:  digestManifestV2(targetEntries),
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(target, receiptName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Migrate(Options{Source: source, Target: target})
+	if err != nil {
+		t.Fatalf("Migrate() rejected a valid version-two receipt: %v", err)
+	}
+	if !result.AlreadyMigrated {
+		t.Fatalf("Migrate() result = %+v, want existing migration", result)
+	}
+	if err := os.WriteFile(filepath.Join(target, "nested", "config.json"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(Options{Source: source, Target: target}); err == nil ||
+		!strings.Contains(err.Error(), "cannot be safely verified") {
+		t.Fatalf("tampered version-two target error = %v", err)
+	}
+}
+
+func TestMigrateRejectsDriftedVersionTwoReceiptWithoutDryRunWrites(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	mustWriteFile(t, filepath.Join(source, "nested", "config.json"), []byte("{}"), 0o600)
+
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	sourceEntries, err := buildManifest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetEntries, err := scanTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range sourceEntries {
+		if sourceEntries[index].Mode.IsDir() {
+			sourceEntries[index].Size += 4096
+		}
+	}
+	for index := range targetEntries {
+		if targetEntries[index].Mode.IsDir() {
+			targetEntries[index].Size += 8192
+		}
+	}
+	legacy := receipt{
+		SchemaVersion: legacyReceiptVersionV2,
+		SourceDigest:  digestManifestV2(sourceEntries),
+		TargetDigest:  digestManifestV2(targetEntries),
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(target, receiptName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(Options{Source: source, Target: target, DryRun: true}); err == nil ||
+		!strings.Contains(err.Error(), "cannot be safely verified") {
+		t.Fatalf("drifted version-two receipt error = %v", err)
+	}
+	after, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("dry run changed migration parent entries: before=%d after=%d", len(before), len(after))
+	}
+	for index := range before {
+		if before[index].Name() != after[index].Name() {
+			t.Fatalf("dry run changed migration parent entries: before=%q after=%q", before[index].Name(), after[index].Name())
+		}
+	}
+}
+
 func TestMigrateRebasesOnlyContainedConfigurationPaths(t *testing.T) {
 	t.Parallel()
 

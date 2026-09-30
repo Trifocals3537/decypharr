@@ -20,6 +20,28 @@ func storedRARFile(path string, offset, size int64) *rar.File {
 	}
 }
 
+func TestHandleRarFallbackPlansPortableOutputPath(t *testing.T) {
+	provider := &RealDebrid{}
+	files, err := provider.handleRarFallback(
+		&types.Torrent{Id: "torrent", Name: "Movie: Part?"},
+		torrentInfo{Bytes: 123, Links: []string{"restricted"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("fallback files = %#v", files)
+	}
+	for _, file := range files {
+		if file.Path != "Movie: Part?.rar" || file.OutputPath == "" || file.OutputPath == file.Path {
+			t.Fatalf("fallback path planning = %#v", file)
+		}
+		if !strings.HasSuffix(file.OutputPath, ".rar") {
+			t.Fatalf("fallback extension was not preserved: %q", file.OutputPath)
+		}
+	}
+}
+
 func TestMapStoredRARFilesUsesValidatedArchiveMetadata(t *testing.T) {
 	generated := time.Unix(100, 0)
 	selected := []types.File{{
@@ -35,11 +57,20 @@ func TestMapStoredRARFilesUsesValidatedArchiveMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, exists := files["Video?.mkv"]
-	if !exists || file.Size != 4 || !file.IsRar || file.ByteRange == nil ||
+	if len(files) != 1 {
+		t.Fatalf("mapped files = %#v, want one", files)
+	}
+	var name string
+	var file types.File
+	for name, file = range files {
+	}
+	if strings.ContainsAny(name, `/\?*`) || !strings.HasSuffix(name, ".mkv") ||
+		file.Name != name || file.Path != "Release/Video?.mkv" ||
+		!strings.HasSuffix(file.OutputPath, "/"+name) ||
+		file.Size != 4 || !file.IsRar || file.ByteRange == nil ||
 		*file.ByteRange != [2]int64{10, 13} || file.Link != "https://restricted.example/archive" ||
 		!file.Generated.Equal(generated) {
-		t.Fatalf("mapped file = %#v, exists=%v", file, exists)
+		t.Fatalf("mapped file %q = %#v", name, file)
 	}
 	if selected[0].Size != 999 || selected[0].ByteRange != nil || selected[0].IsRar {
 		t.Fatalf("input selection was mutated: %#v", selected[0])
@@ -132,11 +163,16 @@ func TestMapStoredRARFilesUsesDeepestUniquePathSuffix(t *testing.T) {
 	if len(files) != len(wants) {
 		t.Fatalf("mapped files = %#v, want %d", files, len(wants))
 	}
-	for name, wantRange := range wants {
-		file, exists := files[name]
-		if !exists || file.ByteRange == nil || *file.ByteRange != wantRange || file.Name != name {
-			t.Fatalf("mapped file %q = %#v, exists=%v", name, file, exists)
+	for name, file := range files {
+		wantRange, exists := wants[file.Path]
+		if !exists || strings.ContainsAny(name, `/\`) || file.ByteRange == nil ||
+			*file.ByteRange != wantRange || file.Name != name {
+			t.Fatalf("mapped file %q = %#v, pathExists=%v", name, file, exists)
 		}
+		delete(wants, file.Path)
+	}
+	if len(wants) != 0 {
+		t.Fatalf("missing mapped provider paths: %#v", wants)
 	}
 }
 

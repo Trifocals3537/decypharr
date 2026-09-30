@@ -484,9 +484,23 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 		return nil, err
 	}
 	remaining := make(map[string]torrentFileLayout, len(layouts))
+	sourceKeys := make(map[string][]string, len(layouts))
 	basenameCounts := make(map[string]int, len(layouts))
+	activePlacement := entry.GetActiveProvider()
 	for _, layout := range layouts {
 		remaining[layout.key] = layout
+		sourceKeys[layout.key] = []string{layout.key}
+		if activePlacement != nil {
+			if providerFile := activePlacement.Files[layout.file.Name]; providerFile != nil {
+				providerRelative, providerErr := normalizeTorrentProviderSourcePath(strings.TrimSpace(providerFile.Path))
+				if providerErr == nil {
+					providerKey := torrentProviderSourceKey(providerRelative)
+					if providerKey != layout.key {
+						sourceKeys[layout.key] = append([]string{providerKey}, sourceKeys[layout.key]...)
+					}
+				}
+			}
+		}
 		basenameCounts[strings.ToLower(filepath.Base(layout.relative))]++
 	}
 
@@ -505,7 +519,12 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 		lastScanErr = scanErr
 		if scanErr == nil {
 			for key, layout := range remaining {
-				source := actualByPath[key]
+				var source string
+				for _, sourceKey := range sourceKeys[key] {
+					if source = actualByPath[sourceKey]; source != "" {
+						break
+					}
+				}
 				if source == "" {
 					baseKey := strings.ToLower(filepath.Base(layout.relative))
 					candidates := actualByBase[baseKey]
@@ -632,7 +651,7 @@ func scanTorrentMountFiles(mountPath string) (map[string]string, map[string][]st
 					_ = dir.Close()
 					return nil, nil, fmt.Errorf("torrent mount tree exceeds %d entries", torrentOwnershipMaxEntries)
 				}
-				if err := safepath.ValidateIdentifier(item.Name()); err != nil {
+				if err := validateTorrentProviderSourceIdentifier(item.Name()); err != nil {
 					_ = dir.Close()
 					return nil, nil, fmt.Errorf("invalid torrent mount name %q: %w", item.Name(), err)
 				}
@@ -656,12 +675,12 @@ func scanTorrentMountFiles(mountPath string) (map[string]string, map[string][]st
 				if !info.Mode().IsRegular() {
 					continue
 				}
-				normalized, err := normalizeTorrentRelativePath(relative)
+				normalized, err := normalizeTorrentProviderSourcePath(relative)
 				if err != nil {
 					_ = dir.Close()
 					return nil, nil, err
 				}
-				key := portableTorrentRelativeKey(normalized)
+				key := torrentProviderSourceKey(normalized)
 				absolute := filepath.Join(mountPath, relative)
 				if previous, exists := byPath[key]; exists && !sameFilesystemPath(previous, absolute) {
 					_ = dir.Close()

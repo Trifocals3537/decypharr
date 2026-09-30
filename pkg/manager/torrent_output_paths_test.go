@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -139,7 +140,13 @@ func TestTorrentOutputPathAdmissionKeepsDisplayTitleAndStableProviderIdentity(t 
 		t.Fatal("admission did not preserve title and assign output identity")
 	}
 	outputPath := entry.DownloadPath()
-	applyDebridTorrentState(entry, &debridTypes.Torrent{Id: "provider-id", Debrid: "torbox", Name: "Provider: Renamed", InfoHash: entry.InfoHash})
+	remote := &debridTypes.Torrent{Id: "provider-id", Debrid: "torbox", Name: "Provider: Renamed", InfoHash: entry.InfoHash}
+	if !entry.CanApplyTorrentTitle(remote) {
+		t.Fatalf("newly admitted queue entry cannot accept provider title: save_path=%q completed=%v downloading=%t size_downloaded=%d files=%d", entry.SavePath, entry.CompletedAt, entry.IsDownloading, entry.SizeDownloaded, len(entry.Files))
+	}
+	if err := applyDebridTorrentState(entry, remote); err != nil {
+		t.Fatal(err)
+	}
 	if entry.Name != "Provider: Renamed" || entry.DownloadPath() != outputPath {
 		t.Fatal("provider result changed local output instead of only the display title")
 	}
@@ -280,6 +287,288 @@ func TestTorrentOutputPathStripsOnlyRecognizedDisplayRoot(t *testing.T) {
 	entry.Files = map[string]*storage.File{"file": {Name: "movie.mkv", Path: "../movie.mkv", Size: 4}}
 	if _, err := torrentEntryFileLayouts(entry); err == nil {
 		t.Fatal("untrusted entry title authorized stripping traversal")
+	}
+}
+
+func TestMaterializedOutputReservationUsesStrippedReleaseRoot(t *testing.T) {
+	for _, newPath := range []string{"Movie.mkv", "Release/Movie.mkv"} {
+		t.Run(newPath, func(t *testing.T) {
+			completed := time.Now()
+			entry := &storage.Entry{
+				Protocol: config.ProtocolTorrent, InfoHash: "root-conflict", Name: "Release",
+				OutputName:  storage.NewTorrentOutputName("Release", "root-conflict"),
+				CompletedAt: &completed, ActiveProvider: "primary",
+				Files: map[string]*storage.File{
+					"extra.srt": {Name: "extra.srt", Path: "Release/movie.mkv/extra.srt", Size: 1},
+				},
+				Providers: map[string]*storage.ProviderEntry{
+					"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+						"extra.srt": {Id: "existing", Path: "Release/movie.mkv/extra.srt"},
+					}},
+				},
+			}
+			remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+				{Id: "existing", Path: "Release/movie.mkv/extra.srt", Size: 1},
+				{Id: "new", Path: newPath, Size: 2},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: remoteFiles}); err != nil {
+				t.Fatal(err)
+			}
+			layouts, err := torrentEntryFileLayouts(entry)
+			if err != nil {
+				t.Fatalf("provider refresh created an unusable layout: %v", err)
+			}
+			if len(layouts) != 2 {
+				t.Fatalf("layout count = %d, want 2", len(layouts))
+			}
+			var existing, added string
+			for _, layout := range layouts {
+				if layout.file.Size == 1 {
+					existing = filepath.ToSlash(layout.relative)
+				} else {
+					added = filepath.ToSlash(layout.relative)
+				}
+			}
+			if existing != "movie.mkv/extra.srt" || added == "" || strings.EqualFold(added, "movie.mkv") ||
+				strings.HasPrefix(existing, strings.ToLower(added)+"/") || filepath.Ext(added) != ".mkv" {
+				t.Fatalf("existing=%q added=%q, want stable nested file and distinct .mkv", existing, added)
+			}
+		})
+	}
+}
+
+func TestMaterializedOutputReservationPreservesReleaseRootAcrossTitleChange(t *testing.T) {
+	completed := time.Now()
+	entry := &storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "root-rename", Name: "Old",
+		OutputName:  storage.NewTorrentOutputName("Old", "root-rename"),
+		CompletedAt: &completed, ActiveProvider: "primary",
+		Files: map[string]*storage.File{
+			"extra.srt": {Name: "extra.srt", Path: "Release/movie.mkv/extra.srt", Size: 1},
+		},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+				"extra.srt": {Id: "existing", Path: "Release/movie.mkv/extra.srt"},
+			}},
+		},
+	}
+	before, err := torrentEntryFileLayouts(entry)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial materialized layout = %v, err = %v", before, err)
+	}
+	oldRelative := before[0].relative
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "existing", Path: "Release/movie.mkv/extra.srt", Size: 1},
+		{Id: "new", Path: "Movie.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDebridTorrentState(entry, &debridTypes.Torrent{
+		Debrid: "primary", Name: "Release", Files: remoteFiles,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != "Old" {
+		t.Fatalf("provider title reinterpreted a materialized output path: %q", entry.Name)
+	}
+	layouts, err := torrentEntryFileLayouts(entry)
+	if err != nil {
+		t.Fatalf("incoming title made the reserved layout invalid: %v", err)
+	}
+	if len(layouts) != 2 || entry.Files["extra.srt"].Path != "Release/movie.mkv/extra.srt" {
+		t.Fatalf("materialized layout changed: %#v", entry.Files)
+	}
+	for _, layout := range layouts {
+		if layout.file == entry.Files["extra.srt"] && layout.relative != oldRelative {
+			t.Fatalf("materialized path moved from %q to %q", oldRelative, layout.relative)
+		}
+	}
+}
+
+func TestMaterializedOutputKeepsWebDAVFolderAcrossProviderRename(t *testing.T) {
+	completed := time.Now()
+	entry := &storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "strm-title", Name: "Old.mkv",
+		OriginalFilename: "Original.mkv",
+		OutputName:       storage.NewTorrentOutputName("Old.mkv", "strm-title"),
+		CompletedAt:      &completed,
+		ActiveProvider:   "primary",
+		Files: map[string]*storage.File{
+			"movie.mkv": {Name: "movie.mkv", Path: "movie.mkv", Size: 1},
+		},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+				"movie.mkv": {Id: "existing", Path: "movie.mkv"},
+			}},
+		},
+	}
+	namingModes := []config.WebDavFolderNaming{
+		config.WebDavUseFileName, config.WebDavUseOriginalName,
+		config.WebDavUseFileNameNoExt, config.WebDavUseOriginalNameNoExt,
+		config.WebdavUseHash,
+	}
+	before := make(map[config.WebDavFolderNaming]string, len(namingModes))
+	for _, mode := range namingModes {
+		before[mode] = storage.GetTorrentFolder(mode, entry)
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "existing", Path: "movie.mkv", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDebridTorrentState(entry, &debridTypes.Torrent{
+		Id: "transfer", Debrid: "primary", Name: "New.mkv",
+		OriginalFilename: "New Original.mkv", Files: remoteFiles,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != "Old.mkv" || entry.OriginalFilename != "Original.mkv" {
+		t.Fatalf("provider rename changed exposed folder identity: name=%q original=%q", entry.Name, entry.OriginalFilename)
+	}
+	for _, mode := range namingModes {
+		if got := storage.GetTorrentFolder(mode, entry); got != before[mode] {
+			t.Errorf("WebDAV folder mode %q changed from %q to %q", mode, before[mode], got)
+		}
+	}
+}
+
+func TestLegacyUnknownSavePathKeepsTitleAcrossProviderRename(t *testing.T) {
+	for _, tc := range []struct{ name, savePath string }{
+		{name: "empty"},
+		{name: "relative", savePath: "relative-legacy-root"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := &storage.Entry{
+				Protocol: config.ProtocolTorrent, InfoHash: "legacy-title", Name: "Old",
+				OriginalFilename: "Old Original", SavePath: tc.savePath,
+				ActiveProvider: "primary",
+				Files: map[string]*storage.File{
+					"movie.mkv": {Name: "movie.mkv", Path: "Release/movie.mkv", Size: 1},
+				},
+				Providers: map[string]*storage.ProviderEntry{
+					"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+						"movie.mkv": {Id: "existing", Path: "Release/movie.mkv"},
+					}},
+				},
+			}
+			remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+				Id: "existing", Path: "Release/movie.mkv", Size: 1,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applyDebridTorrentState(entry, &debridTypes.Torrent{
+				Id: "transfer", Debrid: "primary", Name: "Release",
+				OriginalFilename: "Release Original", Files: remoteFiles,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if entry.Name != "Old" || entry.OriginalFilename != "Old Original" ||
+				entry.Files["movie.mkv"].Path != "Release/movie.mkv" {
+				t.Fatalf("unknown-root legacy identity changed: %#v", entry)
+			}
+		})
+	}
+}
+
+func TestMaterializedDirectoryOwnerIsNotMergedWithLiteralGeneratedName(t *testing.T) {
+	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "old", Path: "A?/old.mkv", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := initial["old.mkv"]
+	oldPath := filepath.ToSlash(old.LocalPath())
+	oldDirectory := strings.Split(oldPath, "/")[0]
+	if oldDirectory == "A?" || !strings.Contains(oldDirectory, "~") {
+		t.Fatalf("test does not have a generated lossy directory: %q", oldPath)
+	}
+	completed := time.Now()
+	entry := &storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "directory-owner", Name: "Release",
+		OutputName:  storage.NewTorrentOutputName("Release", "directory-owner"),
+		CompletedAt: &completed, ActiveProvider: "primary",
+		Files: map[string]*storage.File{
+			old.Name: {Name: old.Name, Path: old.LocalPath(), Size: old.Size},
+		},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+				old.Name: {Id: old.Id, Path: old.Path},
+			}},
+		},
+	}
+	expanded, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "old", Path: "A?/old.mkv", Size: 1},
+		{Id: "new", Path: oldDirectory + "/new.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: expanded}); err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.ToSlash(entry.Files[old.Name].Path); got != oldPath {
+		t.Fatalf("materialized directory moved from %q to %q", oldPath, got)
+	}
+	var newPath string
+	for _, file := range entry.Files {
+		if file.Size == 2 {
+			newPath = filepath.ToSlash(file.Path)
+		}
+	}
+	if newPath == "" || strings.HasPrefix(strings.ToLower(newPath), strings.ToLower(oldDirectory)+"/") {
+		t.Fatalf("new literal directory merged into existing native directory: %q", newPath)
+	}
+	if _, err := torrentEntryFileLayouts(entry); err != nil {
+		t.Fatalf("directory-owner repair created invalid final layout: %v", err)
+	}
+}
+
+func TestMaterializedLossyReleaseRootKeepsNativeDirectoryOwner(t *testing.T) {
+	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "old", Path: "Release?/old.mkv", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := initial["old.mkv"]
+	oldDirectory := strings.Split(filepath.ToSlash(old.LocalPath()), "/")[0]
+	completed := time.Now()
+	entry := &storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: "lossy-root", Name: "Release?",
+		OutputName:  storage.NewTorrentOutputName("Release?", "lossy-root"),
+		CompletedAt: &completed, ActiveProvider: "primary",
+		Files: map[string]*storage.File{
+			old.Name: {Name: old.Name, Path: old.LocalPath(), Size: old.Size},
+		},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{
+				old.Name: {Id: old.Id, Path: old.Path},
+			}},
+		},
+	}
+	expanded, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "old", Path: "Release?/old.mkv", Size: 1},
+		{Id: "new", Path: "Release?/new.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{Debrid: "primary", Files: expanded}); err != nil {
+		t.Fatal(err)
+	}
+	newFile := entry.Files["new.mkv"]
+	if newFile == nil || strings.Split(filepath.ToSlash(newFile.Path), "/")[0] != oldDirectory {
+		t.Fatalf("same native directory was unnecessarily split: old=%q new=%#v", old.LocalPath(), newFile)
+	}
+	if _, err := torrentEntryFileLayouts(entry); err != nil {
+		t.Fatalf("lossy-root refresh created invalid final layout: %v", err)
 	}
 }
 

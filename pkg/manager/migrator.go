@@ -533,7 +533,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 				if _, exists := managed.Files[fileName]; !exists {
 					managed.Files[fileName] = &storage.File{
 						Name:      fileName,
-						Path:      file.Path,
+						Path:      file.LocalPath(),
 						Size:      file.Size,
 						ByteRange: file.ByteRange,
 						Deleted:   file.Deleted,

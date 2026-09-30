@@ -50,6 +50,26 @@ func (e *Entry) OutputComponent() string {
 	return utils.RemoveExtension(e.Name)
 }
 
+// TorrentPathFirstComponentIsEntryRoot identifies only the entry's known
+// provider release root. Output planning and materialization must use the same
+// test or a later provider refresh can reserve a different file namespace.
+func (e *Entry) TorrentPathFirstComponentIsEntryRoot(component string) bool {
+	if e == nil {
+		return false
+	}
+	component = strings.TrimSpace(component)
+	for _, candidate := range []string{
+		e.Name, e.OriginalFilename,
+		utils.RemoveExtension(e.Name), utils.RemoveExtension(e.OriginalFilename),
+	} {
+		candidate = strings.TrimSpace(strings.ReplaceAll(candidate, `\`, "/"))
+		if candidate != "" && !strings.Contains(candidate, "/") && strings.EqualFold(component, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 // PreserveTorrentOutputPath retains an existing local output identity while
 // merging a fresh queue/provider representation. No directory is moved and no
 // new identity is inferred for provider-only entries without a SavePath.

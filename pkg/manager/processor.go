@@ -87,7 +87,9 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 
 	torrent := newTorrentQueueEntry(importReq, debridTypes.TorrentStatusQueued)
 	torrent.DownloadUncached = debridTorrent.DownloadUncached
-	applyDebridTorrentToEntry(torrent, debridTorrent)
+	if err := applyDebridTorrentToEntry(torrent, debridTorrent); err != nil {
+		return fmt.Errorf("apply submitted provider state: %w", err)
+	}
 
 	if err := m.persistTorrentSource(importReq); err != nil {
 		rollbackErr := m.deleteProviderTorrent(
@@ -573,7 +575,11 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, entry *storage.Entry
 
 	// Check if done or failed.
 	if debridTorrent.Status == debridTypes.TorrentStatusDownloaded {
-		if !applyCompletedTorrentFiles(entry, debridTorrent) {
+		ready, err := applyCompletedTorrentFiles(entry, debridTorrent)
+		if err != nil {
+			return fmt.Errorf("reconcile completed provider files: %w", err)
+		}
+		if !ready {
 			if err := m.queue.Update(entry); err != nil {
 				return err
 			}
@@ -606,6 +612,9 @@ func (m *Manager) processAction(ctx context.Context, entry *storage.Entry) error
 	// torrent on a different provider). The queue entry only knows about the
 	// provider it was queued for, so we need to preserve other placements.
 	if existing, err := m.storage.Get(entry.InfoHash); err == nil && existing != nil {
+		if err := storage.ReconcileCompletedTorrentEntry(existing, entry); err != nil {
+			return err
+		}
 		entry = storage.HandleExistingEntryMerge(existing, entry)
 	}
 
@@ -653,7 +662,9 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Entry,
 	torrent.UpdatedAt = time.Now()
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
-		applyDebridTorrentToEntry(torrent, debridTorrent)
+		if err := applyDebridTorrentToEntry(torrent, debridTorrent); err != nil {
+			return fmt.Errorf("apply provider transfer state: %w", err)
+		}
 		if err := m.queue.Update(torrent); err != nil {
 			return err
 		}
@@ -663,7 +674,11 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Entry,
 			Msg("Started downloading torrent")
 		return nil
 	}
-	if !applyCompletedTorrentFiles(torrent, debridTorrent) {
+	ready, err := applyCompletedTorrentFiles(torrent, debridTorrent)
+	if err != nil {
+		return fmt.Errorf("reconcile completed provider files: %w", err)
+	}
+	if !ready {
 		// Keep the entry in the existing cancellation-aware queue lifecycle. A
 		// later provider status check will apply the completed file snapshot
 		// above instead of permanently failing an otherwise healthy grab.
@@ -686,53 +701,96 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Entry,
 // completed transfer with an empty or partially populated file tree is an
 // eventual-consistency state, not a completed Tessarr entry. Partial trees
 // update provider state but never leak into the canonical file map.
-func applyCompletedTorrentFiles(entry *storage.Entry, torrent *debridTypes.Torrent) bool {
+func applyCompletedTorrentFiles(entry *storage.Entry, torrent *debridTypes.Torrent) (bool, error) {
 	if entry == nil || torrent == nil || torrent.Status != debridTypes.TorrentStatusDownloaded {
-		return false
+		return false, nil
 	}
 	if !isComplete(torrent.Files) {
-		applyDebridTorrentState(entry, torrent)
+		if err := applyIncompleteDebridTorrentState(entry, torrent); err != nil {
+			return false, err
+		}
 		entry.Status = debridTypes.TorrentStatusDownloading
-		return false
+		return false, nil
 	}
-	applyDebridTorrentToEntry(entry, torrent)
-	return true
+	if err := applyDebridTorrentToEntry(entry, torrent); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {
-	applyDebridTorrentState(torrent, debridTorrent)
-
-	for _, file := range debridTorrent.Files {
-		tFile := &storage.File{
+func applyDebridTorrentToEntry(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) error {
+	if err := applyDebridTorrentState(torrent, debridTorrent); err != nil {
+		return err
+	}
+	if len(torrent.Files) != 0 {
+		return nil
+	}
+	for _, file := range debridTorrent.GetFiles() {
+		torrent.Files[file.Name] = &storage.File{
 			Name:      file.Name,
-			Path:      file.Path,
+			Path:      file.LocalPath(),
 			Size:      file.Size,
 			ByteRange: file.ByteRange,
 			Deleted:   file.Deleted,
 			InfoHash:  torrent.InfoHash,
 			AddedOn:   torrent.AddedOn,
 		}
-		torrent.Files[file.Name] = tFile
 	}
+	return nil
 }
 
-func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {
-	_ = torrent.AddTorrentProvider(debridTorrent)
-	torrent.ActiveProvider = debridTorrent.Debrid
-	torrent.Bytes = debridTorrent.GetSize()
-	torrent.Size = debridTorrent.GetSize()
-	torrent.Name = debridTorrent.Name
-	torrent.OriginalFilename = debridTorrent.OriginalFilename
-	torrent.UpdatedAt = time.Now()
+func applyDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) error {
+	debridTorrent = preserveMaterializedTorrentTitle(torrent, debridTorrent)
+	if _, err := torrent.AddTorrentProvider(debridTorrent); err != nil {
+		return err
+	}
+	applyDebridTorrentMetadata(torrent, debridTorrent)
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
-		return
+		return nil
 	}
 	if placement := torrent.GetActiveProvider(); placement != nil {
 		now := time.Now()
 		placement.DownloadedAt = &now
 		placement.Progress = 1.0
 	}
+	return nil
+}
+
+func applyIncompleteDebridTorrentState(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) error {
+	debridTorrent = preserveMaterializedTorrentTitle(torrent, debridTorrent)
+	if _, err := torrent.UpdateTorrentProviderState(debridTorrent); err != nil {
+		return err
+	}
+	applyDebridTorrentMetadata(torrent, debridTorrent)
+	return nil
+}
+
+func preserveMaterializedTorrentTitle(entry *storage.Entry, remote *debridTypes.Torrent) *debridTypes.Torrent {
+	if entry.CanApplyTorrentTitle(remote) {
+		return remote
+	}
+	// The provider's current title is not allowed to reinterpret paths already
+	// exposed to an Arr. Keep the existing owned output identity stable.
+	stable := remote.Copy()
+	stable.Name = ""
+	stable.OriginalFilename = ""
+	return stable
+}
+
+func applyDebridTorrentMetadata(torrent *storage.Entry, debridTorrent *debridTypes.Torrent) {
+	torrent.ActiveProvider = debridTorrent.Debrid
+	if size := debridTorrent.GetSize(); size > 0 || torrent.Size <= 0 {
+		torrent.Bytes = size
+		torrent.Size = size
+	}
+	if debridTorrent.Name != "" {
+		torrent.Name = debridTorrent.Name
+	}
+	if debridTorrent.OriginalFilename != "" {
+		torrent.OriginalFilename = debridTorrent.OriginalFilename
+	}
+	torrent.UpdatedAt = time.Now()
 }
 
 // SendToDebrid submits a magnet to debrid service(s) - replaces debrid.Parse

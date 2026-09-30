@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -46,49 +47,68 @@ func TestTorrentFileLayoutsPreserveUnambiguousNestedDuplicateBasenames(t *testin
 
 func TestApplyDebridTorrentPreservesCollisionSafeLogicalNamesAndPaths(t *testing.T) {
 	entry := &storage.Entry{
+		Protocol:  config.ProtocolTorrent,
 		InfoHash:  "torbox-logical-paths",
 		Files:     make(map[string]*storage.File),
 		Providers: make(map[string]*storage.ProviderEntry),
+	}
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "11", Path: "Release/Season 01/Episode.mkv", Link: "torbox://42/11"},
+		{Id: "12", Path: "Release/Season 02/Episode.mkv", Link: "torbox://42/12"},
+		{Id: "13", Path: "Release?/Extras/Why?.mkv", Link: "torbox://42/13"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	remote := &debridTypes.Torrent{
 		Id:       "42",
 		InfoHash: entry.InfoHash,
 		Name:     "Release",
 		Debrid:   "torbox",
-		Files: map[string]debridTypes.File{
-			"Release/Season 01/Episode.mkv": {
-				Id:   "11",
-				Name: "Release/Season 01/Episode.mkv",
-				Path: "Release/Season 01/Episode.mkv",
-				Link: "torbox://42/11",
-			},
-			"Release/Season 02/Episode.mkv": {
-				Id:   "12",
-				Name: "Release/Season 02/Episode.mkv",
-				Path: "Release/Season 02/Episode.mkv",
-				Link: "torbox://42/12",
-			},
-		},
+		Files:    remoteFiles,
 	}
 
-	applyDebridTorrentToEntry(entry, remote)
+	if err := applyDebridTorrentToEntry(entry, remote); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(entry.Files) != 2 {
-		t.Fatalf("managed file count = %d, want 2", len(entry.Files))
+	if len(entry.Files) != 3 {
+		t.Fatalf("managed file count = %d, want 3", len(entry.Files))
 	}
 	placement := entry.Providers["torbox"]
-	if placement == nil || len(placement.Files) != 2 {
-		t.Fatalf("provider files = %#v, want 2", placement)
+	if placement == nil || len(placement.Files) != 3 {
+		t.Fatalf("provider files = %#v, want 3", placement)
 	}
 	for name, remoteFile := range remote.Files {
 		managed := entry.Files[name]
 		provider := placement.Files[name]
-		if managed == nil || managed.Path != remoteFile.Path {
+		if managed == nil || managed.Path != remoteFile.LocalPath() {
 			t.Fatalf("managed file %q = %#v", name, managed)
 		}
 		if provider == nil || provider.Path != remoteFile.Path || provider.Id != remoteFile.Id {
 			t.Fatalf("provider file %q = %#v", name, provider)
 		}
+	}
+	if _, err := torrentEntryFileLayouts(entry); err != nil {
+		t.Fatalf("portable managed layout rejected: %v", err)
+	}
+}
+
+func TestTorrentFileLayoutsAcceptSanitizedProviderOwnershipNames(t *testing.T) {
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "marker", Path: ".tessarr-torrent-owner-v1", Size: 1},
+		{Id: "partial", Path: ".decypharr-torrent-part-provider/Episode.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := torrentOwnershipTestEntry(t.TempDir(), "reserved-provider-names", config.DownloadActionDownload)
+	entry.Files = make(map[string]*storage.File, len(remoteFiles))
+	for name, file := range remoteFiles {
+		entry.Files[name] = &storage.File{Name: name, Path: file.LocalPath(), Size: file.Size}
+	}
+	if _, err := torrentEntryFileLayouts(entry); err != nil {
+		t.Fatalf("sanitized provider ownership names were rejected: %v", err)
 	}
 }
 
@@ -109,7 +129,10 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 		Files:    make(map[string]debridTypes.File),
 	}
 
-	if applyCompletedTorrentFiles(entry, remote) {
+	if ready, err := applyCompletedTorrentFiles(entry, remote); err != nil || ready {
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Fatal("applyCompletedTorrentFiles() = ready before provider links exist")
 	}
 	if entry.Status != debridTypes.TorrentStatusDownloading {
@@ -123,7 +146,10 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 		Size: 1234,
 	}
 	remote.Files["Movie.mkv"] = pendingFile
-	if applyCompletedTorrentFiles(entry, remote) {
+	if ready, err := applyCompletedTorrentFiles(entry, remote); err != nil || ready {
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Fatal("applyCompletedTorrentFiles() = ready for a provider file without a link")
 	}
 	if len(entry.Files) != 0 {
@@ -132,7 +158,11 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 
 	pendingFile.Link = "https://provider.example/media"
 	remote.Files["Movie.mkv"] = pendingFile
-	if !applyCompletedTorrentFiles(entry, remote) {
+	ready, err := applyCompletedTorrentFiles(entry, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
 		t.Fatal("applyCompletedTorrentFiles() = not ready after provider link appeared")
 	}
 	managed := entry.Files["Movie.mkv"]
@@ -142,6 +172,40 @@ func TestApplyCompletedTorrentFilesRecoversLateProviderLinks(t *testing.T) {
 	}
 	if placement == nil || placement.Files["Movie.mkv"] == nil || placement.Files["Movie.mkv"].Link == "" {
 		t.Fatalf("provider placement = %#v, want recovered provider link", placement)
+	}
+}
+
+func TestApplyCompletedTorrentFilesDoesNotPublishPartialTreeOverExistingFiles(t *testing.T) {
+	existingFile := &storage.File{Name: "Movie.mkv", Path: "Movie.mkv", Size: 1234}
+	existingProviderFile := &storage.ProviderFile{Id: "movie", Path: "Movie.mkv", Link: "provider://movie"}
+	entry := &storage.Entry{
+		InfoHash:       "existing-canonical-files",
+		Status:         debridTypes.TorrentStatusDownloaded,
+		ActiveProvider: "primary",
+		Files:          map[string]*storage.File{"Movie.mkv": existingFile},
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: map[string]*storage.ProviderFile{"Movie.mkv": existingProviderFile}},
+		},
+	}
+	remote := &debridTypes.Torrent{
+		Id: "transfer", InfoHash: entry.InfoHash, Debrid: "primary", Status: debridTypes.TorrentStatusDownloaded,
+		Files: map[string]debridTypes.File{
+			"Other.mkv": {Id: "other", Name: "Other.mkv", Path: "Other.mkv", Size: 55},
+		},
+	}
+	ready, err := applyCompletedTorrentFiles(entry, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("partial provider tree reported ready")
+	}
+	if len(entry.Files) != 1 || entry.Files["Movie.mkv"] != existingFile {
+		t.Fatalf("partial tree changed canonical files: %#v", entry.Files)
+	}
+	placement := entry.Providers["primary"]
+	if len(placement.Files) != 1 || placement.Files["Movie.mkv"] != existingProviderFile {
+		t.Fatalf("partial tree replaced provider identity: %#v", placement.Files)
 	}
 }
 
@@ -186,6 +250,45 @@ func TestTorrentFileLayoutsRejectTraversalAliasesAndAmbiguousBasenames(t *testin
 				t.Fatal("unsafe torrent layout was accepted")
 			}
 		})
+	}
+}
+
+func TestTorrentFileLayoutsAcceptFoldCollisionAddedAfterMaterialization(t *testing.T) {
+	initial, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "nested", Path: "Release/movie.mkv/extra.srt", Size: 1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now()
+	entry := torrentOwnershipTestEntry(t.TempDir(), "folded-refresh", config.DownloadActionSymlink)
+	entry.CompletedAt = &completed
+	entry.Files = make(map[string]*storage.File)
+	entry.Providers = map[string]*storage.ProviderEntry{
+		"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+	}
+	for name, file := range initial {
+		entry.Files[name] = &storage.File{Name: name, Path: file.LocalPath(), Size: file.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: file.Id, Path: file.Path}
+	}
+	expanded, err := debridTypes.FilesByLogicalName([]debridTypes.File{
+		{Id: "nested", Path: "Release/movie.mkv/extra.srt", Size: 1},
+		{Id: "file", Path: "Release/Movie.mkv", Size: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.AddTorrentProvider(&debridTypes.Torrent{
+		Debrid: "primary", Status: debridTypes.TorrentStatusDownloaded, Files: expanded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	layouts, err := torrentEntryFileLayouts(entry)
+	if err != nil {
+		t.Fatalf("folded-directory refresh produced an invalid materialized layout: %v", err)
+	}
+	if len(layouts) != 2 {
+		t.Fatalf("folded-directory refresh layouts = %#v", layouts)
 	}
 }
 

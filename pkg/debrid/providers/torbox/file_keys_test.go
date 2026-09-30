@@ -1,6 +1,7 @@
 package torbox
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -18,17 +19,15 @@ func TestTorboxFilesByLogicalNamePreservesNestedDuplicateBasenames(t *testing.T)
 	if len(files) != 2 {
 		t.Fatalf("file count = %d, want 2", len(files))
 	}
-	for _, name := range []string{
-		"Release/Season 01/Episode.mkv",
-		"Release/Season 02/Episode.mkv",
-	} {
-		file, ok := files[name]
-		if !ok {
-			t.Fatalf("missing collision-safe logical name %q in %#v", name, files)
+	wantPaths := map[string]bool{"Release/Season 01/Episode.mkv": true, "Release/Season 02/Episode.mkv": true}
+	for name, file := range files {
+		if file.Name != name || strings.ContainsAny(name, `/\`) || !wantPaths[file.Path] {
+			t.Fatalf("logical file %q = %#v", name, file)
 		}
-		if file.Name != name || file.Path != name {
-			t.Fatalf("file %q = %#v, want matching logical name and provider path", name, file)
-		}
+		delete(wantPaths, file.Path)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("missing provider paths: %#v", wantPaths)
 	}
 }
 

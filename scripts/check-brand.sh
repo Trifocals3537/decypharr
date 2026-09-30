@@ -49,6 +49,21 @@ allowed_legacy_reference() {
                "$content" == *'decypharr segment cache v1'* ]]
             return
             ;;
+        pkg/debrid/types/file_keys.go)
+            [[ "$content" == *'lower == ".decypharr-torrent-owner-v1"'* ||
+               "$content" == *'lower == ".decypharr-torrent-ownership.lock"'* ||
+               "$content" == *'strings.HasPrefix(lower, ".decypharr-torrent-quarantine-")'* ||
+               "$content" == *'strings.HasPrefix(lower, ".decypharr-torrent-part-")'* ]]
+            return
+            ;;
+        pkg/debrid/types/file_keys_test.go)
+            [[ "$content" == *'{Id: "legacy-part", Path: ".decypharr-torrent-part-provider/Episode.mkv"}'* ]]
+            return
+            ;;
+        pkg/manager/torrent_ownership_test.go)
+            [[ "$content" == *'{Id: "partial", Path: ".decypharr-torrent-part-provider/Episode.mkv", Size: 2}'* ]]
+            return
+            ;;
     esac
     return 1
 }

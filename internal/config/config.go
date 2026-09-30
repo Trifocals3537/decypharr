@@ -380,6 +380,12 @@ func LoadForValidation(path string) (*Config, error) {
 	if err := cfg.setDefaultsForPath(path, false); err != nil {
 		return nil, err
 	}
+	auth, err := readAuthFile(filepath.Join(path, "auth.json"), false)
+	if err == nil {
+		cfg.Auth = auth
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	cfg.applyEnvOverrides()
 	return cfg, nil
 }
@@ -509,29 +515,38 @@ func (c *Config) loadAuth() (*Auth, error) {
 	}
 
 	authFile := c.AuthFile()
-	data, err := safepath.ReadRegularFile(authFile, maxConfigurationFileBytes)
+	auth, err := readAuthFile(authFile, true)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			c.Auth = &Auth{}
 			return c.Auth, nil
 		}
+		return nil, err
+	}
+	c.Auth = auth
+	return c.Auth, nil
+}
+
+func readAuthFile(authFile string, securePermissions bool) (*Auth, error) {
+	data, err := safepath.ReadRegularFile(authFile, maxConfigurationFileBytes)
+	if err != nil {
 		return nil, fmt.Errorf("read auth config %s: %w", authFile, err)
 	}
-	if err := safepath.ChmodRegularFile(authFile, privateFileMode); err != nil {
-		return nil, fmt.Errorf("secure auth config permissions: %w", err)
+	if securePermissions {
+		if err := safepath.ChmodRegularFile(authFile, privateFileMode); err != nil {
+			return nil, fmt.Errorf("secure auth config permissions: %w", err)
+		}
 	}
 
 	trimmed := strings.TrimSpace(string(data))
 	if !strings.HasPrefix(trimmed, "{") {
 		return nil, fmt.Errorf("parse auth config %s: expected a JSON object", authFile)
 	}
-
 	auth := &Auth{}
 	if err := json.Unmarshal(data, auth); err != nil {
 		return nil, fmt.Errorf("parse auth config %s: %w", authFile, err)
 	}
-	c.Auth = auth
-	return c.Auth, nil
+	return auth, nil
 }
 
 func (c *Config) GetAuth() *Auth {

@@ -20,7 +20,6 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/internal/safepath"
-	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
 
@@ -114,12 +113,6 @@ func safeTorrentEntryDownloadPath(downloadRoot string, entry *storage.Entry) (st
 		return "", fmt.Errorf("torrent output path %q does not match validated path %q", entry.DownloadPath(), safe)
 	}
 	return safe, nil
-}
-
-func removeTorrentFilenameExtension(name string) string {
-	// Keep this local wrapper so ownership path derivation stays exactly aligned
-	// with storage.Entry.DownloadPath.
-	return utils.RemoveExtension(name)
 }
 
 func isReservedTorrentPrivateName(name string) bool {
@@ -255,7 +248,7 @@ func torrentFileRelativePath(entry *storage.Entry, file *storage.File) (string, 
 func normalizeTorrentFileOutputPath(entry *storage.Entry, raw string) (string, error) {
 	if entry != nil && entry.OutputName != "" {
 		parts := strings.Split(strings.ReplaceAll(raw, `\`, "/"), "/")
-		if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) && validateTorrentRootName(parts[0], false) == nil {
+		if len(parts) > 1 && entry.TorrentPathFirstComponentIsEntryRoot(parts[0]) && validateTorrentRootName(parts[0], false) == nil {
 			raw = strings.Join(parts[1:], "/")
 		}
 		return normalizeTorrentRelativePath(raw)
@@ -265,33 +258,10 @@ func normalizeTorrentFileOutputPath(entry *storage.Entry, raw string) (string, e
 		return "", err
 	}
 	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) > 1 && torrentPathFirstComponentIsEntryRoot(parts[0], entry) {
+	if len(parts) > 1 && entry.TorrentPathFirstComponentIsEntryRoot(parts[0]) {
 		return normalizeTorrentRelativePath(strings.Join(parts[1:], "/"))
 	}
 	return relative, nil
-}
-
-func torrentPathFirstComponentIsEntryRoot(component string, entry *storage.Entry) bool {
-	if entry == nil {
-		return false
-	}
-	component = strings.TrimSpace(component)
-	candidates := []string{
-		entry.Name,
-		entry.OriginalFilename,
-		removeTorrentFilenameExtension(entry.Name),
-		removeTorrentFilenameExtension(entry.OriginalFilename),
-	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(strings.ReplaceAll(candidate, `\`, "/"))
-		if candidate == "" || strings.Contains(candidate, "/") {
-			continue
-		}
-		if strings.EqualFold(component, candidate) {
-			return true
-		}
-	}
-	return false
 }
 
 func normalizeTorrentRelativePath(value string) (string, error) {
@@ -331,6 +301,54 @@ func portableTorrentRelativeKey(relative string) string {
 		parts[i] = strings.ToLower(strings.TrimRight(parts[i], " ."))
 	}
 	return strings.Join(parts, "/")
+}
+
+// normalizeTorrentProviderSourcePath validates a path only for lookup inside a
+// pinned provider mount. Provider-native punctuation is allowed here because
+// it never becomes an output name; traversal, separators inside components,
+// NUL/control bytes, and absolute host paths remain forbidden.
+func normalizeTorrentProviderSourcePath(value string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return "", fmt.Errorf("path contains a NUL byte")
+	}
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("path contains a control character")
+	}
+	value = strings.ReplaceAll(value, `\`, "/")
+	if path.IsAbs(value) || filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
+		return "", fmt.Errorf("path is absolute")
+	}
+	clean := path.Clean(value)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path traverses outside the provider release")
+	}
+	parts := strings.Split(clean, "/")
+	for _, component := range parts {
+		if err := validateTorrentProviderSourceIdentifier(component); err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(parts...), nil
+}
+
+func validateTorrentProviderSourceIdentifier(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("path component is empty or traversal")
+	}
+	if strings.IndexByte(name, 0) >= 0 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return fmt.Errorf("path component contains a NUL or control character")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("path component contains a separator")
+	}
+	return nil
+}
+
+func torrentProviderSourceKey(relative string) string {
+	return strings.ToLower(path.Clean(filepath.ToSlash(relative)))
 }
 
 func safeTorrentFilePath(downloadRoot string, entry *storage.Entry, relative, suffix string) (string, error) {

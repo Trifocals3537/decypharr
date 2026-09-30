@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	receiptName    = ".tessarr-migration.json"
-	receiptVersion = 2
-	receiptMaxSize = 4096
+	receiptName            = ".tessarr-migration.json"
+	receiptVersion         = 3
+	legacyReceiptVersionV2 = 2
+	receiptMaxSize         = 4096
 )
 
 var exactStateNames = map[string]string{
@@ -114,7 +115,7 @@ func Migrate(options Options) (Result, error) {
 	sourceDigest := digestManifest(entries)
 
 	if _, err := os.Lstat(target); err == nil {
-		if err := verifyExistingTarget(target, sourceDigest); err != nil {
+		if err := verifyExistingTarget(target, entries); err != nil {
 			return result, err
 		}
 		result.AlreadyMigrated = true
@@ -366,8 +367,12 @@ func verifyTree(root string, expected []manifestEntry) error {
 	for index := range expected {
 		want := expected[index]
 		got := actual[index]
-		if want.TargetPath != got.TargetPath || want.Mode.Type() != got.Mode.Type() ||
-			want.Mode.Perm() != got.Mode.Perm() || want.Size != got.Size || want.Digest != got.Digest {
+		metadataMismatch := want.TargetPath != got.TargetPath ||
+			want.Mode.Type() != got.Mode.Type() ||
+			want.Mode.Perm() != got.Mode.Perm()
+		contentMismatch := want.Mode.IsRegular() &&
+			(want.Size != got.Size || want.Digest != got.Digest)
+		if metadataMismatch || contentMismatch {
 			return fmt.Errorf("staged entry %q does not match source", want.TargetPath)
 		}
 	}
@@ -436,7 +441,7 @@ func writeReceipt(stage, sourceDigest, targetDigest string) error {
 	return nil
 }
 
-func verifyExistingTarget(target, sourceDigest string) error {
+func verifyExistingTarget(target string, sourceEntries []manifestEntry) error {
 	info, err := os.Lstat(target)
 	if err != nil {
 		return err
@@ -452,17 +457,37 @@ func verifyExistingTarget(target, sourceDigest string) error {
 	if err := json.Unmarshal(data, &completed); err != nil {
 		return fmt.Errorf("decode migration receipt: %w", err)
 	}
-	if completed.SchemaVersion != receiptVersion || completed.SourceDigest != sourceDigest || completed.TargetDigest == "" {
+	if completed.TargetDigest == "" {
 		return fmt.Errorf("migration target belongs to different source state")
 	}
 	actual, err := scanTarget(target)
 	if err != nil {
 		return fmt.Errorf("inspect existing Tessarr state: %w", err)
 	}
-	if digestManifest(actual) != completed.TargetDigest {
-		return fmt.Errorf("existing Tessarr state failed receipt verification")
+	switch completed.SchemaVersion {
+	case receiptVersion:
+		if completed.SourceDigest != digestManifest(sourceEntries) {
+			return fmt.Errorf("migration target belongs to different source state")
+		}
+		if digestManifest(actual) != completed.TargetDigest {
+			return fmt.Errorf("existing Tessarr state failed receipt verification")
+		}
+		return nil
+	case legacyReceiptVersionV2:
+		// Version 2 included filesystem-dependent directory allocation sizes.
+		// Only its exact recorded hashes provide provenance. Directory allocation
+		// sizes cannot be reconstructed safely after they drift, so require an
+		// explicit recovery instead of accepting a content-only reconstruction.
+		if completed.SourceDigest == digestManifestV2(sourceEntries) &&
+			completed.TargetDigest == digestManifestV2(actual) {
+			return nil
+		}
+		return fmt.Errorf(
+			"version-two migration receipt cannot be safely verified after filesystem metadata drift; recover or remigrate explicitly",
+		)
+	default:
+		return fmt.Errorf("migration target uses unsupported receipt version %d", completed.SchemaVersion)
 	}
-	return nil
 }
 
 func applyStatePathRebase(stage, source, target string) error {
@@ -599,9 +624,21 @@ func readVerifiedReceipt(target string, targetInfo os.FileInfo) ([]byte, error) 
 }
 
 func digestManifest(entries []manifestEntry) string {
+	return digestManifestWithDirectorySizes(entries, false)
+}
+
+func digestManifestV2(entries []manifestEntry) string {
+	return digestManifestWithDirectorySizes(entries, true)
+}
+
+func digestManifestWithDirectorySizes(entries []manifestEntry, includeDirectorySizes bool) string {
 	hash := sha256.New()
 	for _, entry := range entries {
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%o\x00%d\x00%s\n", entry.SourcePath, entry.TargetPath, entry.Mode, entry.Size, entry.Digest)
+		size := entry.Size
+		if entry.Mode.IsDir() && !includeDirectorySizes {
+			size = 0
+		}
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%o\x00%d\x00%s\n", entry.SourcePath, entry.TargetPath, entry.Mode, size, entry.Digest)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }

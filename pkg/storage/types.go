@@ -1,13 +1,18 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/Trifocals3537/tessarr/internal/utils"
 	"github.com/Trifocals3537/tessarr/pkg/arr"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
@@ -341,10 +346,17 @@ func (e *Entry) AddUsenetProvider(metadata *NZB) *ProviderEntry {
 	return providerEntry
 }
 
-// AddTorrentProvider adds or updates a providerEntry for a debrid
-func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *ProviderEntry {
+// AddTorrentProvider adds or updates a providerEntry for a debrid. Before a
+// refreshed placement is published, canonical file keys are reconciled by the
+// provider's stable ID or path so naming-rule upgrades cannot strand persisted
+// files behind stale placement keys.
+func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) (*ProviderEntry, error) {
 	if e.Providers == nil {
 		e.Providers = make(map[string]*ProviderEntry)
+	}
+	canonicalNames, err := e.reconcileTorrentFiles(debridTorrent)
+	if err != nil {
+		return nil, err
 	}
 
 	providerEntry := &ProviderEntry{
@@ -356,14 +368,510 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *Provider
 	}
 
 	for _, f := range debridTorrent.GetFiles() {
-		providerEntry.Files[f.Name] = &ProviderFile{
+		canonicalName := canonicalNames[f.Name]
+		if canonicalName == "" {
+			return nil, fmt.Errorf("provider file %q has no canonical identity", f.Name)
+		}
+		if _, exists := providerEntry.Files[canonicalName]; exists {
+			return nil, fmt.Errorf("provider files collide at canonical name %q", canonicalName)
+		}
+		providerEntry.Files[canonicalName] = &ProviderFile{
 			Id:   f.Id,
 			Link: f.Link,
 			Path: f.Path,
 		}
 	}
 	e.Providers[debridTorrent.Debrid] = providerEntry
-	return providerEntry
+	return providerEntry, nil
+}
+
+// UpdateTorrentProviderState publishes transfer metadata without treating an
+// incomplete provider file snapshot as authoritative. Existing placement file
+// identities remain available for a later complete refresh; a new placement
+// starts empty and cannot leak partial files into the canonical tree.
+func (e *Entry) UpdateTorrentProviderState(remote *debridTypes.Torrent) (*ProviderEntry, error) {
+	if remote == nil {
+		return nil, fmt.Errorf("provider torrent is nil")
+	}
+	if e.Providers == nil {
+		e.Providers = make(map[string]*ProviderEntry)
+	}
+	previous := e.Providers[remote.Debrid]
+	files := make(map[string]*ProviderFile)
+	var addedAt time.Time
+	var downloadedAt *time.Time
+	if previous != nil {
+		addedAt = previous.AddedAt
+		downloadedAt = previous.DownloadedAt
+		for name, file := range previous.Files {
+			files[name] = file
+		}
+	}
+	if addedAt.IsZero() {
+		addedAt = time.Now()
+	}
+	placement := &ProviderEntry{
+		Provider:     remote.Debrid,
+		ID:           remote.Id,
+		AddedAt:      addedAt,
+		Status:       remote.Status,
+		Progress:     remote.Progress,
+		Files:        files,
+		DownloadedAt: downloadedAt,
+	}
+	e.Providers[remote.Debrid] = placement
+	return placement, nil
+}
+
+func (e *Entry) reconcileTorrentFiles(remote *debridTypes.Torrent) (map[string]string, error) {
+	if remote == nil {
+		return nil, fmt.Errorf("provider torrent is nil")
+	}
+	if e.Files == nil {
+		e.Files = make(map[string]*File)
+	}
+	remoteFiles := make(map[string]debridTypes.File, len(remote.Files))
+	canonicalNames := make(map[string]string, len(remote.Files))
+	for _, file := range remote.GetFiles() {
+		remoteFiles[file.Name] = file
+		canonicalNames[file.Name] = file.Name
+	}
+	if len(e.Files) == 0 {
+		return canonicalNames, nil
+	}
+
+	idIndex := make(map[string][]string, len(remoteFiles))
+	nativePathIndex := make(map[string][]string, len(remoteFiles))
+	outputPathIndex := make(map[string][]string, len(remoteFiles))
+	for name, file := range remoteFiles {
+		if file.Id != "" {
+			idIndex[file.Id] = append(idIndex[file.Id], name)
+		}
+		if key := providerPathIdentity(file.Path); key != "" {
+			nativePathIndex[key] = append(nativePathIndex[key], name)
+		}
+		if key := providerPathIdentity(file.LocalPath()); key != "" {
+			outputPathIndex[key] = append(outputPathIndex[key], name)
+		}
+	}
+
+	canonicalToRemote := make(map[string]string)
+	remoteToCanonical := make(map[string]string)
+	addMatch := func(canonicalName, remoteName string) error {
+		if canonicalName == "" || remoteName == "" {
+			return nil
+		}
+		if previous := canonicalToRemote[canonicalName]; previous != "" && previous != remoteName {
+			return fmt.Errorf("canonical file %q matches multiple refreshed files", canonicalName)
+		}
+		if previous := remoteToCanonical[remoteName]; previous != "" && previous != canonicalName {
+			return fmt.Errorf("refreshed provider file %q matches multiple canonical files", remoteName)
+		}
+		canonicalToRemote[canonicalName] = remoteName
+		remoteToCanonical[remoteName] = canonicalName
+		return nil
+	}
+
+	previous := e.Providers[remote.Debrid]
+	if previous != nil {
+		for oldName, oldFile := range previous.Files {
+			if oldFile == nil || e.Files[oldName] == nil {
+				continue
+			}
+			newName, matched, err := matchRefreshedProviderFileName(
+				oldFile,
+				e.Files[oldName],
+				idIndex,
+				nativePathIndex,
+				outputPathIndex,
+				remoteFiles,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+			}
+			if matched {
+				if err := addMatch(oldName, newName); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	// A newly added provider has no prior placement. Reuse provider-relative
+	// paths from every existing placement so the new placement maps onto the
+	// same canonical files instead of publishing a duplicate set.
+	for _, placement := range e.Providers {
+		if placement == nil {
+			continue
+		}
+		for oldName, oldFile := range placement.Files {
+			if oldFile == nil || e.Files[oldName] == nil || canonicalToRemote[oldName] != "" {
+				continue
+			}
+			match, matched, err := matchProviderFilePath(
+				oldFile.Path,
+				e.Files[oldName],
+				nativePathIndex,
+				outputPathIndex,
+				remoteFiles,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile provider file %q: %w", oldName, err)
+			}
+			if matched {
+				if err := addMatch(oldName, match); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	// Provider-only legacy rows may not have retained placement paths. Their
+	// canonical local path is still a safe final fallback when it identifies
+	// exactly one refreshed file.
+	for oldName, file := range e.Files {
+		if file == nil || canonicalToRemote[oldName] != "" {
+			continue
+		}
+		match, matched, err := matchProviderOutputPath(
+			file.Path,
+			file,
+			outputPathIndex,
+			remoteFiles,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile canonical file %q: %w", oldName, err)
+		}
+		if matched {
+			if err := addMatch(oldName, match); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	canChangeLocalIdentity := !torrentArtifactsMayExist(e)
+	renames := make(map[string]string)
+	for oldName, newName := range canonicalToRemote {
+		if canChangeLocalIdentity && oldName != newName {
+			renames[oldName] = newName
+			canonicalNames[newName] = newName
+		} else {
+			canonicalNames[newName] = oldName
+		}
+	}
+
+	canonical := make(map[string]*File, len(e.Files))
+	for oldName, file := range e.Files {
+		newName := oldName
+		if renamed := renames[oldName]; renamed != "" {
+			newName = renamed
+		}
+		if _, exists := canonical[newName]; exists {
+			return nil, fmt.Errorf("canonical file rename %q to %q collides with an existing file", oldName, newName)
+		}
+		canonical[newName] = file
+	}
+	unmatchedRemoteNames := make([]string, 0, len(remoteFiles))
+	for remoteName := range remoteFiles {
+		if remoteToCanonical[remoteName] != "" {
+			continue
+		}
+		unmatchedRemoteNames = append(unmatchedRemoteNames, remoteName)
+	}
+	sort.Slice(unmatchedRemoteNames, func(i, j int) bool {
+		left := remoteFiles[unmatchedRemoteNames[i]]
+		right := remoteFiles[unmatchedRemoteNames[j]]
+		leftPath := providerPathIdentity(left.Path)
+		rightPath := providerPathIdentity(right.Path)
+		if leftPath != rightPath {
+			return leftPath < rightPath
+		}
+		return unmatchedRemoteNames[i] < unmatchedRemoteNames[j]
+	})
+	if !canChangeLocalIdentity && len(unmatchedRemoteNames) > 0 {
+		// Manager applies non-empty provider titles after this reconciliation.
+		// Reserve against the identity that the final output layout will see.
+		outputEntry := *e
+		if e.CanApplyTorrentTitle(remote) {
+			if remote.Name != "" {
+				outputEntry.Name = remote.Name
+			}
+			if remote.OriginalFilename != "" {
+				outputEntry.OriginalFilename = remote.OriginalFilename
+			}
+		}
+		if err := reserveMaterializedTorrentOutputPaths(
+			&outputEntry,
+			canonical,
+			remoteFiles,
+			canonicalNames,
+			canonicalToRemote,
+			unmatchedRemoteNames,
+		); err != nil {
+			return nil, err
+		}
+	}
+	for _, remoteName := range unmatchedRemoteNames {
+		remoteFile := remoteFiles[remoteName]
+		canonicalName := canonicalNames[remoteName]
+		if _, exists := canonical[canonicalName]; exists {
+			return nil, fmt.Errorf("new provider file %q collides with canonical file %q", remoteName, canonicalName)
+		}
+		canonical[canonicalName] = newCanonicalTorrentFile(e, remoteFile)
+	}
+
+	providerMaps := make(map[string]map[string]*ProviderFile, len(e.Providers))
+	for providerName, placement := range e.Providers {
+		if placement == nil {
+			continue
+		}
+		files := make(map[string]*ProviderFile, len(placement.Files))
+		for oldName, file := range placement.Files {
+			newName := oldName
+			if renamed := renames[oldName]; renamed != "" {
+				// Provider IDs are provider-local, and a shared old map key is
+				// not enough to prove that a fallback link is the same media.
+				// Carry a non-refreshed placement across a canonical rename only
+				// when its provider-relative path establishes that association.
+				// Otherwise omit it until that placement is refreshed and can be
+				// reconciled independently.
+				if providerName != remote.Debrid && !providerFileMatchesRemotePath(file, remoteFiles[renamed]) {
+					continue
+				}
+				newName = renamed
+			}
+			if _, exists := files[newName]; exists {
+				return nil, fmt.Errorf("provider %q file rename %q to %q collides with an existing file", providerName, oldName, newName)
+			}
+			files[newName] = file
+		}
+		providerMaps[providerName] = files
+	}
+
+	for _, remoteName := range canonicalToRemote {
+		canonicalName := canonicalNames[remoteName]
+		file := canonical[canonicalName]
+		remoteFile := remoteFiles[remoteName]
+		if canChangeLocalIdentity {
+			file.Name = canonicalName
+			file.Path = remoteFile.LocalPath()
+		} else if file.Path == "" {
+			file.Path = remoteFile.LocalPath()
+		}
+		if remoteFile.Size > 0 || remoteFile.ByteRange != nil || (file.Size <= 0 && file.ByteRange == nil) {
+			file.Size = remoteFile.Size
+			file.ByteRange = remoteFile.ByteRange
+		}
+		file.InfoHash = e.InfoHash
+		if file.AddedOn.IsZero() {
+			file.AddedOn = e.AddedOn
+		}
+	}
+	e.Files = canonical
+	for providerName, files := range providerMaps {
+		e.Providers[providerName].Files = files
+	}
+	return canonicalNames, nil
+}
+
+func newCanonicalTorrentFile(entry *Entry, file debridTypes.File) *File {
+	return &File{
+		Name:      file.Name,
+		Path:      file.LocalPath(),
+		Size:      file.Size,
+		ByteRange: file.ByteRange,
+		Deleted:   file.Deleted,
+		InfoHash:  entry.InfoHash,
+		AddedOn:   entry.AddedOn,
+	}
+}
+
+func torrentArtifactsMayExist(entry *Entry) bool {
+	if entry == nil {
+		return false
+	}
+	if entry.CompletedAt != nil || entry.IsDownloading || entry.SizeDownloaded > 0 {
+		return true
+	}
+	// IsDownloading is process-local work state and is intentionally cleared
+	// during restart recovery. The owned output directory is durable evidence
+	// that a symlink, STRM, or downloaded file may already exist. Any inspection
+	// error other than nonexistence is handled conservatively to avoid stranding
+	// an artifact behind a renamed logical path.
+	if !filepath.IsAbs(entry.SavePath) {
+		// Relative and empty legacy roots cannot be pinned without consulting
+		// process working-directory state. Treat them as potentially materialized
+		// instead of authorizing an irreversible identity change.
+		return true
+	}
+	candidate := entry.DownloadPath()
+	relative, err := filepath.Rel(entry.SavePath, candidate)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		// An invalid legacy output identity is never safe to rename implicitly.
+		return true
+	}
+	rooted, _, err := safepath.OpenRoot(entry.SavePath)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	defer rooted.Close()
+	if _, err := rooted.Lstat(relative); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return false
+}
+
+func torrentFileSizesCompatible(canonical *File, remote debridTypes.File) bool {
+	canonicalSize := boundedTorrentTransferSize(canonical.Size, canonical.ByteRange)
+	remoteSize := boundedTorrentTransferSize(remote.Size, remote.ByteRange)
+	return canonicalSize <= 0 || remoteSize <= 0 || canonicalSize == remoteSize
+}
+
+func boundedTorrentTransferSize(size int64, byteRange *[2]int64) int64 {
+	if byteRange == nil || byteRange[0] < 0 || byteRange[1] < byteRange[0] {
+		return size
+	}
+	span := byteRange[1] - byteRange[0]
+	if span == math.MaxInt64 {
+		return 0
+	}
+	return span + 1
+}
+
+func matchRefreshedProviderFileName(
+	oldFile *ProviderFile,
+	canonicalFile *File,
+	idIndex, nativePathIndex, outputPathIndex map[string][]string,
+	remoteFiles map[string]debridTypes.File,
+) (string, bool, error) {
+	if oldFile.Id != "" {
+		matches := idIndex[oldFile.Id]
+		if len(matches) > 1 {
+			return "", false, fmt.Errorf("provider ID %q is ambiguous", oldFile.Id)
+		}
+		if len(matches) == 1 {
+			// A unique provider-local ID is stronger identity evidence than a
+			// provider path. Output-path aliases can legitimately equal another
+			// file's native path after portable sanitization, so consulting the
+			// combined path index here would turn a proven ID match into a false
+			// ambiguity.
+			return matches[0], true, nil
+		}
+	}
+	if oldFile.Path != "" {
+		pathName, matched, err := matchProviderFilePath(
+			oldFile.Path,
+			canonicalFile,
+			nativePathIndex,
+			outputPathIndex,
+			remoteFiles,
+		)
+		if err != nil {
+			return "", false, err
+		}
+		if matched {
+			return pathName, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func matchProviderFilePath(
+	value string,
+	canonicalFile *File,
+	nativePathIndex, outputPathIndex map[string][]string,
+	remoteFiles map[string]debridTypes.File,
+) (string, bool, error) {
+	key := providerPathIdentity(value)
+	if key == "" {
+		return "", false, nil
+	}
+	if matches := nativePathIndex[key]; len(matches) > 1 {
+		return "", false, fmt.Errorf("provider path %q is ambiguous", value)
+	} else if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	var sizeMatches []string
+	hadSizeConflict := false
+	for name, remoteFile := range remoteFiles {
+		remoteKey := providerPathIdentity(remoteFile.Path)
+		if !providerPathsDifferOnlyByLeadingRoot(key, remoteKey) {
+			continue
+		}
+		if torrentFileSizesCompatible(canonicalFile, remoteFile) {
+			sizeMatches = append(sizeMatches, name)
+		} else {
+			hadSizeConflict = true
+		}
+	}
+	if len(sizeMatches) > 1 {
+		return "", false, fmt.Errorf("provider path %q is ambiguous without its release root", value)
+	}
+	if len(sizeMatches) == 1 {
+		return sizeMatches[0], true, nil
+	}
+	if hadSizeConflict {
+		return "", false, fmt.Errorf("provider path %q conflicts with refreshed file sizes", value)
+	}
+	// Portable output paths are weaker evidence than all forms of a provider's
+	// native path. A source-native path can equal an unrelated file's sanitized
+	// output while the intended file differs only by a release-root prefix, so
+	// consult output paths only after native exact and rooted matches are absent.
+	if name, matched, err := matchProviderOutputPath(value, canonicalFile, outputPathIndex, remoteFiles); err != nil || matched {
+		return name, matched, err
+	}
+	return "", false, nil
+}
+
+func matchProviderOutputPath(
+	value string,
+	canonicalFile *File,
+	outputPathIndex map[string][]string,
+	remoteFiles map[string]debridTypes.File,
+) (string, bool, error) {
+	key := providerPathIdentity(value)
+	if key == "" {
+		return "", false, nil
+	}
+	matches := outputPathIndex[key]
+	if len(matches) > 1 {
+		return "", false, fmt.Errorf("provider output path %q is ambiguous", value)
+	}
+	if len(matches) == 0 {
+		return "", false, nil
+	}
+	name := matches[0]
+	if !torrentFileSizesCompatible(canonicalFile, remoteFiles[name]) {
+		return "", false, fmt.Errorf("provider output path %q conflicts with refreshed file sizes", value)
+	}
+	return name, true, nil
+}
+
+func providerPathsDifferOnlyByLeadingRoot(left, right string) bool {
+	if left == "" || right == "" || left == right ||
+		!strings.Contains(left, "/") || !strings.Contains(right, "/") {
+		return false
+	}
+	return strings.HasSuffix(left, "/"+right) || strings.HasSuffix(right, "/"+left)
+}
+
+func providerPathIdentity(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(path.Clean(value))
+}
+
+func providerFileMatchesRemotePath(providerFile *ProviderFile, remoteFile debridTypes.File) bool {
+	if providerFile == nil {
+		return false
+	}
+	key := providerPathIdentity(providerFile.Path)
+	if key == "" {
+		return false
+	}
+	return key == providerPathIdentity(remoteFile.Path) || key == providerPathIdentity(remoteFile.LocalPath())
 }
 
 // ActivatePlacement switches the active debrid
@@ -687,7 +1195,7 @@ func (ct *CachedTorrent) ToManagedTorrent() *Entry {
 	for name, f := range ct.Files {
 		mt.Files[name] = &File{
 			Name:      f.Name,
-			Path:      f.Path,
+			Path:      f.LocalPath(),
 			Size:      f.Size,
 			ByteRange: f.ByteRange,
 			InfoHash:  ct.InfoHash, // Track which torrent this file came from

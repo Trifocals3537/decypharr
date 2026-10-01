@@ -215,6 +215,17 @@ func readMetadataFile(root, target string) ([]byte, error) {
 }
 
 func writeMetadataFile(root, target string, data []byte, perm os.FileMode) error {
+	return writeMetadataFileWithMode(root, target, data, perm, false)
+}
+
+// writeMetadataFilePreservingMode restores the exact permission bits of an
+// existing offline-migration record, independently of the process umask.
+// Runtime writes continue to honor the umask through writeMetadataFile.
+func writeMetadataFilePreservingMode(root, target string, data []byte, perm os.FileMode) error {
+	return writeMetadataFileWithMode(root, target, data, perm, true)
+}
+
+func writeMetadataFileWithMode(root, target string, data []byte, perm os.FileMode, preserveMode bool) error {
 	absoluteRoot, leaf, err := metadataDirectLeaf(root, target)
 	if err != nil {
 		return err
@@ -247,9 +258,13 @@ func writeMetadataFile(root, target string, data []byte, perm os.FileMode) error
 	}
 
 	writeErr := writeFull(file, data)
+	var chmodErr error
+	if preserveMode {
+		chmodErr = file.Chmod(perm.Perm())
+	}
 	syncErr := file.Sync()
 	fileCloseErr := file.Close()
-	if err := errors.Join(writeErr, syncErr, fileCloseErr); err != nil {
+	if err := errors.Join(writeErr, chmodErr, syncErr, fileCloseErr); err != nil {
 		removeErr := rooted.Remove(leaf)
 		if os.IsNotExist(removeErr) {
 			removeErr = nil

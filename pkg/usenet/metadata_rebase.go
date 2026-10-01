@@ -91,7 +91,7 @@ func rebaseNZBMetadataPath(metaDir, id, sourceRoot, sourceNZBRoot, targetNZBRoot
 	if err != nil {
 		return false, err
 	}
-	if err := writeMetadataFile(metaDir, temporary, encoded, info.Mode().Perm()); err != nil {
+	if err := writeMetadataFilePreservingMode(metaDir, temporary, encoded, info.Mode().Perm()); err != nil {
 		return false, fmt.Errorf("write staged NZB metadata %q: %w", id, err)
 	}
 	if err := renameMetadataFile(metaDir, temporary, path); err != nil {

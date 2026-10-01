@@ -492,7 +492,7 @@ func (d *Downloader) createTorrentSymlinksWhenMountFilesAppear(ctx context.Conte
 		sourceKeys[layout.key] = []string{layout.key}
 		if activePlacement != nil {
 			if providerFile := activePlacement.Files[layout.file.Name]; providerFile != nil {
-				providerRelative, providerErr := normalizeTorrentProviderSourcePath(strings.TrimSpace(providerFile.Path))
+				providerRelative, providerErr := normalizeTorrentProviderSourcePath(providerFile.Path)
 				if providerErr == nil {
 					providerKey := torrentProviderSourceKey(providerRelative)
 					if providerKey != layout.key {

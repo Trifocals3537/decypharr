@@ -38,6 +38,7 @@ func TestRebaseStatePathsUpdatesContainedMainAndQueuePaths(t *testing.T) {
 		MountPath:   filepath.Join(root, "external-mount"),
 		SavePath:    filepath.Join(sourceRoot, "downloads"),
 		ContentPath: filepath.Join(sourceRoot, "downloads", "Queue"),
+		Magnet:      filepath.Join(sourceRoot, "usenet", "nzbs", "queue-entry.nzb"),
 		Files:       map[string]*File{},
 		Providers:   map[string]*ProviderEntry{},
 	}
@@ -81,7 +82,8 @@ func TestRebaseStatePathsUpdatesContainedMainAndQueuePaths(t *testing.T) {
 		t.Fatalf("external queue mount changed from %q to %q", queueEntry.MountPath, rebasedQueue.MountPath)
 	}
 	if rebasedQueue.SavePath != filepath.Join(targetRoot, "downloads") ||
-		rebasedQueue.ContentPath != filepath.Join(targetRoot, "downloads", "Queue") {
+		rebasedQueue.ContentPath != filepath.Join(targetRoot, "downloads", "Queue") ||
+		rebasedQueue.Magnet != filepath.Join(targetRoot, "usenet", "nzbs", "queue-entry.nzb") {
 		t.Fatalf("rebased queue paths = %#v", rebasedQueue)
 	}
 }
@@ -101,6 +103,7 @@ func TestRebaseStatePathsUpdatesPendingQueueDeletionSnapshots(t *testing.T) {
 		Name:        "Pending",
 		SavePath:    filepath.Join(sourceRoot, "downloads"),
 		ContentPath: filepath.Join(sourceRoot, "downloads", "Pending"),
+		Magnet:      filepath.Join(sourceRoot, "usenet", "nzbs", "pending-delete.nzb"),
 		Files:       map[string]*File{},
 		Providers:   map[string]*ProviderEntry{},
 	}
@@ -146,7 +149,8 @@ func TestRebaseStatePathsUpdatesPendingQueueDeletionSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.SavePath != filepath.Join(targetRoot, "downloads") ||
-		snapshot.ContentPath != filepath.Join(targetRoot, "downloads", "Pending") {
+		snapshot.ContentPath != filepath.Join(targetRoot, "downloads", "Pending") ||
+		snapshot.Magnet != filepath.Join(targetRoot, "usenet", "nzbs", "pending-delete.nzb") {
 		t.Fatalf("rebased queue deletion snapshot = %#v", snapshot)
 	}
 	if len(tombstone.PlacementSnapshots) != 1 {

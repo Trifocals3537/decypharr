@@ -180,7 +180,7 @@ func rebaseQueueTombstoneSnapshots(key string, tombstone *queueDeletionTombstone
 
 func rebaseEntryStatePaths(entry *Entry, sourceRoot, targetRoot string) bool {
 	changed := false
-	for _, value := range []*string{&entry.MountPath, &entry.SavePath, &entry.ContentPath} {
+	for _, value := range []*string{&entry.MountPath, &entry.SavePath, &entry.ContentPath, &entry.Magnet} {
 		if rebased, ok := rebaseContainedPath(*value, sourceRoot, targetRoot); ok {
 			*value = rebased
 			changed = true

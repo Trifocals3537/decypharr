@@ -805,35 +805,9 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 		}
 	}
 	if initializeAuth {
-		// Always initialize a private session-signing key, even when auth is
-		// currently disabled. Authentication can be enabled at runtime without
-		// restarting the HTTP server and must never fall back to a shared key.
-		auth, err := c.loadAuth()
+		authChanged, err := c.materializeAuthDefaults()
 		if err != nil {
 			return err
-		}
-		c.Auth = auth
-		authChanged := false
-		if c.Auth.SessionSecret == "" {
-			secret, err := generateAPIToken()
-			if err != nil {
-				return fmt.Errorf("generate session secret: %w", err)
-			}
-			c.Auth.SessionSecret = secret
-			authChanged = true
-		}
-
-		// Generate an API token for the live runtime if auth is enabled and no
-		// token exists. Read-only validation intentionally skips this block.
-		if c.UseAuth {
-			if c.Auth.APIToken == "" {
-				token, err := generateAPIToken()
-				if err != nil {
-					return fmt.Errorf("generate API token: %w", err)
-				}
-				c.Auth.APIToken = token
-				authChanged = true
-			}
 		}
 		if authChanged {
 			if err := c.saveAuth(c.Auth); err != nil {
@@ -849,6 +823,35 @@ func (c *Config) setDefaultsForPath(configRoot string, initializeAuth bool) erro
 
 	c.applyRepairDefaults()
 	return nil
+}
+
+// materializeAuthDefaults generates credentials in memory. Update calls this
+// before hashing its restart transaction; Save persists the same values later.
+func (c *Config) materializeAuthDefaults() (bool, error) {
+	// Always initialize a private signing key, even while auth is disabled.
+	// Read-only validation deliberately does not call this helper.
+	auth, err := c.loadAuth()
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	if auth.SessionSecret == "" {
+		secret, err := generateAPIToken()
+		if err != nil {
+			return false, fmt.Errorf("generate session secret: %w", err)
+		}
+		auth.SessionSecret = secret
+		changed = true
+	}
+	if c.UseAuth && auth.APIToken == "" {
+		token, err := generateAPIToken()
+		if err != nil {
+			return false, fmt.Errorf("generate API token: %w", err)
+		}
+		auth.APIToken = token
+		changed = true
+	}
+	return changed, nil
 }
 
 func (c *Config) applyRepairDefaults() {

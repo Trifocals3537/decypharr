@@ -41,6 +41,35 @@ func TestStartServicesPropagatesErrorAndCancelsPeer(t *testing.T) {
 	}
 }
 
+func TestRestartCommitWaitsForHTTPAndManagerReadiness(t *testing.T) {
+	managerReady := make(chan struct{})
+	httpReady := make(chan struct{})
+	serviceStopped := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() {
+		result <- waitForServiceReadiness(context.Background(), managerReady, httpReady, serviceStopped)
+	}()
+	close(managerReady)
+	select {
+	case <-result:
+		t.Fatal("restart committed before HTTP listener bound")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(serviceStopped)
+	if <-result {
+		t.Fatal("restart committed after HTTP service failed")
+	}
+
+	managerReady = make(chan struct{})
+	httpReady = make(chan struct{})
+	serviceStopped = make(chan struct{})
+	close(managerReady)
+	close(httpReady)
+	if !waitForServiceReadiness(context.Background(), managerReady, httpReady, serviceStopped) {
+		t.Fatal("healthy manager and HTTP listener did not permit restart commit")
+	}
+}
+
 func TestStartServicesWaitsForServiceShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan struct{})

@@ -10,6 +10,8 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestMigrateCopiesVerifiesAndRenamesState(t *testing.T) {
@@ -47,6 +49,56 @@ func TestMigrateCopiesVerifiesAndRenamesState(t *testing.T) {
 	}
 	if !again.AlreadyMigrated {
 		t.Fatalf("idempotent Migrate() result = %+v", again)
+	}
+}
+
+func TestPromoteStagedStateSyncsBeforeAndAfterRename(t *testing.T) {
+	root := t.TempDir()
+	stage := filepath.Join(root, "stage")
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	promoted, err := promoteStagedState(stage, target, func(path string) error {
+		synced = append(synced, path)
+		if path == stage {
+			if _, err := os.Lstat(target); !os.IsNotExist(err) {
+				t.Fatalf("target existed before staging directory sync: %v", err)
+			}
+		} else if _, err := os.Stat(target); err != nil {
+			t.Fatalf("target missing before parent directory sync: %v", err)
+		}
+		return nil
+	})
+	if err != nil || !promoted || len(synced) != 2 || synced[0] != stage || synced[1] != root {
+		t.Fatalf("promotion = %t, %v; sync order = %v", promoted, err, synced)
+	}
+
+	stage = filepath.Join(root, "stage-failure")
+	target = filepath.Join(root, "target-failure")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err = promoteStagedState(stage, target, func(string) error { return os.ErrPermission })
+	if promoted || err == nil {
+		t.Fatalf("failed pre-rename sync promoted state: promoted=%t err=%v", promoted, err)
+	}
+	if _, err := os.Lstat(stage); err != nil {
+		t.Fatalf("stage removed on pre-rename sync failure: %v", err)
+	}
+
+	promoted, err = promoteStagedState(stage, target, func(path string) error {
+		if path == root {
+			return os.ErrPermission
+		}
+		return nil
+	})
+	if !promoted || err == nil {
+		t.Fatalf("post-rename sync failure hid promoted state: promoted=%t err=%v", promoted, err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("target removed on post-rename sync failure: %v", err)
 	}
 }
 
@@ -319,6 +371,43 @@ func TestMigrateRebasesPersistedEntryPaths(t *testing.T) {
 	if got.SavePath != filepath.Join(target, "downloads") ||
 		got.ContentPath != filepath.Join(target, "downloads", "Migration Entry") {
 		t.Fatalf("migrated entry paths = %#v", got)
+	}
+}
+
+func TestMigrateRebasesPersistedNZBSourcePath(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	id := "123e4567-e89b-12d3-a456-426614174000"
+	sourceNZB := filepath.Join(source, "usenet", "nzbs", id+".nzb")
+	mustWriteFile(t, sourceNZB, []byte("nzb"), 0o600)
+	encoded, err := proto.Marshal(&usenet.NZBProto{Id: id, Name: "Episode", Path: sourceNZB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(source, "usenet", "meta", id+".meta"), encoded, 0o644)
+	if _, err := Migrate(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	previous := config.GetMainPath()
+	if err := config.SetConfigPath(target); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := config.SetConfigPath(previous); err != nil {
+			t.Errorf("restore configuration path: %v", err)
+		}
+	})
+	metaStore, err := usenet.NewNZBStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nzb, err := metaStore.GetNZB(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(target, "usenet", "nzbs", id+".nzb"); nzb.Path != want {
+		t.Fatalf("migrated NZB path = %q, want %q", nzb.Path, want)
 	}
 }
 

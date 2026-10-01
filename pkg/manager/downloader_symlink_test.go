@@ -174,6 +174,62 @@ func TestCreateTorrentSymlinksAllowsProviderNativePunctuation(t *testing.T) {
 	}
 }
 
+func TestCreateTorrentSymlinksPreservesProviderTrailingWhitespace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("provider-native trailing whitespace is not representable on Windows filesystems")
+	}
+	config.SetConfigPath(t.TempDir())
+	downloadRoot := t.TempDir()
+	mountPath := t.TempDir()
+	remoteFiles, err := debridTypes.FilesByLogicalName([]debridTypes.File{{
+		Id: "trailing-space", Path: "Release/Movie.mkv ", Size: 5,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &storage.Entry{
+		InfoHash:       "provider-trailing-space",
+		Name:           "release",
+		Protocol:       config.ProtocolTorrent,
+		SavePath:       downloadRoot,
+		ActiveProvider: "primary",
+		Files:          make(map[string]*storage.File),
+		Providers: map[string]*storage.ProviderEntry{
+			"primary": {Provider: "primary", Files: make(map[string]*storage.ProviderFile)},
+		},
+	}
+	for name, remote := range remoteFiles {
+		entry.Files[name] = &storage.File{Name: name, Path: remote.LocalPath(), Size: remote.Size}
+		entry.Providers["primary"].Files[name] = &storage.ProviderFile{Id: remote.Id, Path: remote.Path}
+	}
+	target := filepath.Join(mountPath, "Release", "Movie.mkv ")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkDir, _, err := claimTorrentEntryDirectory(downloadRoot, entry, torrentLegacyProof{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &Downloader{dest: downloadRoot, logger: zerolog.Nop()}
+	paths, err := downloader.createTorrentSymlinksWhenMountFilesAppear(context.Background(), entry, mountPath, symlinkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("created %d symlinks, want 1", len(paths))
+	}
+	resolved, err := filepath.EvalSymlinks(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFilesystemPath(resolved, target) {
+		t.Fatalf("symlink resolves to %q, want provider-native source %q", resolved, target)
+	}
+}
+
 func TestCreateUsenetSymlinksSkipsMatchingDirectoryName(t *testing.T) {
 	downloadRoot := t.TempDir()
 	mountPath := t.TempDir()

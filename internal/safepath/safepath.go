@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -416,14 +418,14 @@ func utf8PrefixBytes(value string, maxBytes int) int {
 	return end
 }
 
-// PortableNameKey returns the case-insensitive Windows-equivalent key for a
-// validated identifier. It is suitable for collision detection before files
-// are persisted on either Windows or a case-sensitive filesystem.
+// PortableNameKey returns a case-insensitive, Unicode-normalized key for a
+// validated identifier. It detects collisions on Windows and on filesystems
+// that canonicalize Unicode names (including default macOS volumes).
 func PortableNameKey(value string) (string, error) {
 	if err := ValidateIdentifier(value); err != nil {
 		return "", err
 	}
-	return strings.ToLower(strings.TrimRight(value, " .")), nil
+	return strings.ToLower(norm.NFC.String(strings.TrimRight(value, " ."))), nil
 }
 
 // ValidateUnderRoot proves target is a strict descendant of root and that no

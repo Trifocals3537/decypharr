@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/Trifocals3537/tessarr/internal/safepath"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -410,9 +411,9 @@ func disambiguateProviderDirectoryName(name, providerKey string, attempt int) (s
 }
 
 func normalizeProviderFilePath(providerPath, fallbackName string) (string, error) {
-	value := strings.TrimSpace(providerPath)
+	value := providerPath
 	if value == "" {
-		value = strings.TrimSpace(fallbackName)
+		value = fallbackName
 	}
 	if value == "" {
 		return "", fmt.Errorf("path is empty")
@@ -438,7 +439,7 @@ func normalizeProviderFilePath(providerPath, fallbackName string) (string, error
 func portableProviderPathKey(value string) string {
 	parts := strings.Split(strings.ReplaceAll(value, `\`, "/"), "/")
 	for i := range parts {
-		parts[i] = strings.ToLower(strings.TrimRight(parts[i], " ."))
+		parts[i] = strings.ToLower(norm.NFC.String(strings.TrimRight(parts[i], " .")))
 	}
 	return strings.Join(parts, "/")
 }

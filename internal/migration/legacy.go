@@ -17,6 +17,7 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/safepath"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/Trifocals3537/tessarr/pkg/usenet"
 )
 
 const (
@@ -161,15 +162,61 @@ func Migrate(options Options) (Result, error) {
 	if digestManifest(currentEntries) != sourceDigest {
 		return result, fmt.Errorf("source state changed during migration; stop the service and retry")
 	}
+	if err := syncNestedStagedDirectories(stage); err != nil {
+		return result, fmt.Errorf("sync staged state directories: %w", err)
+	}
 
 	if err := writeReceipt(stage, sourceDigest, targetDigest); err != nil {
 		return result, err
 	}
-	if err := os.Rename(stage, target); err != nil {
-		return result, fmt.Errorf("promote verified Tessarr state: %w", err)
+	promoted, err = promoteStagedState(stage, target, safepath.SyncDirectory)
+	if err != nil {
+		return result, err
 	}
-	promoted = true
 	return result, nil
+}
+
+// Files are synced when copied or rebased. Sync nested directory entries too
+// so a durable receipt never points at a tree with uncommitted child names.
+func syncNestedStagedDirectories(stage string) error {
+	var directories []string
+	err := filepath.WalkDir(stage, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == stage {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("staged state contains symlink %q", path)
+		}
+		if entry.IsDir() {
+			directories = append(directories, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for index := len(directories) - 1; index >= 0; index-- {
+		if err := safepath.SyncDirectory(directories[index]); err != nil {
+			return fmt.Errorf("sync %s: %w", directories[index], err)
+		}
+	}
+	return nil
+}
+
+func promoteStagedState(stage, target string, syncDirectory func(string) error) (bool, error) {
+	if err := syncDirectory(stage); err != nil {
+		return false, fmt.Errorf("sync migration staging directory: %w", err)
+	}
+	if err := os.Rename(stage, target); err != nil {
+		return false, fmt.Errorf("promote verified Tessarr state: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(target)); err != nil {
+		return true, fmt.Errorf("sync promoted Tessarr state directory: %w", err)
+	}
+	return true, nil
 }
 
 func validateRoots(source, target string) (string, string, error) {
@@ -435,8 +482,15 @@ func writeReceipt(stage, sourceDigest, targetDigest string) error {
 	}
 	data = append(data, '\n')
 	path := filepath.Join(stage, receiptName)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write migration receipt: %w", err)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create migration receipt: %w", err)
+	}
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("persist migration receipt: %w", err)
 	}
 	return nil
 }
@@ -510,11 +564,15 @@ func applyStatePathRebase(stage, source, target string) error {
 				return fmt.Errorf("encode rebased configuration: %w", err)
 			}
 			encoded = append(encoded, '\n')
-			if err := os.WriteFile(configPath, encoded, info.Mode().Perm()); err != nil {
-				return fmt.Errorf("write rebased configuration: %w", err)
+			file, err := os.OpenFile(configPath, os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+			if err != nil {
+				return fmt.Errorf("open rebased configuration: %w", err)
 			}
-			if err := os.Chmod(configPath, info.Mode().Perm()); err != nil {
-				return fmt.Errorf("restore rebased configuration mode: %w", err)
+			_, writeErr := file.Write(encoded)
+			syncErr := file.Sync()
+			closeErr := file.Close()
+			if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+				return fmt.Errorf("persist rebased configuration: %w", err)
 			}
 		}
 	} else if !os.IsNotExist(err) {
@@ -531,6 +589,17 @@ func applyStatePathRebase(stage, source, target string) error {
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect staged storage path: %w", err)
+	}
+	metaPath := filepath.Join(stage, "usenet", "meta")
+	if info, err := os.Lstat(metaPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("staged NZB metadata path is not a regular directory")
+		}
+		if _, err := usenet.RebaseNZBMetadataPaths(metaPath, source, target); err != nil {
+			return fmt.Errorf("rebase persisted NZB source paths: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect staged NZB metadata path: %w", err)
 	}
 	return nil
 }

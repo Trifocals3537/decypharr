@@ -137,6 +137,12 @@ func Update(edit func(*Config) error) (UpdateResult, error) {
 	if err := draft.setStrmDefaults(true); err != nil {
 		return UpdateResult{}, err
 	}
+	// Save also fills missing auth credentials. Materialize them before the
+	// desired snapshot and restart digest are computed, without writing auth.json
+	// outside Update's rollback boundary.
+	if _, err := draft.materializeAuthDefaults(); err != nil {
+		return UpdateResult{}, err
+	}
 	published, err := Clone(draft)
 	if err != nil {
 		return UpdateResult{}, err

@@ -31,6 +31,60 @@ func TestFilesByLogicalNamePreservesUniqueBasenameCompatibility(t *testing.T) {
 	}
 }
 
+func TestFilesByLogicalNameRejectsUnicodeEquivalentProviderPath(t *testing.T) {
+	_, err := FilesByLogicalName([]File{
+		{Id: "nfc", Path: "Release/Caf\u00e9.mkv"},
+		{Id: "nfd", Path: "Release/Cafe\u0301.mkv"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "same portable path") {
+		t.Fatalf("Unicode-equivalent provider paths error = %v", err)
+	}
+}
+
+func TestFilesByLogicalNameDisambiguatesUnicodeEquivalentDirectories(t *testing.T) {
+	files, err := FilesByLogicalName([]File{
+		{Id: "nfc", Path: "Caf\u00e9/first.mkv"},
+		{Id: "nfd", Path: "Cafe\u0301/second.mkv"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := strings.Split(fileByProviderID(t, files, "nfc").OutputPath, "/")[0]
+	second := strings.Split(fileByProviderID(t, files, "nfd").OutputPath, "/")[0]
+	if portableProviderPathKey(first) == portableProviderPathKey(second) {
+		t.Fatalf("Unicode-equivalent directories share output: %q and %q", first, second)
+	}
+}
+
+func TestFilesByLogicalNameDisambiguatesUnicodeEquivalentBasenames(t *testing.T) {
+	files, err := FilesByLogicalName([]File{
+		{Id: "nfc", Path: "Season 01/Caf\u00e9.mkv"},
+		{Id: "nfd", Path: "Season 02/Cafe\u0301.mkv"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := fileByProviderID(t, files, "nfc")
+	second := fileByProviderID(t, files, "nfd")
+	if first.Name == second.Name || portableProviderPathKey(first.Name) == portableProviderPathKey(second.Name) {
+		t.Fatalf("Unicode-equivalent basenames share logical identity: %q and %q", first.Name, second.Name)
+	}
+}
+
+func TestFilesByLogicalNamePreservesProviderTrailingWhitespace(t *testing.T) {
+	files, err := FilesByLogicalName([]File{{Id: "space", Path: "Release/Movie.mkv "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := fileByProviderID(t, files, "space")
+	if file.Path != "Release/Movie.mkv " {
+		t.Fatalf("provider source path lost trailing whitespace: %q", file.Path)
+	}
+	if strings.HasSuffix(file.OutputPath, " ") {
+		t.Fatalf("portable output retained trailing whitespace: %q", file.OutputPath)
+	}
+}
+
 func TestFilesByLogicalNamePreservesNestedDuplicateBasenames(t *testing.T) {
 	files, err := FilesByLogicalName([]File{
 		{Id: "1", Path: `Release\Season 01\Episode.mkv`},

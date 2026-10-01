@@ -226,3 +226,33 @@ func TestStrmUpdateMaterializesSecretBeforeRestartTransaction(t *testing.T) {
 		t.Fatalf("MarkRestartApplying() rejected generated STRM secret: %v", err)
 	}
 }
+
+func TestAuthUpdateMaterializesTokenBeforeRestartTransaction(t *testing.T) {
+	useRuntimeConfig(t)
+	result, err := Update(func(draft *Config) error {
+		draft.UseAuth = true
+		draft.BindAddress = "127.0.0.2"
+		draft.Auth.APIToken = ""
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequired || result.Desired.Auth == nil || len(result.Desired.Auth.APIToken) != 64 {
+		t.Fatalf("desired restart auth defaults not materialized: restart=%t auth=%+v", result.RestartRequired, result.Desired.Auth != nil)
+	}
+	data, err := os.ReadFile(filepath.Join(GetMainPath(), "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Auth
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.APIToken != result.Desired.Auth.APIToken {
+		t.Fatal("persisted API token differs from restart transaction")
+	}
+	if err := MarkRestartApplying(); err != nil {
+		t.Fatalf("MarkRestartApplying() rejected generated API token: %v", err)
+	}
+}

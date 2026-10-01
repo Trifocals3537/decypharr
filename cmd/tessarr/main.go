@@ -124,19 +124,19 @@ func Start(ctx context.Context) error {
 		}
 
 		serviceDone := make(chan error, 1)
+		serviceStopped := make(chan struct{})
 		go func(ctx context.Context) {
 			serviceDone <- startServices(ctx, mgr, srv)
+			close(serviceStopped)
 		}(svcCtx)
 		restartCommitErr := make(chan error, 1)
-		go func(ready <-chan struct{}) {
-			select {
-			case <-ready:
+		go func() {
+			if waitForServiceReadiness(svcCtx, mgr.IsReady(), srv.Ready(), serviceStopped) {
 				if err := config.CommitRestart(); err != nil {
 					restartCommitErr <- err
 				}
-			case <-svcCtx.Done():
 			}
-		}(mgr.IsReady())
+		}()
 
 		select {
 		case <-ctx.Done():
@@ -195,6 +195,31 @@ func Start(ctx context.Context) error {
 				wrapRestartRollbackError(rollbackErr),
 			)
 		}
+	}
+}
+
+func waitForServiceReadiness(ctx context.Context, managerReady, httpReady, serviceStopped <-chan struct{}) bool {
+	for managerReady != nil || httpReady != nil {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-serviceStopped:
+			return false
+		case <-managerReady:
+			managerReady = nil
+		case <-httpReady:
+			httpReady = nil
+		}
+	}
+	// A concurrently failed service wins over readiness, even when both
+	// channels were closed before this goroutine was scheduled.
+	select {
+	case <-ctx.Done():
+		return false
+	case <-serviceStopped:
+		return false
+	default:
+		return true
 	}
 }
 

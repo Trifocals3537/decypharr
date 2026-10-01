@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -73,5 +76,42 @@ func TestServerStartRejectsUnsafeDeploymentBeforeListen(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "deployment safety check") {
 		t.Fatalf("Start() error = %q, want deployment safety context", err)
+	}
+}
+
+func TestServerBindFailureDoesNotSignalReady(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	previousPath := config.GetMainPath()
+	config.Reset()
+	configDir := t.TempDir()
+	if err := config.SetConfigPath(configDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		config.Reset()
+		_ = config.SetConfigPath(previousPath)
+	})
+	data, err := json.Marshal(&config.Config{
+		BindAddress: "127.0.0.1",
+		Port:        strconv.Itoa(listener.Addr().(*net.TCPAddr).Port),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{ready: make(chan struct{})}
+	if err := server.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "listen on") {
+		t.Fatalf("Start() error = %v, want occupied-listener failure", err)
+	}
+	select {
+	case <-server.Ready():
+		t.Fatal("failed HTTP bind signaled readiness")
+	default:
 	}
 }

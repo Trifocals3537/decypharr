@@ -81,6 +81,7 @@ type Server struct {
 	loginLimiter    *loginAttemptLimiter
 	allowedClients  []netip.Prefix
 	accessPolicyErr error
+	ready           chan struct{}
 }
 
 func New(mgr *manager.Manager) *Server {
@@ -119,6 +120,7 @@ func New(mgr *manager.Manager) *Server {
 		templates:    templates,
 		urlBase:      cfg.URLBase,
 		loginLimiter: newLoginAttemptLimiter(),
+		ready:        make(chan struct{}),
 	}
 	s.allowedClients, s.accessPolicyErr =
 		config.ParseAllowedClientCIDRs(cfg.AllowedClientCIDRs)
@@ -193,6 +195,9 @@ func (s *Server) SetRestartFunc(restartFunc func()) {
 	s.restartFunc = restartFunc
 }
 
+// Ready closes only after the HTTP listener has bound successfully.
+func (s *Server) Ready() <-chan struct{} { return s.ready }
+
 func (s *Server) Restart() {
 	if s.restartFunc != nil {
 		time.Sleep(200 * time.Millisecond)
@@ -227,6 +232,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
+	close(s.ready)
 
 	// Start background stats only after the HTTP listener is established.
 	s.stats.Start(ctx)

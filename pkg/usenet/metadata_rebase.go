@@ -26,6 +26,10 @@ func RebaseNZBMetadataPaths(metaDir, sourceRoot, targetRoot string) (int, error)
 		if err != nil {
 			return err
 		}
+		info, err := statMetadataFile(metaDir, path)
+		if err != nil {
+			return fmt.Errorf("inspect NZB metadata %q: %w", id, err)
+		}
 		data, err := readMetadataFile(metaDir, path)
 		if err != nil {
 			return fmt.Errorf("read NZB metadata %q: %w", id, err)
@@ -56,7 +60,7 @@ func RebaseNZBMetadataPaths(metaDir, sourceRoot, targetRoot string) (int, error)
 		if err != nil {
 			return err
 		}
-		if err := writeMetadataFile(metaDir, temporary, encoded, 0o644); err != nil {
+		if err := writeMetadataFile(metaDir, temporary, encoded, info.Mode().Perm()); err != nil {
 			return fmt.Errorf("write staged NZB metadata %q: %w", id, err)
 		}
 		if err := renameMetadataFile(metaDir, temporary, path); err != nil {

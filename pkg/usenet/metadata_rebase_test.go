@@ -3,6 +3,7 @@ package usenet
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestRebaseNZBMetadataPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := writeMetadataFile(metaDir, metaPath, encoded, 0o644); err != nil {
+		if err := writeMetadataFile(metaDir, metaPath, encoded, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -68,6 +69,15 @@ func TestRebaseNZBMetadataPaths(t *testing.T) {
 		}
 		if nzb.Path != want {
 			t.Fatalf("metadata %s path = %q, want %q", id, nzb.Path, want)
+		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(metaPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("metadata %s permissions widened to %o", id, info.Mode().Perm())
+			}
 		}
 	}
 }

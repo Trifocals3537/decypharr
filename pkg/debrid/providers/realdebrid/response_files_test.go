@@ -157,3 +157,33 @@ func TestGetTorrentFilesPreservesNestedDuplicateBasenames(t *testing.T) {
 		t.Fatalf("missing provider paths: %#v", wantPaths)
 	}
 }
+
+func TestProviderFileAdaptersPreserveNativeWhitespace(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	for _, providerPath := range []string{"/Release/Movie.mkv ", "/Release/ Movie.mkv", "/Release/Movie.mkv ."} {
+		t.Run(providerPath, func(t *testing.T) {
+			var data torrentInfo
+			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"files":[{"id":1,"path":%q,"bytes":1024,"selected":1}],"links":["https://example.invalid/file"]}`, providerPath)), &data); err != nil {
+				t.Fatal(err)
+			}
+			client := &RealDebrid{}
+			for adapter, getFiles := range map[string]func(*types.Torrent, torrentInfo) (map[string]types.File, error){
+				"torrent":  client.getTorrentFiles,
+				"selected": client.getSelectedFiles,
+			} {
+				files, err := getFiles(&types.Torrent{Id: "rd"}, data)
+				if err != nil || len(files) != 1 {
+					t.Fatalf("%s: files = %#v, error = %v", adapter, files, err)
+				}
+				for name, file := range files {
+					if file.Path != strings.TrimLeft(providerPath, "/") || file.Name != name || !strings.HasSuffix(name, ".mkv") || strings.HasSuffix(file.OutputPath, " ") || strings.HasSuffix(file.OutputPath, ".") {
+						t.Fatalf("%s: provider identity or portable output changed incorrectly: %#v", adapter, file)
+					}
+					if adapter == "selected" && file.Link != data.Links[0] {
+						t.Fatalf("selected: download link lost: %#v", file)
+					}
+				}
+			}
+		})
+	}
+}

@@ -310,7 +310,7 @@ func (r *RealDebrid) getSelectedFiles(t *types.Torrent, data torrentInfo) (map[s
 	for _, f := range data.Files {
 		if f.Selected == 1 {
 			providerPath := strings.TrimLeft(
-				strings.ReplaceAll(strings.TrimSpace(f.Path), `\`, "/"),
+				strings.ReplaceAll(f.Path, `\`, "/"),
 				"/",
 			)
 			selectedFiles = append(selectedFiles, types.File{
@@ -575,11 +575,14 @@ func (r *RealDebrid) getTorrentFiles(t *types.Torrent, data torrentInfo) (map[st
 
 	for _, f := range data.Files {
 		providerPath := strings.TrimLeft(
-			strings.ReplaceAll(strings.TrimSpace(f.Path), `\`, "/"),
+			strings.ReplaceAll(f.Path, `\`, "/"),
 			"/",
 		)
 		name := path.Base(providerPath)
-		if err := cfg.IsFileAllowed(name, f.Bytes); err != nil {
+		// Filter the portable basename, without changing the native provider
+		// identity used to locate the mounted file. Output names cannot retain
+		// trailing spaces or dots; those must not hide an otherwise valid extension.
+		if err := cfg.IsFileAllowed(strings.TrimRight(name, " ."), f.Bytes); err != nil {
 			continue
 		}
 

@@ -30,10 +30,16 @@ func (m *Manager) recoverQueuedDeletions() (residual error, fatal error) {
 	if err != nil {
 		return nil, err
 	}
+	// An administrative placement obligation belongs to one hash. Its failure
+	// (including failure to sync completion) must gate that hash's local cleanup,
+	// without preventing unrelated queue intents from finishing recovery.
+	adminFailures := make(map[string]error)
 	for _, entry := range adminEntries {
 		if err := m.RemoveTorrentPlacements(entry); err != nil {
+			adminFailures[entry.InfoHash] = err
 			residuals = append(residuals, fmt.Errorf("resume administrative main placement cleanup %s: %w", entry.InfoHash, err))
 		} else if err := store.CompleteMainDeletionPlacements(entry.InfoHash); err != nil {
+			adminFailures[entry.InfoHash] = err
 			residuals = append(residuals, err)
 		}
 	}
@@ -66,6 +72,13 @@ func (m *Manager) recoverQueuedDeletions() (residual error, fatal error) {
 				intent.InfoHash,
 				err,
 			))
+			continue
+		}
+
+		// Keep early row retirement so no worker can resume, but retain the
+		// queue intent and files until the separate admin obligation is durable.
+		if err := adminFailures[intent.InfoHash]; err != nil {
+			residuals = append(residuals, fmt.Errorf("queue deletion %s awaits administrative placement cleanup: %w", intent.InfoHash, err))
 			continue
 		}
 

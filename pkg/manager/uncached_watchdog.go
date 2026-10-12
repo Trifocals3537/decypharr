@@ -167,7 +167,7 @@ func (m *Manager) handoffUncachedFailures(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(handoffErr, err)
 		}
-		if entry == nil || !entry.DownloadUncached {
+		if !storage.FailedUncachedHandoff(entry) {
 			continue
 		}
 		owner := m.arr.Get(entry.Category)
@@ -184,7 +184,7 @@ func (m *Manager) handoffUncachedFailures(ctx context.Context) error {
 			m.logger.Warn().Str("entry", entry.InfoHash).Msg("Uncached transfer lacks submitting client evidence; manual Arr review required")
 			continue
 		}
-		handedOff, err = owner.BlocklistAndResearchDownloadForEndpointCtx(ctx, entry.InfoHash, entry.ClientEndpoint)
+		handedOff, err = owner.BlocklistAndResearchDownloadForEndpointBeforeDeleteCtx(ctx, entry.InfoHash, entry.ClientEndpoint, func() error { return m.queue.storage.AuthorizeUncachedHandoff(entry) })
 		if err != nil {
 			m.uncachedHandoffErrors.Add(1)
 			handoffErr = errors.Join(

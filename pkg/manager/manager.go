@@ -1021,39 +1021,54 @@ func (m *Manager) GetTorrentsCount() (int, error) {
 // DeleteEntry deletes a torrent by infohash
 func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 	return m.deleteMainEntryWithCleanup(infohash, func(mainEntry *storage.Entry) error {
+		if removePlacements {
+			if err := m.storage.PrepareMainDeletionPlacements(mainEntry); err != nil {
+				return err
+			}
+		}
 		// A completed entry is written to main storage before its post-download
 		// action finishes. The main-entry tombstone is already installed here;
 		// queue deletion then drains that worker before provider or main-row
 		// cleanup can complete.
 		if m.queue != nil {
-			var queueCleanup func(queued *storage.Entry) error
 			if removePlacements {
-				queueCleanup = func(queued *storage.Entry) error {
-					return m.RemoveTorrentPlacements(mainEntry, queued)
-				}
+				return m.deleteAdministrativeQueueAndMainPlacements(infohash, mainEntry)
 			}
-			deletedQueue, err := m.queue.deleteWithResultAndSnapshots(
-				infohash,
-				queueCleanup,
-				mainEntry,
-			)
-			if err != nil {
-				return err
-			}
-			if removePlacements && !deletedQueue {
-				if err := m.RemoveTorrentPlacements(mainEntry); err != nil {
-					return fmt.Errorf("remove entry placements: %w", err)
-				}
-			}
-			return nil
+			_, err := m.queue.deleteWithResultAndSnapshots(infohash, nil, mainEntry)
+			return err
 		}
 		if removePlacements {
-			if err := m.RemoveTorrentPlacements(mainEntry); err != nil {
-				return fmt.Errorf("remove entry placements: %w", err)
-			}
+			return m.finishAdministrativeMainPlacements(mainEntry)
 		}
 		return nil
 	})
+}
+
+func (m *Manager) deleteAdministrativeQueueAndMainPlacements(infohash string, mainEntry *storage.Entry) error {
+	mainFinished := false
+	_, err := m.queue.deleteWithPreparation(infohash, func(entry *storage.Entry) error { return m.RemoveTorrentPlacements(entry) }, true, func() (*storage.QueueDeletionIntent, error) {
+		return m.queue.storage.PrepareQueuedDeletion(infohash, true, mainEntry)
+	}, func() error {
+		if err := m.finishAdministrativeMainPlacements(mainEntry); err != nil {
+			return err
+		}
+		mainFinished = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !mainFinished {
+		return m.finishAdministrativeMainPlacements(mainEntry)
+	}
+	return nil
+}
+
+func (m *Manager) finishAdministrativeMainPlacements(entry *storage.Entry) error {
+	if err := m.RemoveTorrentPlacements(entry); err != nil {
+		return err
+	}
+	return m.storage.CompleteMainDeletionPlacements(entry.InfoHash)
 }
 
 func (m *Manager) deleteMainEntryWithCleanup(
@@ -1100,6 +1115,15 @@ func (m *Manager) DeleteEntryForQueueCleanup(queued *storage.Entry) error {
 	return nil
 }
 
+// DeleteQBitQueueEntry retires only the client queue and owned staging data.
+// Provider cancellation requires a durable, Arr-validated failed-transfer proof.
+func (m *Manager) DeleteQBitQueueEntry(infohash string, deleteFiles bool) error {
+	_, err := m.queue.deleteWithPreparation(infohash, func(e *storage.Entry) error { return m.RemoveTorrentPlacements(e) }, deleteFiles, func() (*storage.QueueDeletionIntent, error) {
+		return m.queue.storage.PrepareQBitQueuedDeletion(infohash, deleteFiles)
+	})
+	return err
+}
+
 // DeleteQueueEntry is the API-facing queue deletion path. It preserves legacy
 // behavior when removePlacements is false. When true, provider cleanup happens
 // before queue files, and an associated main row is deleted only after queue
@@ -1111,20 +1135,10 @@ func (m *Manager) DeleteQueueEntry(infohash string, removePlacements bool) error
 	}
 
 	err := m.deleteMainEntryWithCleanup(infohash, func(mainEntry *storage.Entry) error {
-		deletedQueue, err := m.queue.deleteWithResultAndSnapshots(
-			infohash,
-			func(queued *storage.Entry) error {
-				return m.RemoveTorrentPlacements(mainEntry, queued)
-			},
-			mainEntry,
-		)
-		if err != nil {
+		if err := m.storage.PrepareMainDeletionPlacements(mainEntry); err != nil {
 			return err
 		}
-		if !deletedQueue {
-			return m.RemoveTorrentPlacements(mainEntry)
-		}
-		return nil
+		return m.deleteAdministrativeQueueAndMainPlacements(infohash, mainEntry)
 	})
 	if err == nil {
 		return nil

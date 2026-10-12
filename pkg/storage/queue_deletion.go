@@ -24,6 +24,9 @@ var (
 
 const queueDeletionTombstoneVersion = 1
 
+const QueuePlacementScopeTransferOnly = "queued_transfer_only"
+const QueuePlacementScopeAll = "all_placements"
+
 type queueDeletionPhase string
 
 const (
@@ -33,6 +36,7 @@ const (
 )
 
 type queueDeletionTombstone struct {
+	PlacementScope              string             `json:"placement_scope,omitempty"`
 	Version                     int                `json:"version"`
 	Phase                       queueDeletionPhase `json:"phase"`
 	QueueIncarnation            string             `json:"queue_incarnation"`
@@ -48,6 +52,7 @@ type queueDeletionTombstone struct {
 // PlacementEntries are additional same-key snapshots (for example, a main
 // entry) needed to retry provider placement cleanup after a restart.
 type QueueDeletionIntent struct {
+	PlacementScope              string
 	InfoHash                    string
 	QueueIncarnation            string
 	Phase                       string
@@ -94,6 +99,14 @@ func decodeQueueDeletionTombstone(
 			key,
 		)
 	}
+	switch tombstone.PlacementScope {
+	case "", QueuePlacementScopeAll, QueuePlacementScopeTransferOnly:
+	default:
+		return nil, fmt.Errorf("unsupported queue placement scope %q", tombstone.PlacementScope)
+	}
+	if tombstone.PlacementScope == QueuePlacementScopeTransferOnly && (len(tombstone.PlacementSnapshots) > 1 || tombstone.UnrecoverableCleanupPending || (tombstone.PlacementCleanupPending && len(tombstone.PlacementSnapshots) != 1)) {
+		return nil, fmt.Errorf("invalid transfer-only cleanup intent")
+	}
 	switch tombstone.Phase {
 	case queueDeletionPrepared,
 		queueDeletionCleanupStarted,
@@ -135,6 +148,26 @@ func decodeQueueDeletionTombstone(
 			return nil, fmt.Errorf("decode placement snapshot %d: %w", i, err)
 		}
 	}
+	if tombstone.PlacementScope == QueuePlacementScopeTransferOnly && len(tombstone.PlacementSnapshots) == 1 {
+		active, err := decodeQueuedEntry(key, tombstone.PlacementSnapshots[0])
+		if err != nil {
+			return nil, err
+		}
+		if !FailedUncachedHandoff(entry) || !FailedUncachedHandoff(active) || len(active.Providers) != 1 {
+			return nil, fmt.Errorf("invalid transfer placement proof")
+		}
+		want, err := handoffFingerprint(entry)
+		if err != nil {
+			return nil, err
+		}
+		got, err := handoffFingerprint(active)
+		if err != nil {
+			return nil, err
+		}
+		if string(want) != string(got) {
+			return nil, fmt.Errorf("transfer snapshot does not match authorized queue incarnation/placement")
+		}
+	}
 	return &tombstone, nil
 }
 
@@ -168,6 +201,7 @@ func queueDeletionIntentFromTombstone(
 		Phase:                       string(tombstone.Phase),
 		Entry:                       entry,
 		PlacementEntries:            placementEntries,
+		PlacementScope:              tombstone.PlacementScope,
 		PlacementCleanupPending:     tombstone.PlacementCleanupPending,
 		UnrecoverableCleanupPending: tombstone.UnrecoverableCleanupPending,
 		PreserveFiles:               tombstone.PreserveFiles,
@@ -250,6 +284,7 @@ func (s *Storage) PrepareQueuedDeletion(
 		placementCleanup,
 		false,
 		false,
+		QueuePlacementScopeAll,
 		placementSnapshots...,
 	)
 }
@@ -259,7 +294,13 @@ func (s *Storage) PrepareQueuedDeletion(
 func (s *Storage) PrepareQueuedDeletionPreservingFiles(
 	infohash string,
 ) (*QueueDeletionIntent, error) {
-	return s.prepareQueuedDeletion(infohash, false, false, true)
+	return s.prepareQueuedDeletion(infohash, false, false, true, QueuePlacementScopeAll)
+}
+
+// PrepareQBitQueuedDeletion classifies the final drained queue incarnation under
+// the storage lock. Routine removal never authorizes provider/main destruction.
+func (s *Storage) PrepareQBitQueuedDeletion(infohash string, deleteFiles bool) (*QueueDeletionIntent, error) {
+	return s.prepareQueuedDeletion(infohash, false, false, !deleteFiles, QueuePlacementScopeTransferOnly)
 }
 
 func (s *Storage) prepareQueuedDeletion(
@@ -267,6 +308,7 @@ func (s *Storage) prepareQueuedDeletion(
 	placementCleanup bool,
 	unrecoverableCleanup bool,
 	preserveFiles bool,
+	scope string,
 	placementSnapshots ...*Entry,
 ) (*QueueDeletionIntent, error) {
 	key := normalizeMainEntryKey(infohash)
@@ -285,6 +327,12 @@ func (s *Storage) prepareQueuedDeletion(
 		return nil, err
 	}
 	if found {
+		if tombstone.PlacementScope == QueuePlacementScopeTransferOnly {
+			return queueDeletionIntentFromTombstone(key, tombstone)
+		}
+		if scope == QueuePlacementScopeTransferOnly {
+			return nil, fmt.Errorf("qbit cleanup cannot resume legacy destructive intent")
+		}
 		state.queueDeleting = true
 		changed := false
 		if placementCleanup && !tombstone.PlacementCleanupPending {
@@ -336,6 +384,17 @@ func (s *Storage) prepareQueuedDeletion(
 			return nil, fmt.Errorf("sync queued entry incarnation: %w", err)
 		}
 	}
+	if scope == QueuePlacementScopeTransferOnly && !preserveFiles {
+		active, err := s.authorizedTransferSnapshot(entry)
+		if err != nil {
+			return nil, err
+		}
+		placementCleanup = active != nil
+		placementSnapshots = nil
+		if active != nil {
+			placementSnapshots = []*Entry{active}
+		}
+	}
 	snapshot, err := marshalQueueDeletionSnapshot(key, entry)
 	if err != nil {
 		return nil, err
@@ -350,6 +409,7 @@ func (s *Storage) prepareQueuedDeletion(
 	}
 	tombstone = &queueDeletionTombstone{
 		Version:                     queueDeletionTombstoneVersion,
+		PlacementScope:              scope,
 		Phase:                       queueDeletionPrepared,
 		QueueIncarnation:            entry.QueueIncarnation,
 		Snapshot:                    snapshot,
@@ -592,6 +652,12 @@ func (s *Storage) CompleteQueuedDeletion(
 		return fmt.Errorf("queue deletion row still exists")
 	} else if !IsQueuedEntryNotFound(err) {
 		return fmt.Errorf("verify retired queue deletion row: %w", err)
+	}
+	if err := s.storageState.Delete(handoffAuthorizationPrefix + key); err != nil && !hybrid.IsNotFound(err) {
+		return err
+	}
+	if err := s.storageState.Sync(); err != nil {
+		return err
 	}
 	if err := s.queueTombstones.Delete(key); err != nil &&
 		!hybrid.IsNotFound(err) {

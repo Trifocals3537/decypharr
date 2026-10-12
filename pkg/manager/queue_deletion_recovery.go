@@ -26,6 +26,17 @@ func (m *Manager) recoverQueuedDeletions() (residual error, fatal error) {
 
 	var residuals []error
 	var fatals []error
+	adminEntries, err := store.MainDeletionPlacementIntents()
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range adminEntries {
+		if err := m.RemoveTorrentPlacements(entry); err != nil {
+			residuals = append(residuals, fmt.Errorf("resume administrative main placement cleanup %s: %w", entry.InfoHash, err))
+		} else if err := store.CompleteMainDeletionPlacements(entry.InfoHash); err != nil {
+			residuals = append(residuals, err)
+		}
+	}
 	for _, intent := range intents {
 		if intent == nil || intent.Entry == nil {
 			fatals = append(fatals, fmt.Errorf("invalid nil queue deletion intent"))
@@ -67,16 +78,30 @@ func (m *Manager) recoverQueuedDeletions() (residual error, fatal error) {
 			)
 			entries = append(entries, intent.Entry)
 			entries = append(entries, intent.PlacementEntries...)
-			mainEntry, mainErr := store.Get(intent.InfoHash)
-			switch {
-			case mainErr == nil:
-				entries = append(entries, mainEntry)
-			case storage.IsEntryNotFound(mainErr):
-			default:
-				cleanupErrs = append(cleanupErrs, fmt.Errorf(
-					"load main entry for recovered placement cleanup: %w",
-					mainErr,
-				))
+			var mainErr error
+			if intent.PlacementScope == storage.QueuePlacementScopeTransferOnly {
+				entries = intent.PlacementEntries
+				for _, entry := range entries {
+					if err := store.ReserveTransferCleanup(entry); err != nil {
+						mainErr = err
+					}
+				}
+			} else {
+				mainEntry, err := store.Get(intent.InfoHash)
+				mainErr = err
+				switch {
+				case mainErr == nil:
+					entries = append(entries, mainEntry)
+				case storage.IsEntryNotFound(mainErr):
+				default:
+					cleanupErrs = append(cleanupErrs, fmt.Errorf(
+						"load main entry for recovered placement cleanup: %w",
+						mainErr,
+					))
+				}
+			}
+			if intent.PlacementScope == storage.QueuePlacementScopeTransferOnly && mainErr != nil {
+				cleanupErrs = append(cleanupErrs, mainErr)
 			}
 			if mainErr == nil || storage.IsEntryNotFound(mainErr) {
 				if err := m.RemoveTorrentPlacements(entries...); err != nil {

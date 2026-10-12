@@ -179,13 +179,20 @@ func (a *Arr) GetQueueCtx(ctx context.Context) ([]QueueSchema, error) {
 // not prove download-client ownership; automated uncached handoff uses the
 // endpoint-checked variant below.
 func (a *Arr) BlocklistAndResearchDownloadCtx(ctx context.Context, downloadID string) (bool, error) {
-	return a.blocklistAndResearchDownloadCtx(ctx, downloadID, "")
+	return a.blocklistAndResearchDownloadCtx(ctx, downloadID, "", nil)
 }
 
 // BlocklistAndResearchDownloadForEndpointCtx additionally requires the queue
 // item to belong to the qBittorrent client that submitted the download. The
 // endpoint is the Host authority seen on the authenticated add request.
 func (a *Arr) BlocklistAndResearchDownloadForEndpointCtx(ctx context.Context, downloadID, endpoint string) (bool, error) {
+	return a.BlocklistAndResearchDownloadForEndpointBeforeDeleteCtx(ctx, downloadID, endpoint, nil)
+}
+
+// BlocklistAndResearchDownloadForEndpointBeforeDeleteCtx runs beforeDelete only
+// after unique client and queue ownership validation, before Arr can synchronously
+// call back into the download client. A persistence failure prevents Arr DELETE.
+func (a *Arr) BlocklistAndResearchDownloadForEndpointBeforeDeleteCtx(ctx context.Context, downloadID, endpoint string, beforeDelete func() error) (bool, error) {
 	if strings.TrimSpace(endpoint) == "" {
 		return false, fmt.Errorf("submitting qBittorrent endpoint is required")
 	}
@@ -193,7 +200,7 @@ func (a *Arr) BlocklistAndResearchDownloadForEndpointCtx(ctx context.Context, do
 	if err != nil {
 		return false, err
 	}
-	return a.blocklistAndResearchDownloadCtx(ctx, downloadID, clientName)
+	return a.blocklistAndResearchDownloadCtx(ctx, downloadID, clientName, beforeDelete)
 }
 
 type arrDownloadClient struct {
@@ -250,7 +257,7 @@ func (a *Arr) downloadClientForEndpointCtx(ctx context.Context, endpoint string)
 	return matched, nil
 }
 
-func (a *Arr) blocklistAndResearchDownloadCtx(ctx context.Context, downloadID, clientName string) (bool, error) {
+func (a *Arr) blocklistAndResearchDownloadCtx(ctx context.Context, downloadID, clientName string, beforeDelete func() error) (bool, error) {
 	downloadID = strings.TrimSpace(downloadID)
 	if downloadID == "" {
 		return false, fmt.Errorf("download ID is required")
@@ -283,6 +290,11 @@ func (a *Arr) blocklistAndResearchDownloadCtx(ctx context.Context, downloadID, c
 			if matched[item.Id] && !strings.EqualFold(strings.TrimSpace(item.DownloadClient), clientName) {
 				return false, fmt.Errorf("Arr queue item is not owned by the submitting qBittorrent client")
 			}
+		}
+	}
+	if beforeDelete != nil {
+		if err := beforeDelete(); err != nil {
+			return false, err
 		}
 	}
 	if err := a.removeQueueItemsCtx(ctx, matched, true, false); err != nil {

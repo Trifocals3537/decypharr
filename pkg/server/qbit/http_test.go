@@ -176,7 +176,7 @@ func TestShouldDeleteTorrentFilesRequiresExplicitTrue(t *testing.T) {
 	}
 }
 
-func TestHandleTorrentsDeleteWithFilesUsesDurableManagerCleanup(t *testing.T) {
+func TestHandleTorrentsDeleteWithFilesPreservesMain(t *testing.T) {
 	previousConfigPath := config.GetMainPath()
 	configRoot := t.TempDir()
 	config.SetConfigPath(configRoot)
@@ -225,7 +225,7 @@ func TestHandleTorrentsDeleteWithFilesUsesDurableManagerCleanup(t *testing.T) {
 	if _, err := m.Queue().GetTorrent(entry.InfoHash); !storage.IsQueuedEntryNotFound(err) {
 		t.Fatalf("queue entry remained after delete: %v", err)
 	}
-	if _, err := m.GetEntry(entry.InfoHash); !storage.IsEntryNotFound(err) {
-		t.Fatalf("main entry remained after delete: %v", err)
+	if _, err := m.GetEntry(entry.InfoHash); err != nil {
+		t.Fatalf("routine cleanup lost main entry: %v", err)
 	}
 }

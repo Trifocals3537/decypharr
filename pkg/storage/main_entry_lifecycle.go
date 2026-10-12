@@ -493,6 +493,8 @@ type mainEntryTombstone struct {
 	Phase            mainEntryTombstonePhase `json:"phase"`
 	AbsentProviders  []string                `json:"absent_providers,omitempty"`
 	QueueIncarnation string                  `json:"queue_incarnation,omitempty"`
+	// Separate administrative obligation; never folded into a client queue intent.
+	PlacementSnapshot []byte `json:"placement_snapshot,omitempty"`
 }
 
 func (s *Storage) loadMainEntryTombstone(key string) (*mainEntryTombstone, bool, error) {
@@ -568,11 +570,20 @@ func (s *Storage) persistMainEntryTombstone(
 	if phase == mainEntryTombstoneDeleting {
 		queueIncarnation = ""
 	}
+	previous, _, err := s.loadMainEntryTombstone(key)
+	if err != nil {
+		return err
+	}
+	var placementSnapshot []byte
+	if previous != nil {
+		placementSnapshot = previous.PlacementSnapshot
+	}
 	data, err := json.Marshal(mainEntryTombstone{
-		Version:          mainEntryTombstoneVersion,
-		Phase:            phase,
-		AbsentProviders:  names,
-		QueueIncarnation: queueIncarnation,
+		Version:           mainEntryTombstoneVersion,
+		Phase:             phase,
+		AbsentProviders:   names,
+		QueueIncarnation:  queueIncarnation,
+		PlacementSnapshot: placementSnapshot,
 	})
 	if err != nil {
 		return fmt.Errorf("encode main entry tombstone: %w", err)
@@ -581,7 +592,14 @@ func (s *Storage) persistMainEntryTombstone(
 }
 
 func (s *Storage) clearMainEntryTombstone(key string) error {
-	err := s.entryTombstones.Delete(normalizeMainEntryKey(key))
+	tombstone, _, err := s.loadMainEntryTombstone(key)
+	if err != nil {
+		return err
+	}
+	if tombstone != nil && len(tombstone.PlacementSnapshot) != 0 {
+		return fmt.Errorf("main provider cleanup remains pending")
+	}
+	err = s.entryTombstones.Delete(normalizeMainEntryKey(key))
 	if err != nil && !hybrid.IsNotFound(err) {
 		return err
 	}
@@ -738,8 +756,9 @@ func (s *Storage) recoverMainEntryTombstones() error {
 		case mainEntryTombstoneDeleting:
 			if !rowExists {
 				data, err := json.Marshal(mainEntryTombstone{
-					Version: mainEntryTombstoneVersion,
-					Phase:   mainEntryTombstoneRetired,
+					Version:           mainEntryTombstoneVersion,
+					Phase:             mainEntryTombstoneRetired,
+					PlacementSnapshot: candidate.tombstone.PlacementSnapshot,
 				})
 				if err != nil {
 					return err

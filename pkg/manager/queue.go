@@ -213,6 +213,15 @@ func (q *Queue) deleteWithResultAndSnapshotsOptions(
 	deleteFiles bool,
 	placementSnapshots ...*storage.Entry,
 ) (deleted bool, err error) {
+	return q.deleteWithPreparation(infohash, cleanup, deleteFiles, func() (*storage.QueueDeletionIntent, error) {
+		if deleteFiles {
+			return q.storage.PrepareQueuedDeletion(infohash, cleanup != nil, placementSnapshots...)
+		}
+		return q.storage.PrepareQueuedDeletionPreservingFiles(infohash)
+	})
+}
+
+func (q *Queue) deleteWithPreparation(infohash string, cleanup func(*storage.Entry) error, deleteFiles bool, prepare func() (*storage.QueueDeletionIntent, error), beforeFiles ...func() error) (deleted bool, err error) {
 	deletion, err := q.lifecycle.beginDelete(infohash)
 	if err != nil {
 		return false, err
@@ -240,16 +249,7 @@ func (q *Queue) deleteWithResultAndSnapshotsOptions(
 	// Snapshot and sync the exact final incarnation only after all work has
 	// drained. From this point onward every queue read/update/add fails closed,
 	// and restart recovery can finish without resurrecting this job.
-	var intent *storage.QueueDeletionIntent
-	if deleteFiles {
-		intent, err = q.storage.PrepareQueuedDeletion(
-			infohash,
-			cleanup != nil,
-			placementSnapshots...,
-		)
-	} else {
-		intent, err = q.storage.PrepareQueuedDeletionPreservingFiles(infohash)
-	}
+	intent, err := prepare()
 	if err != nil {
 		if storage.IsQueuedEntryNotFound(err) {
 			deleteSucceeded = true
@@ -276,13 +276,31 @@ func (q *Queue) deleteWithResultAndSnapshotsOptions(
 				intent.InfoHash,
 			)
 		}
-		if err := cleanup(intent.Entry); err != nil {
-			return false, err
+		entries := []*storage.Entry{intent.Entry}
+		if intent.PlacementScope == storage.QueuePlacementScopeTransferOnly {
+			entries = intent.PlacementEntries
+		}
+		for _, entry := range entries {
+			if intent.PlacementScope == storage.QueuePlacementScopeTransferOnly {
+				if err := q.storage.ReserveTransferCleanup(entry); err != nil {
+					return false, err
+				}
+			}
+			if err := cleanup(entry); err != nil {
+				return false, err
+			}
 		}
 		if err := q.storage.MarkQueuedDeletionPlacementsClean(
 			intent.InfoHash,
 			intent.QueueIncarnation,
 		); err != nil {
+			return false, err
+		}
+	}
+	// Independent administrative main obligations run even for benign client
+	// intents, without widening their immutable provider scope or PreserveFiles.
+	for _, finish := range beforeFiles {
+		if err := finish(); err != nil {
 			return false, err
 		}
 	}

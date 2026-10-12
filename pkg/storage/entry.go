@@ -93,6 +93,13 @@ func (s *Storage) AddOrUpdate(entry *Entry) error {
 	if state.deleting {
 		return fmt.Errorf("%w: %s", ErrEntryDeleting, ref.key)
 	}
+	tombstone, _, err := s.loadMainEntryTombstone(ref.key)
+	if err != nil {
+		return err
+	}
+	if tombstone != nil && len(tombstone.PlacementSnapshot) != 0 {
+		return fmt.Errorf("%w: administrative provider cleanup pending", ErrEntryDeleting)
+	}
 	exists := s.entries.Exists(entry.InfoHash)
 	wasUnbound := entry.MainGeneration == 0
 	if entry.MainGeneration == 0 {
@@ -184,6 +191,11 @@ func (s *Storage) AddOrUpdate(entry *Entry) error {
 }
 
 func (s *Storage) addOrUpdateMainRaw(entry *Entry) error {
+	s.placementPublicationMu.Lock()
+	defer s.placementPublicationMu.Unlock()
+	if err := s.validateMainPlacementPublication(entry); err != nil {
+		return err
+	}
 	entry.UpdatedAt = time.Now()
 
 	var previous *Entry
@@ -870,6 +882,15 @@ func (s *Storage) deleteMainRaw(entry *Entry) error {
 }
 
 func (s *Storage) rollbackMainEntryTombstone(key string) error {
+	tombstone, _, err := s.loadMainEntryTombstone(key)
+	if err != nil {
+		return err
+	}
+	if tombstone != nil && len(tombstone.PlacementSnapshot) != 0 {
+		// Reopen same-process retries, but retain the durable independent admin
+		// obligation. Startup still retires the main row and resumes providers.
+		return s.entryTombstones.Sync()
+	}
 	if err := s.clearMainEntryTombstone(key); err != nil {
 		return fmt.Errorf("rollback main entry tombstone: %w", err)
 	}
@@ -1363,6 +1384,9 @@ func (s *Storage) writeQueue(entry *Entry, requireExisting bool) error {
 }
 
 func (s *Storage) writeQueueRaw(entry *Entry, requireExisting bool) error {
+	if err := s.revokeChangedHandoffAuthorization(entry); err != nil {
+		return fmt.Errorf("revoke changed handoff authorization: %w", err)
+	}
 	entry.UpdatedAt = time.Now()
 
 	pb := EntryToProto(entry)
@@ -1432,7 +1456,7 @@ func (s *Storage) getQueuedRaw(infohash string) (*Entry, error) {
 // DeleteQueued removes a queued entry
 func (s *Storage) DeleteQueued(infohash string, cleanup func(*Entry) error) error {
 	key := normalizeMainEntryKey(infohash)
-	intent, err := s.prepareQueuedDeletion(key, false, cleanup != nil, false)
+	intent, err := s.prepareQueuedDeletion(key, false, cleanup != nil, false, QueuePlacementScopeAll)
 	if err != nil {
 		return err
 	}

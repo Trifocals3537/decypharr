@@ -12,9 +12,10 @@
   "dependencies": {
     "@astrojs/starlight": "0.41.4",
     "astro": "7.3.2",
-    "sharp": "0.35.4"
+    "sharp": "0.35.5"
   },
   "overrides": {
-    "devalue": "5.9.4"
+    "devalue": "5.9.4",
+    "postcss-nested": "7.0.2"
   }
 }

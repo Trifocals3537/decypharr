@@ -1,6 +1,6 @@
 module github.com/Trifocals3537/tessarr
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/Tensai75/nzbparser v0.1.0

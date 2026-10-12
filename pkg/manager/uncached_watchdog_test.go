@@ -11,8 +11,10 @@ import (
 
 	"github.com/Trifocals3537/tessarr/internal/config"
 	"github.com/Trifocals3537/tessarr/pkg/arr"
+	debrid "github.com/Trifocals3537/tessarr/pkg/debrid/common"
 	debridTypes "github.com/Trifocals3537/tessarr/pkg/debrid/types"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 )
 
@@ -506,6 +508,7 @@ func TestQueuedUncachedFreshProgressCancelsHandoff(t *testing.T) {
 }
 
 func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
+	var manager *Manager
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -517,6 +520,11 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 			_, _ = w.Write([]byte(`{"page":1,"pageSize":200,"totalRecords":1,"records":[{"id":17,"downloadId":"ABC123","protocol":"torrent","downloadClient":"Tessarr"}]}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v3/queue/bulk":
 			deletes.Add(1)
+			if err := manager.DeleteQBitQueueEntry("abc123", true); err != nil {
+				t.Errorf("synchronous qbit callback: %v", err)
+				w.WriteHeader(500)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
@@ -526,23 +534,35 @@ func TestHandoffStalledUncachedTargetsOwningArr(t *testing.T) {
 
 	store := newLifecycleTestStorage(t)
 	queue := newLifecycleTestQueue(store, newEntryLifecycle())
-	entry := &storage.Entry{
-		InfoHash:         "abc123",
-		Name:             "release",
-		Protocol:         config.ProtocolTorrent,
-		Category:         "sonarr",
-		State:            storage.EntryStateStalledDL,
-		DownloadUncached: true,
-		ClientEndpoint:   "tessarr.example:8282",
-	}
-	if err := queue.Add(entry); err != nil {
+	entry, _ := addLifecycleTestEntry(t, queue, "abc123")
+	entry.Category = "sonarr"
+	entry.State = storage.EntryStateStalledDL
+	entry.DownloadUncached = true
+	entry.ClientEndpoint = "tessarr.example:8282"
+	entry.HandoffReason = "terminal"
+	entry.ActiveProvider = "fake"
+	entry.Providers = map[string]*storage.ProviderEntry{"fake": {Provider: "fake", ID: "active"}}
+	if err := queue.Update(entry); err != nil {
 		t.Fatal(err)
 	}
 	arrs := arr.NewStorage()
 	arrs.AddOrUpdate(arr.New("sonarr", server.URL, "token", false, nil, "", "manual"))
-	m := &Manager{queue: queue, arr: arrs, logger: zerolog.Nop()}
+	clients := xsync.NewMap[string, debrid.Client]()
+	var cancellations atomic.Int32
+	clients.Store("fake", &placementDeleteTestProvider{name: "fake", delete: func(id string) error {
+		if id != "active" {
+			t.Errorf("wrong placement %s", id)
+		}
+		cancellations.Add(1)
+		return nil
+	}})
+	m := &Manager{storage: store, queue: queue, arr: arrs, clients: clients, logger: zerolog.Nop()}
+	manager = m
 	if err := m.handoffUncachedFailures(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if cancellations.Load() != 1 {
+		t.Fatalf("provider cancellation=%d", cancellations.Load())
 	}
 	if deletes.Load() != 1 {
 		t.Fatalf("Arr delete requests = %d, want 1", deletes.Load())

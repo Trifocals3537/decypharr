@@ -47,16 +47,20 @@ type Storage struct {
 	dir              string
 	logger           zerolog.Logger
 
-	entryItemsMu        sync.Mutex
-	entryItemsDirty     bool
-	startupComplete     bool
-	entryHealthMu       sync.Mutex
-	healthCountsMu      sync.Mutex
-	healthCounts        map[HealthStatus]int
-	healthCountsBuiltAt time.Time
-	migrationCleanupMu  sync.Mutex
-	torrentSourcesMu    sync.Mutex
-	torrentSourceBytes  int64
+	// Lock order: per-key lifecycle -> placementPublicationMu -> entryItemsMu
+	// -> hybrid store locks. Never take a lifecycle lock while holding this
+	// mutex, and never retain it across provider/network work.
+	placementPublicationMu sync.Mutex
+	entryItemsMu           sync.Mutex
+	entryItemsDirty        bool
+	startupComplete        bool
+	entryHealthMu          sync.Mutex
+	healthCountsMu         sync.Mutex
+	healthCounts           map[HealthStatus]int
+	healthCountsBuiltAt    time.Time
+	migrationCleanupMu     sync.Mutex
+	torrentSourcesMu       sync.Mutex
+	torrentSourceBytes     int64
 }
 
 func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hybrid.Store, error) {

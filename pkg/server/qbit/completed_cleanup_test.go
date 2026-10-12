@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Trifocals3537/tessarr/internal/config"
+	"github.com/Trifocals3537/tessarr/internal/logger"
 	"github.com/Trifocals3537/tessarr/pkg/manager"
 	"github.com/Trifocals3537/tessarr/pkg/storage"
 )
@@ -23,6 +24,9 @@ func TestQBitDeleteDoesNotSwallowUntypedNotFoundErrors(t *testing.T) {
 	t.Cleanup(func() {
 		if err := m.Stop(); err != nil {
 			t.Error(err)
+		}
+		if err := logger.Close(); err != nil {
+			t.Errorf("close process logger: %v", err)
 		}
 	})
 	e := &storage.Entry{InfoHash: "unsafe-cleanup", Name: "release", Protocol: config.ProtocolTorrent, SavePath: filepath.Join(t.TempDir(), "not found")}
@@ -54,6 +58,9 @@ func TestCompletedDownloadCleanupPreservesPersistentEntry(t *testing.T) {
 	t.Cleanup(func() {
 		if err := m.Stop(); err != nil {
 			t.Error(err)
+		}
+		if err := logger.Close(); err != nil {
+			t.Errorf("close process logger: %v", err)
 		}
 	})
 	payload := filepath.Join(t.TempDir(), "episode.mkv")

@@ -16,5 +16,8 @@
     "daisyui": "^5.4.2",
     "tailwindcss": "4.3.1",
     "terser": "^5.24.0"
+  },
+  "overrides": {
+    "@parcel/watcher": "2.6.0"
   }
 }

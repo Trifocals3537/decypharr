@@ -33,10 +33,16 @@ var legacyStoreNames = []string{"repair_jobs", "repair_keys"}
 
 // Storage handles persistence using HybridStore
 type Storage struct {
-	entries          *hybrid.Store
-	queue            *hybrid.Store
-	entryItems       *hybrid.Store
-	storageState     *hybrid.Store
+	entries      *hybrid.Store
+	queue        *hybrid.Store
+	entryItems   *hybrid.Store
+	storageState *hybrid.Store
+	// handoffSyncForTest injects durability failures; production leaves it nil.
+	handoffSyncForTest     func() error
+	mainCleanupSyncForTest func() error
+	// Per-key durability latches survive lifecycle-state eviction. Operations
+	// on each key are serialized by its lifecycle lock.
+	handoffPending   sync.Map
 	repairState      *hybrid.Store
 	repairRuns       *hybrid.Store
 	repairRecoveries *hybrid.Store

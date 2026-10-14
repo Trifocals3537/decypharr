@@ -328,6 +328,12 @@ func (s *Storage) prepareQueuedDeletion(
 	}
 	if found {
 		if tombstone.PlacementScope == QueuePlacementScopeTransferOnly {
+			if scope == QueuePlacementScopeAll && placementCleanup && len(placementSnapshots) == 0 {
+				return nil, fmt.Errorf("queue-only administrative cleanup cannot adopt immutable client intent; finish client cleanup and reconcile provider placements manually")
+			}
+			if scope == QueuePlacementScopeTransferOnly && preserveFiles && !tombstone.PreserveFiles {
+				return nil, fmt.Errorf("preserving retry cannot resume pending file deletion; retry original deleteFiles=true operation")
+			}
 			return queueDeletionIntentFromTombstone(key, tombstone)
 		}
 		if scope == QueuePlacementScopeTransferOnly {
@@ -606,10 +612,14 @@ func (s *Storage) RetireQueuedDeletionRow(
 }
 
 // CompleteQueuedDeletion clears an intent only after its row is durably absent
-// and every representable cleanup obligation has been acknowledged.
+// and every representable cleanup obligation has been acknowledged. Optional
+// localCleanup callbacks run under the per-hash lifecycle lock, after the admin
+// durability gate. They must only perform local file work: never reenter Storage
+// or make provider/network calls.
 func (s *Storage) CompleteQueuedDeletion(
 	infohash string,
 	incarnation string,
+	localCleanup ...func() error,
 ) error {
 	key := normalizeMainEntryKey(infohash)
 	ref, err := s.acquireMainEntryState(key)
@@ -653,12 +663,32 @@ func (s *Storage) CompleteQueuedDeletion(
 	} else if !IsQueuedEntryNotFound(err) {
 		return fmt.Errorf("verify retired queue deletion row: %w", err)
 	}
+	// A cleared in-memory admin snapshot is not proof of durable completion.
+	// Sync before consulting it, under the same key lock used to install it.
+	// Keep that lock through local cleanup and intent completion so a concurrent
+	// administrator cannot install an obligation in the check/use interval.
+	if err := s.syncMainCleanupState(); err != nil {
+		return err
+	}
+	admin, adminFound, err := s.loadMainEntryTombstone(key)
+	if err != nil {
+		return err
+	}
+	if adminFound && len(admin.PlacementSnapshot) != 0 {
+		return fmt.Errorf("queue deletion awaits administrative placement cleanup")
+	}
+	for _, cleanup := range localCleanup {
+		if err := cleanup(); err != nil {
+			return err
+		}
+	}
 	if err := s.storageState.Delete(handoffAuthorizationPrefix + key); err != nil && !hybrid.IsNotFound(err) {
 		return err
 	}
-	if err := s.storageState.Sync(); err != nil {
+	if err := s.syncHandoffState(); err != nil {
 		return err
 	}
+	s.handoffPending.Delete(handoffAuthorizationPrefix + key)
 	if err := s.queueTombstones.Delete(key); err != nil &&
 		!hybrid.IsNotFound(err) {
 		return fmt.Errorf("clear queue deletion intent: %w", err)
